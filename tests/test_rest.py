@@ -164,6 +164,18 @@ class TlsFailureTest(unittest.TestCase):
         )
         self.assertTrue(is_tls_failure(response))
 
+    def test_la_forme_reellement_observee_en_lab_est_classee(self):
+        # Mesure : `urlopen` n'a pas laisse remonter `SSLCertVerificationError` mais
+        # une `URLError` qui l'enveloppe. C'est cette chaine-la, relevee sur un socle
+        # a certificat auto-signe, que le classement doit reconnaitre.
+        response = RestResponse(
+            0, b"",
+            "transport:URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: IP address mismatch, certificate is not "
+            "valid for '203.0.113.1'. (_ssl.c:1161)>",
+        )
+        self.assertTrue(is_tls_failure(response))
+
     def test_un_echec_de_transport_non_tls_nest_pas_classe_tls(self):
         response = RestResponse(
             0, b"", "transport:ConnectionRefusedError: [Errno 111] Connection refused"
