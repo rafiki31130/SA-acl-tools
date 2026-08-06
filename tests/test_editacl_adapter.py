@@ -300,5 +300,64 @@ class CollisionDeNomsTest(unittest.TestCase):
         self.fail("methode stream() introuvable")
 
 
+class AvertissementDivergenceRuntimeTest(unittest.TestCase):
+    """A-2 — l'operateur doit lire, au niveau de la recherche, ce que le jeton
+    `acl_warning` ne peut pas dire.
+
+    `acl_warning` est un jeu de jetons concatenes par `;` : la phrase qui explique
+    qu'un `HTTP 500` de persistance laisse une vue runtime divergente et hors de portee
+    de `editacl_rollback` n'y tient pas. Elle est emise **une fois** par execution, par
+    l'enveloppe.
+    """
+
+    def setUp(self):
+        from acltools.model import EventResult
+        from acltools.pipeline import RUNTIME_DIVERGENCE_WARNING
+
+        self.module = _charger_editacl()
+        self.commande = self.module.EditAclCommand()
+        self.commande._ready = True
+
+        class _ProcesseurQuiDiverge(object):
+            def process(self, event):
+                return EventResult(
+                    status="error",
+                    title="un_objet",
+                    endpoint="/servicesNS/nobody/mon_app/saved/searches/un_objet",
+                    http_code=500,
+                    error="post_failed:500:Could not flush changes to disk",
+                    warnings=(RUNTIME_DIVERGENCE_WARNING,),
+                )
+
+        class _ProcesseurNominal(object):
+            def process(self, event):
+                return EventResult(status="updated", title="un_objet", http_code=200)
+
+        self.divergent = _ProcesseurQuiDiverge()
+        self.nominal = _ProcesseurNominal()
+
+    def _lot(self, processeur, taille):
+        self.commande._processor = processeur
+        return list(
+            self.commande.stream([{"title": "un_objet"} for _ in range(taille)])
+        )
+
+    def test_le_message_est_emis_et_nomme_les_deux_faits(self):
+        self._lot(self.divergent, 1)
+        self.assertEqual(len(self.commande.warnings), 1)
+        texte = self.commande.warnings[0].lower()
+        self.assertIn("runtime", texte)
+        self.assertIn("disque", texte)
+        self.assertIn("editacl_rollback", texte)
+
+    def test_le_message_nest_emis_quune_fois_par_execution(self):
+        self._lot(self.divergent, 5)
+        self.assertEqual(len(self.commande.warnings), 1)
+
+    def test_aucun_message_sans_divergence(self):
+        self._lot(self.nominal, 3)
+        self.assertEqual(self.commande.warnings, [])
+
+
 if __name__ == "__main__":
     unittest.main()

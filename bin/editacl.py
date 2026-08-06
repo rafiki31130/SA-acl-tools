@@ -46,7 +46,11 @@ from acltools.journal import JournalWriter, journal_path  # noqa: E402
 from acltools.mapping import load_mapping  # noqa: E402
 from acltools.model import EventInput, RunContext  # noqa: E402
 from acltools.normalize import serialize_roles  # noqa: E402
-from acltools.pipeline import EventProcessor  # noqa: E402
+from acltools.pipeline import (  # noqa: E402
+    RUNTIME_DIVERGENCE_MESSAGE,
+    RUNTIME_DIVERGENCE_WARNING,
+    EventProcessor,
+)
 from acltools.preflight import (  # noqa: E402
     AppStateCache,
     check_capability,
@@ -162,6 +166,10 @@ class EditAclCommand(StreamingCommand):
         self._journal_writer = None
         self._params = None
         self._ready = False
+        # Le message de divergence runtime/disque (§5.6) est emis **une fois** par
+        # execution : un lot dont le systeme de fichiers refuse toute ecriture le
+        # produirait sinon a chaque objet, et le noierait.
+        self._runtime_divergence_signaled = False
 
     # -- cablage ----------------------------------------------------------- #
 
@@ -291,6 +299,13 @@ class EditAclCommand(StreamingCommand):
             raw_sharing=record.get("eai:acl.sharing"),
         )
         result = self._processor.process(event)
+
+        if (
+            RUNTIME_DIVERGENCE_WARNING in result.warnings
+            and not self._runtime_divergence_signaled
+        ):
+            self._runtime_divergence_signaled = True
+            self.write_warning(RUNTIME_DIVERGENCE_MESSAGE)
 
         output = dict(record)
         output["acl_status"] = result.status

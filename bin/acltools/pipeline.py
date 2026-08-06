@@ -26,6 +26,28 @@ MAX_ERROR_LEN = 512
 #: enumere limitativement les erreurs fatales et ne l'y fait pas figurer.
 FORBIDDEN_APP = "system"
 
+#: Code HTTP d'un refus de persistance cote handler splunkd. Mesure en lab : le POST
+#: est refuse, la vue **runtime** de splunkd est neanmoins mutee, le disque reste
+#: intact.
+PERSISTENCE_FAILURE_CODE = 500
+
+#: Avertissement porte par `acl_warning` quand la persistance est refusee. La
+#: divergence est produite par la plateforme et la commande ne peut pas l'empecher ;
+#: elle doit la rendre **visible**.
+RUNTIME_DIVERGENCE_WARNING = "runtime_divergence_possible"
+
+#: Texte adresse a l'operateur au niveau de la recherche, emis une fois par execution.
+#: `acl_warning` est un jeu de jetons concatenes : la phrase ne peut pas y tenir.
+RUNTIME_DIVERGENCE_MESSAGE = (
+    "au moins un objet a ete refuse en HTTP 500 (persistance) : la vue runtime de "
+    "splunkd peut avoir ete mutee alors que le disque ne l'est pas, et c'est cette vue "
+    "que voient les utilisateurs, les recherches et les controles d'acces jusqu'au "
+    "prochain rechargement de configuration. Ces objets ne sont PAS couverts par "
+    "editacl_rollback, qui ne retient que les ecritures abouties : la remise en etat "
+    "passe par un rechargement de configuration ou un redemarrage du membre, pas par "
+    "la restauration."
+)
+
 
 def default_clock():
     """Horodatage ISO 8601 avec fuseau explicite et **millisecondes obligatoires**.
@@ -102,14 +124,15 @@ class _FailedPost(object):
     explicitement.
     """
 
-    __slots__ = ("before", "after", "status", "error", "http_code")
+    __slots__ = ("before", "after", "status", "error", "http_code", "warnings")
 
-    def __init__(self, before, after, status, error, http_code):
+    def __init__(self, before, after, status, error, http_code, warnings=()):
         self.before = before
         self.after = after
         self.status = status
         self.error = error
         self.http_code = http_code
+        self.warnings = tuple(warnings)
 
 
 class EventProcessor(object):
@@ -225,6 +248,8 @@ class EventProcessor(object):
             work.status = failed.status
             work.error = failed.error
             work.http_code = failed.http_code
+            for warning in failed.warnings:
+                work.warn(warning)
             work.warn("duplicate_post_suppressed")
             return
 
@@ -254,8 +279,23 @@ class EventProcessor(object):
                 "post_failed:%d:%s"
                 % (response.status, response.error or response.text())
             )
+            if response.status == PERSISTENCE_FAILURE_CODE:
+                # Un refus de persistance laisse la vue **runtime** de splunkd mutee
+                # alors que le disque est intact : la commande dit vrai vis-a-vis du
+                # disque et faux vis-a-vis de ce que voient les utilisateurs, les
+                # recherches et les controles d'acces. L'objet est de surcroit exclu du
+                # jeu de restauration — `editacl_rollback` ne retient que les `outcome`
+                # de statut `updated`, filtre correct au regard du disque et muet au
+                # regard de l'observable. La divergence est produite par la plateforme
+                # et n'est pas evitable ; elle doit etre visible.
+                work.warn(RUNTIME_DIVERGENCE_WARNING)
             self._failed[work.endpoint] = _FailedPost(
-                merged.before, merged.after, work.status, work.error, response.status
+                merged.before,
+                merged.after,
+                work.status,
+                work.error,
+                response.status,
+                tuple(work.warnings),
             )
 
     # -- etapes --------------------------------------------------------- #

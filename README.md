@@ -628,6 +628,48 @@ réinjection, `perms.read` figure dans `fields` mais le champ est absent de l'é
   fichier sur disque reste la voie de secours immédiate.
 - Il s'appuie sur la résolution par `eai:type`, `id` n'étant pas journalisé : **la
   couverture de la table conditionne directement la capacité de retour arrière.**
+- Il **ne couvre pas** un objet refusé en `HTTP 500` de persistance, dont l'état
+  observable a pourtant pu changer — voir ci-dessous. L'exclusion est correcte, la
+  remise en état passe par une autre voie.
+
+### Un `HTTP 500` de persistance ne veut pas dire « rien n'a changé »
+
+Il veut dire « rien n'a été **persisté** ». Mesuré : lorsque splunkd refuse le POST par
+
+```
+In handler '<famille>': Could not flush changes to disk: ... metadata/local.meta
+```
+
+le fichier `local.meta` est **intact** — empreinte inchangée — mais la **vue runtime**
+de splunkd a déjà été mutée. C'est cette vue que servent les GET, que voient les
+utilisateurs et les recherches, et sur laquelle portent les contrôles d'accès, jusqu'au
+prochain rechargement de configuration ou redémarrage du membre.
+
+La commande ne peut pas empêcher cette divergence : elle est produite par la
+plateforme. Elle la **signale** :
+
+- l'événement ressort en `acl_status = "error"`, `acl_http_code = 500`, le message
+  d'erreur de splunkd étant remonté intégralement dans `acl_error` — il nomme la cause
+  racine (permissions, disque plein, système de fichiers en lecture seule) ;
+- il porte `acl_warning = "runtime_divergence_possible"` ;
+- la recherche émet, **une fois par exécution**, un `MSG[WARN]` explicite.
+
+**La remise en état ne passe pas par `editacl_rollback`.** La macro ne retient que les
+lignes `outcome` de statut `updated` : elle exclut donc l'objet, et c'est correct au
+regard du disque — restaurer un objet que le disque n'a jamais vu changer serait une
+écriture de trop. Le levier de résorption est un **rechargement de configuration** de
+la famille concernée, qui réaligne le runtime sur le disque, lequel fait foi :
+
+```
+POST /servicesNS/nobody/<app>/admin/<famille>/_reload
+```
+
+à défaut, un redémarrage du membre. Traiter la cause racine du refus d'écriture
+**avant** de rejouer le lot.
+
+> **Non tranché.** Sur un cluster de search heads, un état runtime muté mais non
+> persisté se réplique-t-il vers les autres membres ? La question n'a pas pu être
+> observée sur une instance autonome.
 
 ---
 
@@ -918,6 +960,7 @@ son ajout ou sa disparition restent détectés.
 | **Détection du temps réel non encore éprouvée** | Le garde-fou repose sur `isRealTimeSearch`, avec repli sur les bornes temporelles. Si l'information n'est pas exposée, la commande émet un **avertissement** et poursuit | Ne pas invoquer `editacl` depuis une recherche temps réel ; `run_in_preview = false` et l'idempotence restent les deux premières lignes de défense |
 | **Aucune atomicité de lot** | Un arrêt en cours laisse un état partiel | Le journal caractérise intégralement l'état partiel |
 | **Aucune reprise sur le POST** | Un échec de transport après émission laisse une `intent` sans `outcome` | Contrôle croisé avec `splunkd_access.log` pour déterminer si l'écriture a eu lieu. Une reprise ne distinguerait pas « le POST n'est pas parti » de « le POST a abouti et la réponse s'est perdue » |
+| **`HTTP 500` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
 | **Réplication en cluster de search heads** | Chaque écriture déclenche une réplication d'objet de connaissance | Lots bornés par `max_objects`, déroulement hors fenêtre de forte activité. La commande sérialise ses appels et n'implémente **aucune** temporisation automatique |
 | **Restauration postérieure à l'indexation** | Le journal n'est interrogeable qu'après ingestion | Le fichier de l'exécution est auto-contenu et exploitable immédiatement |
 | **`app_disabled` coûte un appel REST par app distincte** | Latence marginale sur un lot multi-apps | Mémoïsé par app |

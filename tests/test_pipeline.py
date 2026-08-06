@@ -3,7 +3,11 @@
 import unittest
 
 from acltools.errors import MaxObjectsReached
-from acltools.pipeline import EventProcessor
+from acltools.pipeline import (
+    RUNTIME_DIVERGENCE_MESSAGE,
+    RUNTIME_DIVERGENCE_WARNING,
+    EventProcessor,
+)
 from acltools.rest import RestResponse
 
 from .helpers import (
@@ -395,6 +399,73 @@ class DeduplicationTest(unittest.TestCase):
         proc.process(make_event(write="w"))
         proc.process(make_event(write="w"))
         self.assertEqual(len(rest.gets()), 2)
+
+
+class DivergenceRuntimeDisqueTest(unittest.TestCase):
+    """A-2 — un `HTTP 500` de persistance ne signifie pas « rien n'a change ».
+
+    Il signifie « rien n'a ete **persiste** ». La vue runtime de splunkd peut avoir ete
+    mutee — mesure en lab — et c'est elle que voient les utilisateurs, les recherches et
+    les controles d'acces jusqu'au prochain rechargement de configuration. L'objet est
+    par ailleurs exclu du jeu de restauration, `editacl_rollback` ne retenant que les
+    `outcome` de statut `updated`.
+
+    La commande ne peut pas empecher la divergence : elle est produite par la
+    plateforme. Elle doit la rendre visible.
+    """
+
+    def _resultat(self, code, corps=b'{"messages":[{"type":"ERROR","text":"x"}]}'):
+        rest = FakeRest(
+            default_get=RestResponse(200, acl_body(write=("ancien_role",))),
+            default_post=RestResponse(code, corps),
+        )
+        proc = processor(rest, params=make_params(fields=("perms.write",)))
+        return proc.process(make_event(write="nouveau_role_admin"))
+
+    def test_un_refus_de_persistance_porte_lavertissement(self):
+        resultat = self._resultat(
+            500,
+            b'{"messages":[{"type":"ERROR","text":"Could not flush changes to '
+            b'disk"}]}',
+        )
+        self.assertEqual(resultat.status, "error")
+        self.assertEqual(resultat.http_code, 500)
+        self.assertIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
+
+    def test_un_refus_qui_nest_pas_de_persistance_ne_le_porte_pas(self):
+        """Le message ne doit pas devenir du bruit sur tout echec d'ecriture."""
+        for code in (400, 403, 404, 409):
+            with self.subTest(code=code):
+                resultat = self._resultat(code)
+                self.assertEqual(resultat.status, "error")
+                self.assertNotIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
+
+    def test_une_ecriture_aboutie_ne_le_porte_pas(self):
+        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
+        resultat = processor(
+            rest, params=make_params(fields=("perms.write",))
+        ).process(make_event(write="nouveau_role_admin"))
+        self.assertEqual(resultat.status, "updated")
+        self.assertNotIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
+
+    def test_le_message_operateur_nomme_les_deux_faits(self):
+        """Le jeton `acl_warning` est machine ; la phrase doit dire les deux choses."""
+        texte = RUNTIME_DIVERGENCE_MESSAGE.lower()
+        self.assertIn("runtime", texte)
+        self.assertIn("disque", texte)
+        self.assertIn("editacl_rollback", texte)
+        self.assertIn("rechargement de configuration", texte)
+
+    def test_le_doublon_dun_objet_diverge_conserve_lavertissement(self):
+        """La deduplication du §10.8 ne doit pas effacer l'information (A-7 + A-2)."""
+        rest = FakeRest(
+            default_get=RestResponse(200, acl_body(write=("ancien_role",))),
+            default_post=RestResponse(500, b'{"messages":[]}'),
+        )
+        proc = processor(rest, params=make_params(fields=("perms.write",)))
+        proc.process(make_event(write="nouveau_role_admin"))
+        second = proc.process(make_event(write="nouveau_role_admin"))
+        self.assertIn(RUNTIME_DIVERGENCE_WARNING, second.warnings)
 
 
 def rest_post_refuse():
