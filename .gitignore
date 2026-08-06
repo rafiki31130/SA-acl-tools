@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Override de la table de correspondance : cree par l'exploitant, jamais livre (D-5).
+lookups/acl_endpoint_map_override.csv
+
+# Configuration locale d'instance (verify_ssl, index de journal, ...).
+local/
+
+# Journaux produits a l'execution.
+*.log
