@@ -1,0 +1,20 @@
+# Visibilite de l'app et de ses objets (§7).
+#
+# L'app n'est pas exportee : ses objets restent confines a son contexte. La capability
+# `edit_acl_bulk` est attribuee hors de l'app, par la chaine de gestion des roles.
+#
+# La commande `editacl` est en revanche exportee a l'ensemble du systeme : sans cela
+# elle ne serait invocable que depuis le contexte de cette app, ce qui interdirait son
+# usage depuis une recherche ad hoc. Le controle d'acces effectif reste porte par la
+# capability, pas par cette declaration.
+
+[]
+access = read : [ * ], write : [ admin ]
+export = none
+
+[commands]
+export = system
+
+[commands/editacl]
+access = read : [ * ], write : [ admin ]
+export = system

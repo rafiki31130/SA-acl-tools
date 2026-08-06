@@ -1,0 +1,20 @@
+eai_type,handler_path
+# Exemple d'override de la table de correspondance (§6.3).
+#
+# Pour l'activer : copier ce fichier en `lookups/acl_endpoint_map_override.csv` dans
+# l'app installee, puis y decrire une correspondance par ligne. Le fichier reel n'est
+# JAMAIS livre dans l'archive (D-5) : une mise a jour de l'app ne peut donc pas
+# l'ecraser, puisqu'elle ne le contient pas.
+#
+# Il est charge APRES `bin/acl_endpoint_map.json` et le surcharge : une cle presente
+# dans les deux prend la valeur de ce fichier.
+#
+# `handler_path` doit valider le motif ^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$
+# — une ligne non conforme est ecartee et tracee dans le journal de diagnostic, jamais
+# utilisee. Aucune heuristique de derivation n'est appliquee (§6.2) : un type absent de
+# la table produit `acl_status=rejected`, `acl_error=unresolved_endpoint:<type>`.
+#
+# Les deux lignes ci-dessous sont commentees : ce fichier d'exemple ne doit rien
+# surcharger tel quel.
+#un-type-inconnu,data/ui/quelque-chose
+#un-autre-type,admin/quelque-chose-dautre

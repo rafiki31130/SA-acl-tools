@@ -1,3 +1,5 @@
 * text=auto eol=lf
-*.png binary
-*.gz binary
+
+# Dependances vendorisees : stockees octet pour octet, jamais converties.
+# Toute conversion de fin de ligne invaliderait bin/lib/MANIFEST.sha256 au clone.
+bin/lib/** -text
