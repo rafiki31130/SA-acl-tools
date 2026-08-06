@@ -475,6 +475,21 @@ Liste **limitative**. Toute autre erreur portant sur un objet donné est une err
 - atteinte de `max_objects` ;
 - fichier de journal non ouvrable alors que `journal=true` **et** `dryrun=false`.
 
+### Refus d'exécution en recherche temps réel
+
+Le garde-fou lit `isRealTimeSearch` sur `GET /services/search/jobs/<sid>`, avec repli
+sur l'inspection de `earliest_time` / `latest_time`.
+
+**La détection est éprouvée sur Splunk 9.4.6** — recherche soumise en `search_mode =
+realtime`, bornes `rt-60s` → `rt` : `isRealTimeSearch = True` est bien exposé, et
+l'exécution est refusée par erreur fatale. Le refus reste donc une erreur fatale, et
+non un avertissement.
+
+Elle n'est pas re-validée sur un autre socle. Si l'information n'était pas exposée et
+que le repli n'aboutissait pas, la commande émettrait un **avertissement** signalant
+que le garde-fou n'a pas pu s'appliquer, et poursuivrait — `run_in_preview = false` et
+l'idempotence restent les deux premières lignes de défense.
+
 ---
 
 ## Journal
@@ -957,7 +972,6 @@ son ajout ou sa disparition restent détectés.
 |---|---|---|
 | **Table établie sur 9.4.6** | Une nomenclature différente sur un autre socle produit des rejets, voire un endpoint valide mais faux | Re-validation sur le socle cible, **prérequis à tout usage réel** ; fichier d'override |
 | **Double troncature d'inventaire** | L'opérateur traite un sous-ensemble sans le moindre message | `admin_all_objects` + inventaire par endpoints natifs |
-| **Détection du temps réel non encore éprouvée** | Le garde-fou repose sur `isRealTimeSearch`, avec repli sur les bornes temporelles. Si l'information n'est pas exposée, la commande émet un **avertissement** et poursuit | Ne pas invoquer `editacl` depuis une recherche temps réel ; `run_in_preview = false` et l'idempotence restent les deux premières lignes de défense |
 | **Aucune atomicité de lot** | Un arrêt en cours laisse un état partiel | Le journal caractérise intégralement l'état partiel |
 | **Aucune reprise sur le POST** | Un échec de transport après émission laisse une `intent` sans `outcome` | Contrôle croisé avec `splunkd_access.log` pour déterminer si l'écriture a eu lieu. Une reprise ne distinguerait pas « le POST n'est pas parti » de « le POST a abouti et la réponse s'est perdue » |
 | **`HTTP 500` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
