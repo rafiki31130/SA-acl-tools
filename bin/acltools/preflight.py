@@ -10,6 +10,9 @@ from .endpoint import encode_namespace_segment
 from .errors import FatalCapabilityError, FatalConfigError
 from .merge import parse_fields
 from .model import Params
+# Import relatif d'un **predicat pur** : `preflight` continue de ne consommer qu'un
+# port `RestPort` et reste substituable sans socket. Voir `rest.is_tls_failure`.
+from .rest import TLS_REMEDIATION, is_tls_failure
 
 #: Capability dediee, declaree par `default/authorize.conf` (§7). Splunk n'offre pas de
 #: gating natif des commandes de recherche par capability : le controle est implemente
@@ -110,10 +113,21 @@ def check_capability(rest):
     response = rest.get_json("/services/authentication/current-context", None)
     document = _decode(response)
     if document is None:
+        # Le premier appel REST de l'execution est aussi celui sur lequel un socle a
+        # certificat auto-signe echoue. Sans designation explicite, l'operateur ne lit
+        # qu'un « HTTP 0 » sur un endpoint d'authentification et cherche du cote des
+        # droits, pas du certificat.
+        if is_tls_failure(response):
+            raise FatalCapabilityError(
+                "%s (detail : %s)" % (TLS_REMEDIATION, response.error)
+            )
         raise FatalCapabilityError(
             "controle d'habilitation impossible : reponse inexploitable de "
-            "/services/authentication/current-context (HTTP %s)"
-            % (getattr(response, "status", "?"),)
+            "/services/authentication/current-context (HTTP %s%s)"
+            % (
+                getattr(response, "status", "?"),
+                ", %s" % response.error if getattr(response, "error", None) else "",
+            )
         )
     try:
         content = document["entry"][0]["content"]

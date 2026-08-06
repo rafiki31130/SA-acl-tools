@@ -139,6 +139,43 @@ class CapabilityTest(unittest.TestCase):
         with self.assertRaises(FatalCapabilityError):
             check_capability(rest)
 
+    def test_un_echec_tls_designe_TLS_et_le_parametre_verify_ssl(self):
+        """`verify_ssl=true` sur un socle a certificat auto-signe echoue **ici**, sur le
+        premier appel REST de l'execution. Le message doit nommer la cause et le
+        parametre : sans cela l'operateur lit « HTTP 0 » sur un endpoint
+        d'authentification et cherche du cote des droits."""
+        rest = FakeRest(
+            json_responses={
+                self.PATH: RestResponse(
+                    0,
+                    b"",
+                    "transport:SSLCertVerificationError: [SSL: "
+                    "CERTIFICATE_VERIFY_FAILED] certificate verify failed: self "
+                    "signed certificate in certificate chain (_ssl.c:1006)",
+                )
+            }
+        )
+        with self.assertRaises(FatalCapabilityError) as raised:
+            check_capability(rest)
+        message = str(raised.exception)
+        self.assertIn("TLS", message)
+        self.assertIn("verify_ssl", message)
+        self.assertIn("local/editacl.conf", message)
+
+    def test_un_echec_de_transport_non_tls_ne_parle_pas_de_certificat(self):
+        rest = FakeRest(
+            json_responses={
+                self.PATH: RestResponse(
+                    0, b"", "transport:ConnectionRefusedError: Connection refused"
+                )
+            }
+        )
+        with self.assertRaises(FatalCapabilityError) as raised:
+            check_capability(rest)
+        message = str(raised.exception)
+        self.assertNotIn("verify_ssl", message)
+        self.assertIn("Connection refused", message)
+
     def test_aucun_parcours_de_la_hierarchie_de_roles(self):
         """Un seul appel REST : `authorization/roles` n'est pas sollicite."""
         rest = FakeRest(

@@ -111,6 +111,21 @@ verify_ssl = false
 La commande émet alors un avertissement à chaque exécution. Ce fichier n'est **pas**
 livré dans l'archive : une montée de version ne peut donc pas l'écraser.
 
+**Symptôme si le réglage manque.** L'échec se produit sur le premier appel REST de
+l'exécution — le contrôle d'habilitation — et la commande s'interrompt par une erreur
+fatale qui désigne explicitement TLS et le paramètre :
+
+```
+echec de la verification TLS du certificat de splunkd. Socle a certificat auto-signe :
+creer le fichier local/editacl.conf de l'app SA-acl-tools avec [editacl] puis
+verify_ssl = false, ou installer le CA de la plateforme dans
+$SPLUNK_HOME/etc/auth/cacert.pem. (detail : transport:SSLCertVerificationError: ...)
+```
+
+Un échec de transport **non** imputable à TLS (splunkd injoignable, connexion refusée)
+produit un message distinct, qui ne mentionne pas `verify_ssl` : les deux causes ne se
+traitent pas de la même façon.
+
 ---
 
 ## Habilitation
@@ -172,15 +187,38 @@ aucun moment la cardinalité totale de son entrée. Conséquences, toutes voulue
 
 ### Une liste de valeurs passée à `fields` doit être entre guillemets
 
+La seule forme correcte, dès que `fields` porte plus d'une valeur :
+
 ```
-| editacl fields=perms.read,perms.write dryrun=f      <-- NE FAIT PAS CE QU'ON CROIT
-| editacl fields="perms.read,perms.write" dryrun=f    <-- correct
+| editacl fields="perms.read,perms.write" dryrun=f
 ```
 
-Le parseur SPL traite la virgule comme un **séparateur d'arguments de commande** : dans
-la forme non quotée, la commande ne reçoit que `perms.read`, et `perms.write` est
-ignoré **silencieusement**. Aucune erreur n'est émise ; l'objet est écrit avec un seul
-attribut modifié. Toujours quoter `fields` dès qu'il porte plus d'une valeur.
+**La même ligne privée de ses guillemets ne fait pas ce qu'on croit.** Le parseur SPL
+traite la virgule comme un **séparateur d'arguments de commande** : tout ce qui suit la
+première virgule est consommé comme un argument distinct et perdu.
+
+| Forme de l'argument | Ce que la commande reçoit |
+|---|---|
+| liste **entre guillemets** | les attributs listés, tous |
+| liste **sans guillemets** | la **première valeur seulement** — le reste est ignoré |
+
+Aucune erreur n'est émise, aucun avertissement : l'objet est écrit avec un seul attribut
+modifié et `acl_status` vaut `updated`. Aucune parade n'est possible côté code —
+`fields="perms.read"` légitime et une liste tronquée arrivent identiques à la commande.
+
+Là où cette faute coûte le plus cher, c'est en **restauration** : une liste non quotée
+rétablit `perms.read`, laisse `perms.write` et `sharing` dans leur état muté, et
+rapporte un succès. C'est pourquoi la macro `editacl_rollback_apply(<sid>)` porte
+l'invocation complète et correctement quotée — elle supprime la classe d'erreur au lieu
+de la documenter.
+
+Ce dépôt ne contient **aucune** occurrence de la forme non quotée à plus d'une valeur,
+y compris en commentaire ou en contre-exemple, afin qu'aucune ligne ne puisse être
+copiée telle quelle. Contrôle :
+
+```sh
+grep -rnE 'fields=[A-Za-z._]+(,[A-Za-z._]+)+' --exclude-dir=.git --exclude-dir=__pycache__ .
+```
 
 Un `fields` **omis** vaut le défaut `perms.read,perms.write` et n'est pas concerné : la
 valeur par défaut est portée par le code, elle ne traverse pas le parseur SPL.
@@ -513,14 +551,39 @@ voie de restauration ; une fois indexés, il en reste la voie de secours immédi
 
 ## Retour arrière
 
-La macro `editacl_rollback(<sid>)` produit un pipeline directement réinjectable :
+Deux macros, deux gestes distincts.
+
+| Macro | Ce qu'elle fait | Écrit ? |
+|---|---|---|
+| `editacl_rollback(<sid>)` | **prévisualise** le jeu de restauration — les objets à rétablir et leur état antérieur | non |
+| `editacl_rollback_apply(<sid>)` | le même jeu, **suivi de l'invocation `\| editacl` complète et correctement quotée** | **oui** |
+
+`editacl_rollback(<sid>)` est la porte d'entrée par défaut : on regarde avant d'écrire.
+
+```
+| `editacl_rollback(1754483000.1)`
+```
+
+Une fois le jeu de restauration vérifié, l'appliquer. Deux formes équivalentes — la
+seconde est préférable :
 
 ```
 | `editacl_rollback(1754483000.1)`
 | editacl fields="perms.read,perms.write,sharing" dryrun=f
 ```
 
-Elle émet sept champs — `title`, `eai:acl.app`, `eai:acl.owner`, `eai:acl.perms.read`,
+```
+| `editacl_rollback_apply(1754483000.1)`
+```
+
+**Pourquoi préférer la seconde.** La première dépend de guillemets saisis à la main, au
+moment précis où l'opérateur restaure après un incident. Une liste non quotée rétablit
+`perms.read`, laisse `perms.write` et `sharing` mutés, et rapporte un succès (voir
+[Une liste de valeurs passée à `fields` doit être entre guillemets](#une-liste-de-valeurs-passée-à-fields-doit-être-entre-guillemets)).
+`editacl_rollback_apply` porte l'invocation dans la macro : la classe d'erreur
+disparaît au lieu d'être documentée.
+
+`editacl_rollback(<sid>)` émet sept champs — `title`, `eai:acl.app`, `eai:acl.owner`, `eai:acl.perms.read`,
 `eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` — soit exactement le contrat
 d'entrée de la commande.
 

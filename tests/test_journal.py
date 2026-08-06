@@ -220,7 +220,7 @@ class RollbackContractTest(unittest.TestCase):
             sortie_macro["eai:acl.sharing"] = intent["before_sharing"]
         self.assertNotIn("eai:acl.perms.read", sortie_macro)
 
-        # Reinjection : `| editacl fields=perms.read,perms.write,sharing`
+        # Reinjection : `| editacl fields="perms.read,perms.write,sharing"`
         etat_courant = state(sharing="global", read=("role_ajoute",),
                              write=("nouveau_role_admin",))
         reinjection = merge(

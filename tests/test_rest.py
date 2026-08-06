@@ -7,7 +7,13 @@ verifie la **politique** de reprise, pas la pile reseau, qui releve du lab.
 import unittest
 
 from acltools import rest as rest_module
-from acltools.rest import RestClient, RestResponse, build_ssl_context
+from acltools.rest import (
+    TLS_REMEDIATION,
+    RestClient,
+    RestResponse,
+    build_ssl_context,
+    is_tls_failure,
+)
 
 CLE_DE_SESSION = "cle-de-session-factice-0123456789"
 
@@ -135,6 +141,48 @@ class SslContextTest(unittest.TestCase):
         context = build_ssl_context(verify_ssl=False)
         self.assertFalse(context.check_hostname)
         self.assertEqual(context.verify_mode, ssl.CERT_NONE)
+
+
+class TlsFailureTest(unittest.TestCase):
+    """Un echec TLS arrive au noyau comme n'importe quel echec de transport — un
+    `status = 0` indifferencie. Ce classement est ce qui permet a `preflight` d'en
+    faire un message qui designe la cause et le parametre."""
+
+    def test_le_message_reellement_produit_par_le_transport_est_classe(self):
+        # Message construit exactement comme `RestClient._request` le construit sur une
+        # levee de `ssl.SSLCertVerificationError`, exception reelle d'un socle a
+        # certificat auto-signe.
+        import ssl
+
+        exc = ssl.SSLCertVerificationError(
+            1,
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self signed "
+            "certificate in certificate chain (_ssl.c:1006)",
+        )
+        response = RestResponse(
+            0, b"", "transport:%s: %s" % (type(exc).__name__, exc)
+        )
+        self.assertTrue(is_tls_failure(response))
+
+    def test_un_echec_de_transport_non_tls_nest_pas_classe_tls(self):
+        response = RestResponse(
+            0, b"", "transport:ConnectionRefusedError: [Errno 111] Connection refused"
+        )
+        self.assertFalse(is_tls_failure(response))
+
+    def test_une_reponse_http_nest_jamais_un_echec_tls(self):
+        # Un 403 n'est pas un echec de transport : le tunnel a bien ete etabli.
+        self.assertFalse(is_tls_failure(RestResponse(403, b"forbidden")))
+        self.assertFalse(is_tls_failure(RestResponse(200, b"{}")))
+        self.assertFalse(is_tls_failure(None))
+
+    def test_la_remediation_designe_le_parametre_et_son_fichier(self):
+        # C'est tout l'objet de la correction : un message qui ne nomme pas
+        # `verify_ssl` ni `local/editacl.conf` laisse l'operateur chercher du cote des
+        # droits, sur un endpoint d'authentification.
+        self.assertIn("verify_ssl", TLS_REMEDIATION)
+        self.assertIn("local/editacl.conf", TLS_REMEDIATION)
+        self.assertIn("TLS", TLS_REMEDIATION)
 
 
 if __name__ == "__main__":

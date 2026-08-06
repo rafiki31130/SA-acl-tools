@@ -106,8 +106,9 @@ class MacrosTest(unittest.TestCase):
         self.conf = read_splunk_conf("default", "macros.conf")
         self.familles = read_csv_lookup("acl_object_families.csv")
 
-    def test_les_trois_macros_du_cahier_des_charges_sont_declarees(self):
-        for stanza in ("acl_inventory", "acl_inventory(1)", "editacl_rollback(1)"):
+    def test_les_macros_du_cahier_des_charges_sont_declarees(self):
+        for stanza in ("acl_inventory", "acl_inventory(1)",
+                       "editacl_rollback(1)", "editacl_rollback_apply(1)"):
             self.assertIn(stanza, self.conf)
 
     def test_une_stanza_par_arite_jusqu_au_nombre_de_familles(self):
@@ -173,6 +174,25 @@ class MacrosTest(unittest.TestCase):
         self.assertIn('phase="outcome" AND status="updated"', definition)
         self.assertIn("eventstats max(_restorable) AS restorable BY endpoint",
                       definition)
+
+    def test_le_rollback_applique_delegue_au_rollback_de_previsualisation(self):
+        # Deux copies du meme pipeline divergeraient au premier amendement, et la copie
+        # oubliee serait celle qui ecrit.
+        definition = self.conf["editacl_rollback_apply(1)"]["definition"]
+        self.assertIn("`editacl_rollback($sid$)`", definition)
+
+    def test_le_rollback_applique_porte_l_invocation_complete_et_quotee(self):
+        # D-13 : la macro existe pour que la quotation ne repose pas sur la vigilance
+        # de l'operateur au moment ou il restaure apres un incident.
+        definition = self.conf["editacl_rollback_apply(1)"]["definition"]
+        self.assertIn('| editacl fields="perms.read,perms.write,sharing"', definition)
+        self.assertIn("dryrun=f", definition)
+
+    def test_seul_le_rollback_applique_ecrit(self):
+        # `editacl_rollback(1)` reste la forme de previsualisation : elle ne doit porter
+        # aucune invocation de la commande (le `sourcetype=editacl:journal` n'en est
+        # pas une : on cherche la commande en position de pipe).
+        self.assertNotIn("| editacl ", self.conf["editacl_rollback(1)"]["definition"])
 
     def test_le_rollback_est_invocable_en_position_generatrice(self):
         # Invoquee par `| `editacl_rollback(...)``, la definition doit commencer par une
@@ -286,6 +306,79 @@ class RevalidationTest(unittest.TestCase):
     def test_le_mot_de_passe_n_est_jamais_un_argument_de_ligne_de_commande(self):
         self.assertIn("sys.stdin.readline()", self.source)
         self.assertNotIn("--password", self.source)
+
+
+class QuotationDeFieldsTest(unittest.TestCase):
+    """Balayage mecanique du depot : aucune liste `fields` a plus d'une valeur ne doit
+    y figurer sans guillemets — ni en SPL, ni en README, ni en commentaire de conf, ni
+    en docstring, ni en contre-exemple.
+
+    Une consigne de quotation ne se verifie pas a la relecture : la forme fautive est
+    lisible, s'execute sans erreur, et ne se distingue de la forme correcte que par
+    deux caracteres. La seule garantie tenable est qu'aucune ligne copiable n'existe
+    dans le depot.
+    """
+
+    #: Construit par concatenation pour que ce fichier ne puisse pas etre son propre
+    #: contre-exemple : le motif reconnait une liste de valeurs d'attribut ACL
+    #: (`[A-Za-z._]`) separees par des virgules et NON precedee d'un guillemet. Il ne
+    #: reconnait donc pas un argument nomme Python (`fields=fields,`), ou la virgule
+    #: separe des arguments et non des valeurs.
+    MOTIF = re.compile("fields=" + r"[A-Za-z._]+(?:,[A-Za-z._]+)+")
+
+    #: Exclus : metadonnees git, caches d'interpretation, et le SDK vendorise, qui est
+    #: du code amont non modifie (verifie : il ne contient aucune occurrence).
+    EXCLUS = ("/.git/", "/__pycache__/", "/bin/lib/")
+
+    EXTENSIONS = (".py", ".md", ".conf", ".csv", ".json", ".xml", ".sh", ".example",
+                  ".txt", ".meta", ".gitattributes", ".gitignore")
+
+    def _fichiers(self):
+        for racine, dossiers, fichiers in os.walk(REPO_ROOT):
+            dossiers[:] = [
+                d for d in dossiers if d not in (".git", "__pycache__", "lib")
+            ]
+            for nom in fichiers:
+                chemin = os.path.join(racine, nom)
+                normalise = chemin.replace(os.sep, "/")
+                if any(motif in normalise for motif in self.EXCLUS):
+                    continue
+                if not normalise.endswith(self.EXTENSIONS):
+                    continue
+                yield chemin
+
+    def test_le_balayage_couvre_bien_les_livrables(self):
+        """Un balayage qui ne lit rien passerait toujours."""
+        lus = [os.path.basename(c) for c in self._fichiers()]
+        for attendu in ("README.md", "macros.conf", "editacl.py", "rest.py"):
+            self.assertIn(attendu, lus)
+
+    def test_le_motif_reconnait_la_forme_fautive_et_epargne_les_formes_licites(self):
+        # Assemble en deux morceaux : ce fichier est lui-meme balaye par le test
+        # suivant, il ne doit pas porter la forme fautive sur une seule ligne.
+        self.assertTrue(self.MOTIF.search("| editacl fields=a.b" + ",c.d dryrun=f"))
+        self.assertIsNone(self.MOTIF.search('| editacl fields="a.b,c.d" dryrun=f'))
+        self.assertIsNone(self.MOTIF.search("| editacl fields=perms.write dryrun=f"))
+        self.assertIsNone(self.MOTIF.search("validate_params(" + "fields=fields,)"))
+
+    def test_aucune_liste_fields_non_quotee_dans_le_depot(self):
+        fautifs = []
+        for chemin in self._fichiers():
+            try:
+                with open(chemin, encoding="utf-8") as handle:
+                    lignes = handle.readlines()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for numero, ligne in enumerate(lignes, 1):
+                if self.MOTIF.search(ligne):
+                    fautifs.append(
+                        "%s:%d" % (os.path.relpath(chemin, REPO_ROOT), numero)
+                    )
+        self.assertEqual(
+            fautifs, [],
+            "liste `fields` non quotee — SPL la tronque a sa premiere valeur, sans "
+            "erreur : %s" % ", ".join(fautifs),
+        )
 
 
 if __name__ == "__main__":

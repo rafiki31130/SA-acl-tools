@@ -25,6 +25,48 @@ READ_TIMEOUT = 60
 #: de ne pas multiplier les tentatives.
 RETRY_DELAY_SECONDS = 2
 
+#: Marqueurs d'un echec de transport imputable a TLS, cherches en minuscules dans le
+#: message normalise de `RestResponse.error`.
+#:
+#: Le classement vit ici, avec le code qui **produit** ce message : separer les deux
+#: garantirait leur divergence au premier changement de format.
+TLS_FAILURE_MARKERS = (
+    "sslcertverificationerror",
+    "sslerror",
+    "certificate_verify_failed",
+    "certificate verify failed",
+    "self signed certificate",
+    "self-signed certificate",
+    "unable to get local issuer certificate",
+    "certificate has expired",
+    "hostname mismatch",
+    "doesn't match either of",
+)
+
+#: Message de remediation d'un echec TLS. Il **designe le parametre** : sans cela,
+#: l'operateur ne voit qu'un `HTTP 0` sur un appel de preflight et n'a aucune raison de
+#: soupconner le certificat. Le cas nominal est un socle a certificat auto-signe, sur
+#: lequel `verify_ssl` vaut `true` par defaut (§2.2).
+TLS_REMEDIATION = (
+    "echec de la verification TLS du certificat de splunkd. Socle a certificat "
+    "auto-signe : creer le fichier local/editacl.conf de l'app SA-acl-tools avec "
+    "[editacl] puis verify_ssl = false, ou installer le CA de la plateforme dans "
+    "$SPLUNK_HOME/etc/auth/cacert.pem."
+)
+
+
+def is_tls_failure(response):
+    """Vrai si `response` est un echec de **transport** imputable a TLS.
+
+    Un echec TLS se presente au noyau comme n'importe quel autre echec de transport —
+    `status = 0` — donc comme un `HTTP 0` indifferencie. C'est ce que cette fonction
+    permet de lever.
+    """
+    if response is None or getattr(response, "status", None) != 0:
+        return False
+    marker = str(getattr(response, "error", "") or "").lower()
+    return any(motif in marker for motif in TLS_FAILURE_MARKERS)
+
 
 class RestResponse(object):
     """`(status, body, error)`. `status = 0` signale un echec de transport."""
