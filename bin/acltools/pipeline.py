@@ -91,6 +91,27 @@ class _Work(object):
         )
 
 
+class _FailedPost(object):
+    """Memoire d'un POST **emis et refuse**, pour la deduplication du §10.8.
+
+    Un POST refuse ne modifie pas l'objet : son etat anterieur reste l'etat courant.
+    Sans cette memoire, une seconde occurrence du meme objet relit l'etat, recalcule la
+    meme fusion, ecrit une **seconde ligne `intent` rigoureusement identique** a la
+    premiere et reemet le meme POST — ce que le §8.5 (univocite du triplet
+    `sid` + `endpoint` + `phase`) et D-6 excluent, et ce que le §10.8 economise
+    explicitement.
+    """
+
+    __slots__ = ("before", "after", "status", "error", "http_code")
+
+    def __init__(self, before, after, status, error, http_code):
+        self.before = before
+        self.after = after
+        self.status = status
+        self.error = error
+        self.http_code = http_code
+
+
 class EventProcessor(object):
     """Traite un evenement et produit exactement un `EventResult`.
 
@@ -118,7 +139,10 @@ class EventProcessor(object):
         self._app_disabled_fn = app_disabled_fn
         self._clock = clock or default_clock
         self.counter = 0
+        #: endpoint -> etat resultant d'un POST **abouti**.
         self._written = {}
+        #: endpoint -> `_FailedPost` d'un POST **emis et refuse**.
+        self._failed = {}
 
     # -- point d'entree unique --------------------------------------------- #
 
@@ -191,6 +215,19 @@ class EventProcessor(object):
             work.status = "dryrun"
             return
 
+        failed = self._failed.get(work.endpoint)
+        if failed is not None and failed.after == merged.after:
+            # §10.8 : le meme objet, deja soumis au meme etat cible dans cette
+            # execution, n'est pas resoumis. Le resultat du premier envoi est reproduit
+            # tel quel — ni ligne `intent`, ni POST, ni increment du compteur. Une
+            # occulation serait pire : le doublon ressortirait `updated` sur un objet
+            # que la plateforme a refuse d'ecrire.
+            work.status = failed.status
+            work.error = failed.error
+            work.http_code = failed.http_code
+            work.warn("duplicate_post_suppressed")
+            return
+
         if self.counter >= self._params.max_objects:
             raise MaxObjectsReached(self._params.max_objects)
 
@@ -217,6 +254,9 @@ class EventProcessor(object):
                 "post_failed:%d:%s"
                 % (response.status, response.error or response.text())
             )
+            self._failed[work.endpoint] = _FailedPost(
+                merged.before, merged.after, work.status, work.error, response.status
+            )
 
     # -- etapes --------------------------------------------------------- #
 
@@ -234,12 +274,23 @@ class EventProcessor(object):
     def _read_state(self, work):
         """Lecture de l'etat courant (§5.3). Le resultat du GET fait autorite.
 
-        La deduplication du §10.8 court-circuite le GET pour un objet deja ecrit dans
-        l'execution courante : l'etat memorise tient lieu d'etat courant. Elle ne
-        modifie jamais le nombre d'evenements de sortie ni le nombre de lignes
-        `outcome`.
+        La deduplication du §10.8 court-circuite le GET pour un objet deja soumis a un
+        POST dans l'execution courante : l'etat memorise tient lieu d'etat courant. Il
+        vaut l'etat cible si le POST a abouti, l'etat anterieur s'il a ete refuse — un
+        POST refuse ne modifie pas l'objet.
+
+        Ce court-circuit est aussi ce qui rend le traitement **deterministe** sur le cas
+        du §5.6 : un refus `HTTP 500` de persistance laisse la vue runtime mutee, si
+        bien qu'une relecture ferait ressortir le doublon en `noop` et masquerait
+        l'echec. La memoire d'execution fait autorite sur cette vue divergente.
+
+        La deduplication ne modifie jamais le nombre d'evenements de sortie ni le
+        nombre de lignes `outcome`.
         """
         cached = self._written.get(work.endpoint)
+        if cached is None:
+            failed = self._failed.get(work.endpoint)
+            cached = failed.before if failed is not None else None
         if cached is not None:
             work.http_code = 200
             return cached

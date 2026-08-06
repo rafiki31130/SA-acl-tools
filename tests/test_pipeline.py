@@ -397,6 +397,101 @@ class DeduplicationTest(unittest.TestCase):
         self.assertEqual(len(rest.gets()), 2)
 
 
+def rest_post_refuse():
+    """Socle refusant l'ecriture, l'etat lu restant celui d'avant tentative."""
+    return FakeRest(
+        default_get=RestResponse(200, acl_body(write=("ancien_role",))),
+        default_post=RestResponse(
+            500,
+            b'{"messages":[{"type":"ERROR","text":"Could not flush changes to '
+            b'disk"}]}',
+        ),
+    )
+
+
+class DeduplicationApresPostRefuseTest(unittest.TestCase):
+    """A-7 — le cache n'etait peuple qu'apres un POST **abouti**.
+
+    Deux occurrences du meme objet dont le premier POST echoue produisaient deux lignes
+    `intent` rigoureusement identiques, deux POST et deux increments du compteur — le
+    §8.5 et D-6 declarent pourtant le triplet `sid` + `endpoint` + `phase` univoque, et
+    le §10.8 pose que la deduplication economise le GET **et** le POST.
+    """
+
+    def _proc(self, rest, journal, max_objects=500):
+        return processor(
+            rest,
+            journal=journal,
+            params=make_params(fields=("perms.write",), max_objects=max_objects),
+        )
+
+    def test_un_seul_intent_un_seul_post_apres_un_refus(self):
+        rest, journal = rest_post_refuse(), FakeJournal()
+        proc = self._proc(rest, journal)
+        proc.process(make_event(write="nouveau_role_admin"))
+        proc.process(make_event(write="nouveau_role_admin"))
+
+        self.assertEqual(len(rest.posts()), 1)
+        self.assertEqual(len(rest.gets()), 1)
+        self.assertEqual(len(journal.intents), 1)
+        self.assertEqual(proc.counter, 1)
+
+    def test_le_triplet_sid_endpoint_phase_reste_univoque(self):
+        rest, journal = rest_post_refuse(), FakeJournal()
+        proc = self._proc(rest, journal)
+        proc.process(make_event(write="nouveau_role_admin"))
+        proc.process(make_event(write="nouveau_role_admin"))
+
+        cles = [
+            (record["sid"], record["endpoint"], record["phase"])
+            for record in journal.intents
+        ]
+        self.assertEqual(len(set(cles)), len(cles))
+
+    def test_le_doublon_produit_un_evenement_et_une_ligne_outcome(self):
+        """§5.7 et §8.2 priment : la deduplication n'efface aucune sortie."""
+        rest, journal = rest_post_refuse(), FakeJournal()
+        proc = self._proc(rest, journal)
+        premier = proc.process(make_event(write="nouveau_role_admin"))
+        second = proc.process(make_event(write="nouveau_role_admin"))
+
+        self.assertEqual(len(journal.outcomes), 2)
+        self.assertEqual(second.status, premier.status)
+        self.assertEqual(second.error, premier.error)
+        self.assertEqual(second.http_code, 500)
+        self.assertIn("duplicate_post_suppressed", second.warnings)
+        self.assertFalse(second.counted)
+
+    def test_le_doublon_ne_ressort_jamais_updated_ni_noop(self):
+        """L'objet n'a pas ete ecrit : le doublon ne doit pas dire le contraire.
+
+        C'est ce qui interdit de peupler le cache d'etat avec l'etat **cible** apres un
+        refus — le doublon ressortirait `noop`, indiscernable d'une reussite.
+        """
+        rest, journal = rest_post_refuse(), FakeJournal()
+        proc = self._proc(rest, journal)
+        proc.process(make_event(write="nouveau_role_admin"))
+        second = proc.process(make_event(write="nouveau_role_admin"))
+        self.assertNotIn(second.status, ("updated", "noop"))
+
+    def test_une_cible_differente_apres_un_refus_est_bien_retentee(self):
+        """La suppression porte sur le doublon, pas sur une demande distincte."""
+        rest, journal = rest_post_refuse(), FakeJournal()
+        proc = self._proc(rest, journal)
+        proc.process(make_event(write="nouveau_role_admin"))
+        proc.process(make_event(write="nouveau_role_lecture"))
+        self.assertEqual(len(rest.posts()), 2)
+        self.assertEqual(len(journal.intents), 2)
+
+    def test_un_refus_ne_consomme_le_plafond_quune_fois(self):
+        """Trois occurrences d'un objet refuse n'epuisent pas `max_objects=2`."""
+        rest, journal = rest_post_refuse(), FakeJournal()
+        proc = self._proc(rest, journal, max_objects=2)
+        for _ in range(3):
+            proc.process(make_event(write="nouveau_role_admin"))
+        self.assertEqual(proc.counter, 1)
+
+
 class InternalErrorTest(unittest.TestCase):
 
     def test_une_exception_inattendue_devient_une_erreur_par_evenement(self):

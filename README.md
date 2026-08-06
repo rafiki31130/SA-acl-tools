@@ -389,7 +389,22 @@ l'intégralité de ses champs, augmenté de :
 | `acl_journaled` | Ligne `intent` écrite **et synchronisée sur disque** |
 
 Avertissements possibles : `sharing_change`, `app_disabled`,
-`stale_role_preserved:<liste>`, `journal_outcome_failed`.
+`stale_role_preserved:<liste>`, `journal_outcome_failed`,
+`duplicate_post_suppressed`.
+
+### Déduplication : un objet n'est soumis qu'une fois au même état cible
+
+Le pipeline d'entrée peut présenter deux fois le même objet. Une **déduplication
+interne par URI** couvre la portée de l'exécution : elle économise le GET et le POST,
+jamais un événement de sortie ni une ligne `outcome`.
+
+Elle vaut que le premier POST ait abouti **ou non**. Si l'écriture a été refusée,
+l'objet n'a pas changé d'état ; le doublon ressort avec le **résultat du premier
+envoi** — même `acl_status`, même `acl_error`, même `acl_http_code` — augmenté de
+`acl_warning = "duplicate_post_suppressed"`, sans nouvelle ligne `intent`, sans nouveau
+POST et sans consommer une unité de `max_objects`. Un doublon demandant un état cible
+**différent** est, lui, une demande distincte et donne bien lieu à une seconde
+écriture.
 
 ---
 
