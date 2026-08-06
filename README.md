@@ -28,6 +28,7 @@ Cas d'usage moteur : le décommissionnement d'un jeu de rôles hérités, par
 - [Journal](#journal)
 - [Retour arrière](#retour-arrière)
 - [Inventaire des objets à traiter](#inventaire-des-objets-à-traiter)
+- [Recherches livrées](#recherches-livrées)
 - [Table de correspondance et re-validation sur socle cible](#table-de-correspondance-et-re-validation-sur-socle-cible)
 - [Tests](#tests)
 - [Dépendances vendorisées](#dépendances-vendorisées)
@@ -169,36 +170,53 @@ aucun moment la cardinalité totale de son entrée. Conséquences, toutes voulue
   sur échec unitaire produirait un état partiel non caractérisé. Le journal caractérise
   intégralement l'état partiel, et reste le moyen de le reprendre ou de l'annuler.
 
-### Exemples
-
-Substitution d'un rôle obsolète, **en simulation**, sur un périmètre restreint :
+### Une liste de valeurs passée à `fields` doit être entre guillemets
 
 ```
-| rest /servicesNS/-/-/saved/searches count=0
-| search "eai:acl.perms.write"="ancien_role"
+| editacl fields=perms.read,perms.write dryrun=f      <-- NE FAIT PAS CE QU'ON CROIT
+| editacl fields="perms.read,perms.write" dryrun=f    <-- correct
+```
+
+Le parseur SPL traite la virgule comme un **séparateur d'arguments de commande** : dans
+la forme non quotée, la commande ne reçoit que `perms.read`, et `perms.write` est
+ignoré **silencieusement**. Aucune erreur n'est émise ; l'objet est écrit avec un seul
+attribut modifié. Toujours quoter `fields` dès qu'il porte plus d'une valeur.
+
+Un `fields` **omis** vaut le défaut `perms.read,perms.write` et n'est pas concerné : la
+valeur par défaut est portée par le code, elle ne traverse pas le parseur SPL.
+
+### Exemples
+
+Substitution d'un rôle obsolète, **en simulation**, sur l'inventaire complet :
+
+```
+| `acl_inventory`
+| search "eai:acl.perms.write"="ancien_role" OR "eai:acl.perms.read"="ancien_role"
+| eval "eai:acl.perms.read" = mvmap('eai:acl.perms.read',
+        if('eai:acl.perms.read'="ancien_role", "nouveau_role_lecture",
+           'eai:acl.perms.read'))
 | eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
         if('eai:acl.perms.write'="ancien_role", "nouveau_role_admin",
            'eai:acl.perms.write'))
-| editacl fields=perms.write dryrun=t
-| stats count by acl_status
+| editacl fields="perms.read,perms.write" dryrun=t
+| stats count by acl_status "eai:type" "eai:acl.app"
 ```
 
-Dépréciation par préfixage, **en écriture réelle**, avec plafond explicite :
+Dépréciation par préfixage, **en écriture réelle**, restreinte aux recherches
+sauvegardées et aux vues :
 
 ```
-| rest /servicesNS/-/-/saved/searches count=0
+| `acl_inventory(savedsearch,views)`
 | search "eai:acl.perms.write" IN ("role_a","role_b")
 | eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
         if('eai:acl.perms.write' IN ("role_a","role_b"),
            "deprecated_" . 'eai:acl.perms.write', 'eai:acl.perms.write'))
-| editacl fields=perms.write dryrun=f max_objects=200
+| editacl fields=perms.write dryrun=f max_objects=2000
 | where acl_status!="noop"
 ```
 
-> Ces exemples utilisent `| rest` sur un endpoint natif. La **macro d'inventaire**
-> `acl_inventory`, qui unionne toutes les familles et normalise leur sortie, est
-> livrée par un incrément ultérieur — voir
-> [Inventaire](#inventaire-des-objets-à-traiter).
+La forme paramétrée est le levier de coût pour un usage interactif : on n'énumère que
+les familles visées. Voir [Inventaire](#inventaire-des-objets-à-traiter).
 
 ---
 
@@ -499,18 +517,23 @@ La macro `editacl_rollback(<sid>)` produit un pipeline directement réinjectable
 
 ```
 | `editacl_rollback(1754483000.1)`
-| editacl fields=perms.read,perms.write,sharing dryrun=f
+| editacl fields="perms.read,perms.write,sharing" dryrun=f
 ```
+
+Elle émet sept champs — `title`, `eai:acl.app`, `eai:acl.owner`, `eai:acl.perms.read`,
+`eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` — soit exactement le contrat
+d'entrée de la commande.
 
 Elle ne restaure que les objets dont une ligne `outcome` atteste que l'écriture a **bien
 abouti** : un objet dont le POST a échoué n'a pas été modifié et ne doit pas être
 « restauré » vers un état qu'il n'a jamais quitté.
 
-> **La macro est livrée par un incrément ultérieur.** Le journal produit par la version
-> courante porte déjà **tous** les champs qu'elle consomme, et un test unitaire dédié
-> fige ce contrat : `sid`, `phase`, `endpoint`, `owner`, `app`, `title`, `eai_type`,
-> `before_perms_read`, `before_perms_write`, `before_sharing`, `ts`. En attendant,
-> le fichier de journal de l'exécution est auto-contenu et directement exploitable.
+> **La plage temporelle de la recherche appelante doit couvrir l'exécution à
+> restaurer.** La macro interroge un index ; lancée sur les quinze dernières minutes,
+> elle ne verra pas une exécution de la veille et ne restaurera rien — sans erreur.
+
+Le `sid` s'obtient par `| eval sid=$sid$`, par l'inspecteur de recherche, ou par le nom
+du fichier de journal de l'exécution (`editacl_journal_<sid>.log`).
 
 **La restauration d'une permission vide est correcte par construction.** Si
 `before_perms_read` vaut la chaîne vide, l'extraction JSON à l'indexation ne matérialise
@@ -577,16 +600,77 @@ l'inventaire, pas l'écriture.
 
 ### La parade : la macro `acl_inventory`
 
-L'inventaire doit se bâtir sur les **endpoints natifs**. La macro `acl_inventory`, qui
-les unionne famille par famille et normalise leur sortie sur le contrat d'entrée
-ci-dessus, est **livrée par un incrément ultérieur**. Elle est invocable en ligne
-(`| \`acl_inventory\` | search …`) et déclinée en une forme paramétrée restreignant aux
-familles visées, pour ne pas payer l'énumération des fichiers de lookup quand on ne
-traite que des recherches sauvegardées.
+L'inventaire se bâtit sur les **endpoints natifs**. La macro `acl_inventory` les
+interroge famille par famille et normalise leur sortie sur le contrat d'entrée de la
+commande. Elle est **invocable en ligne**, dans n'importe quelle recherche :
 
-**En attendant**, alimenter `editacl` par `| rest` sur les endpoints natifs des familles
-visées, jamais par `admin/directory` seul, et considérer tout inventaire issu de
-`admin/directory` comme **incomplet par construction**.
+```
+| `acl_inventory`                                  <-- toutes les familles
+| `acl_inventory(savedsearch)`                     <-- une famille
+| `acl_inventory(savedsearch,views,eventtypes)`    <-- plusieurs familles
+```
+
+Sa sortie porte **exactement** huit champs, dans cet ordre : `title`, `eai:acl.app`,
+`eai:acl.owner`, `eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`,
+`eai:type`, `id`. Elle alimente `editacl` **sans transformation intermédiaire**.
+
+```mermaid
+flowchart LR
+  ARG["acl_inventory<br/>ou acl_inventory(f1,...,fN)"] --> LK
+  LK[["lookup acl_object_families<br/>famille -> handler natif"]] --> SEL
+  SEL{"selection<br/>des familles"} -->|"famille demandee"| MAP["un | rest par handler natif"]
+  SEL -.->|"famille non demandee :<br/>AUCUN appel REST"| SKIP(["ignoree"])
+  MAP --> SYN["synthese de eai:type<br/>si l'endpoint n'en emet pas"]
+  SYN --> NORM["normalisation<br/>8 champs, contrat du §3"]
+  NORM --> CMD["| editacl ..."]
+  NORM --> RS["recherches livrees"]
+```
+
+**Trois points de conception.**
+
+1. **La sélection précède les appels REST.** Une famille non demandée ne coûte rien. Un
+   opérateur qui ne traite que des recherches sauvegardées ne paie pas l'énumération
+   des fichiers de lookup, qui sont souvent la population la plus nombreuse.
+2. **`eai:type` est synthétisé quand l'endpoint natif n'en émet pas** — ce qui est le
+   cas de la grande majorité d'entre eux. La valeur retenue est la clé de la table de
+   correspondance associée à la famille interrogée ; la valeur nativement émise, quand
+   il y en a une, est préservée telle quelle. **Sans cette synthèse, l'aller
+   fonctionnerait mais le retour arrière serait impossible** : `editacl_rollback`
+   résout par `eai:type`, `id` n'étant pas journalisé.
+3. **Les noms de famille sont les clés de la table**, portés par le lookup
+   `acl_object_families` (colonne `family`). Une famille par handler natif : deux clés
+   de la table qui visent le même handler ne donnent qu'une seule famille, sans quoi
+   l'inventaire énumérerait deux fois le même endpoint.
+
+**Coût.** L'inventaire complet émet un appel REST par famille. C'est l'ordre de
+grandeur de la trentaine d'appels, pas de l'appel unique — c'est le prix de la
+couverture intégrale. Sur un search head chargé, préférer la forme paramétrée en usage
+interactif, et la planification sur les gros périmètres.
+
+`| rest … /admin/directory` reste utilisable comme **voie rapide**, à la condition
+expresse d'assumer les chiffres ci-dessus : ce n'est pas un inventaire, c'est un
+sous-ensemble.
+
+---
+
+## Recherches livrées
+
+Trois recherches sauvegardées, **bâties sur la macro d'inventaire** et non sur
+`admin/directory`. Aucune n'est planifiée : l'inventaire est une macro invocable en
+ligne, la planification est un usage recommandé sur les gros périmètres, jamais la
+modalité d'accès. Pour en planifier une, activer `enableSched` dans
+`local/savedsearches.conf`.
+
+| Recherche | Ce qu'elle produit |
+|---|---|
+| `ACL — inventaire par rôle` | Ventilation lecture/écriture par rôle, application et type d'objet. Point de départ d'un audit d'habilitation. |
+| `ACL — références aux rôles décommissionnés` | Objets dont l'ACL référence encore un rôle listé par le lookup `acl_decommissioned_roles`. Sa sortie porte le contrat d'entrée de `editacl` et **alimente directement le pipeline de modification**. |
+| `ACL — journal des modifications` | Historique indexé par `sid`, statut, application et type. La colonne `restauration` porte la commande de retour arrière de l'exécution concernée. |
+
+Le lookup `acl_decommissioned_roles` livré ne contient que des **identifiants
+génériques d'exemple** (`ancien_role`, `role_a`, `role_b`). Le remplacer par la liste
+réelle — de préférence dans `lookups/` de l'app locale, qu'une mise à jour de l'app ne
+peut pas écraser.
 
 ---
 
@@ -631,9 +715,36 @@ La procédure de re-validation doit, sur le socle cible :
 
 La troisième liste se traite par le fichier d'override, sans modification du code.
 
-> **La procédure outillée est livrée par un incrément ultérieur.** L'API nécessaire
-> existe déjà : `acltools.mapping.Mapping.coverage()` expose le contenu effectif de la
-> table (entrées livrées, entrées surchargées, entrées écartées).
+La procédure est livrée sous `tools/revalidate_mapping.py`. Elle s'exécute sur le socle
+cible, contre l'API REST de l'instance :
+
+```sh
+<commande fournissant le mot de passe> | python3 tools/revalidate_mapping.py \
+    [--user admin] [--splunkd-uri https://127.0.0.1:8089] [--insecure]
+```
+
+Le mot de passe est lu sur la **première ligne de l'entrée standard** : jamais en
+argument de ligne de commande, jamais écrit sur disque, jamais imprimé. Code de retour
+`1` si la liste C n'est pas vide.
+
+`tools/` ne fait pas partie de l'archive déployable. Le script résout ses chemins
+relativement à son répertoire parent : pour l'exécuter sur le socle, le déposer dans
+`$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/` — il y trouve alors `bin/acltools`,
+`bin/acl_endpoint_map.json`, l'override éventuel et `lookups/acl_object_families.csv`
+de l'app **réellement installée**, ce qui est le seul état qui compte.
+
+Elle produit une **quatrième** section, non exigée mais nécessaire : le contrôle de
+cohérence entre `bin/acl_endpoint_map.json`, que lit le code Python, et
+`lookups/acl_object_families.csv`, que lit la macro d'inventaire — SPL ne sachant pas
+lire de JSON, la même information existe sous deux formes, et une divergence rendrait
+l'inventaire et la résolution incohérents.
+
+> **Pourquoi un script et non une recherche SPL.** La construction de l'URI d'un objet
+> obéit à une règle d'encodage unique et non évidente, implémentée une seule fois dans
+> `acltools/endpoint.py`. La réécrire en SPL créerait une seconde implémentation qui
+> divergerait — le défaut exact que la règle du point d'injection unique interdit. Le
+> script **réutilise** `Mapping.coverage()` et `build_object_path()` ; il ne
+> réimplémente rien.
 
 ---
 
@@ -661,6 +772,26 @@ Elle couvre notamment :
 Ce dernier test n'est pas décoratif : sans lui, la règle d'import n'est qu'une intention
 en commentaire, et il suffit d'un import ajouté à la va-vite pour que la matrice de
 fusion cesse d'être éprouvable sur une machine sans instance.
+
+### Environnement d'intégration
+
+Les tests d'intégration exigent une instance et une app jetable portant un objet de
+chaque grande famille, dans les trois portées de partage, avec et sans permissions
+explicites. Son amorçage est scripté, en deux volets — le second n'existe que parce que
+les objets **privés** (`sharing=user`, namespace utilisateur) et les objets à **nom
+spécial** (barre oblique, espace, accent, pourcent) ne se déclarent pas proprement en
+fichier de configuration :
+
+```sh
+bash tools/acl_probe_bootstrap.sh                    # objets declares en .conf
+# puis, apres redemarrage de splunkd :
+<mot de passe> | python3 tools/acl_probe_bootstrap_rest.py   # objets prives + noms speciaux
+```
+
+Les deux scripts sont **idempotents** (écriture par gabarit, jamais d'ajout ; un objet
+déjà présent ressort en HTTP 409, traité comme un succès) et acceptent `--remove`. Le
+mot de passe est lu sur la première ligne de l'entrée standard. Les identifiants créés
+sont volontairement génériques.
 
 ### Découpage
 
@@ -705,7 +836,9 @@ des deux scripts — **jamais** par une édition directe dans `bin/lib/`, que
 | **Restauration postérieure à l'indexation** | Le journal n'est interrogeable qu'après ingestion | Le fichier de l'exécution est auto-contenu et exploitable immédiatement |
 | **`app_disabled` coûte un appel REST par app distincte** | Latence marginale sur un lot multi-apps | Mémoïsé par app |
 | **Reprise de propriété hors périmètre** | `owner` ne peut pas être modifié | Hors périmètre par construction — `owner` est l'adresse de l'objet, pas une valeur cible |
-| **Macro d'inventaire, macro de restauration et recherches livrées** | Non encore présentes dans cette version | Incrément ultérieur ; le journal porte déjà tous les champs consommés par la restauration |
+| **`fields` non quoté est tronqué par SPL** | Seule la première valeur est appliquée, **sans erreur** | Quoter systématiquement : `fields="perms.read,perms.write"` |
+| **Coût de l'inventaire complet** | Un appel REST par famille, une trentaine au total | Forme paramétrée en usage interactif ; planification sur les gros périmètres |
+| **Familles d'inventaire figées par un lookup** | Une famille absente de `acl_object_families` n'est pas inventoriée | `tools/revalidate_mapping.py` compare le lookup à la table et signale toute divergence |
 
 ---
 

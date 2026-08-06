@@ -1,0 +1,292 @@
+"""Artefacts SPL : macros, recherches livrees, lookups (§6.5, §6.7, §8.6, §12.7).
+
+Ces fichiers sont des livrables normatifs autant que le code, et ils ne sont
+eprouvables sur une instance qu'en l'ayant sous la main. Ce module fige hors Splunk ce
+qui peut l'etre : la presence des stanzas, le jeu de champs emis, la source
+d'inventaire, et surtout la **coherence entre la table lue par le code Python et le
+lookup lu par la macro d'inventaire** — la meme information sous deux formes, dont la
+divergence rendrait l'inventaire et la resolution incoherents sans le moindre message.
+"""
+
+import csv
+import json
+import os
+import re
+import unittest
+
+from . import BIN_DIR, REPO_ROOT
+from .test_journal import ROLLBACK_FIELDS_FROM_INTENT
+
+#: Jeu de champs exige du §6.7 contrainte 3, dans l'ordre, exactement.
+CONTRAT_ENTREE = (
+    "title",
+    "eai:acl.app",
+    "eai:acl.owner",
+    "eai:acl.perms.read",
+    "eai:acl.perms.write",
+    "eai:acl.sharing",
+    "eai:type",
+    "id",
+)
+
+#: Champs produits par `editacl_rollback` (§8.6). `id` n'y figure pas : il n'est pas
+#: journalise, et c'est precisement pourquoi la macro d'inventaire doit synthetiser
+#: `eai:type` (§6.7 contrainte 4).
+#: L'ordre est celui du §8.6, repris litteralement.
+CONTRAT_ROLLBACK = (
+    "eai:acl.perms.read",
+    "eai:acl.perms.write",
+    "eai:acl.sharing",
+    "eai:acl.owner",
+    "eai:acl.app",
+    "title",
+    "eai:type",
+)
+
+
+def read_splunk_conf(*parts):
+    """Lecteur de `.conf` Splunk : gere la continuation de ligne par `\\` finale.
+
+    `configparser` ne sait pas la traiter — il ne joint que les lignes indentees — et
+    rendrait donc toute definition de macro multiligne illisible.
+    """
+    path = os.path.join(REPO_ROOT, *parts)
+    stanzas = {}
+    current = None
+    key = None
+    buffer = None
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.rstrip("\r\n")
+            if buffer is not None:
+                more = line.endswith("\\")
+                buffer.append(line[:-1] if more else line)
+                if not more:
+                    stanzas[current][key] = " ".join(
+                        part.strip() for part in buffer
+                    ).strip()
+                    buffer = None
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("[") and stripped.endswith("]"):
+                current = stripped[1:-1]
+                stanzas.setdefault(current, {})
+                continue
+            if "=" in stripped and current is not None:
+                key, value = stripped.split("=", 1)
+                key = key.strip()
+                if line.endswith("\\"):
+                    buffer = [value[: value.rindex("\\")] if "\\" in value else value]
+                else:
+                    stanzas[current][key] = value.strip()
+    return stanzas
+
+
+def read_csv_lookup(name):
+    path = os.path.join(REPO_ROOT, "lookups", name)
+    with open(path, encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def endpoint_map():
+    with open(os.path.join(BIN_DIR, "acl_endpoint_map.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def champs_de_table(definition):
+    """Extrait la liste de champs du dernier `| table ...` d'une definition SPL."""
+    segment = definition.rsplit("| table ", 1)[1]
+    return [c.strip().strip('"').strip("'") for c in segment.split(",") if c.strip()]
+
+
+class MacrosTest(unittest.TestCase):
+    def setUp(self):
+        self.conf = read_splunk_conf("default", "macros.conf")
+        self.familles = read_csv_lookup("acl_object_families.csv")
+
+    def test_les_trois_macros_du_cahier_des_charges_sont_declarees(self):
+        for stanza in ("acl_inventory", "acl_inventory(1)", "editacl_rollback(1)"):
+            self.assertIn(stanza, self.conf)
+
+    def test_une_stanza_par_arite_jusqu_au_nombre_de_familles(self):
+        # Splunk indexe les macros par ARITE : `acl_inventory(savedsearch,views)` est un
+        # appel a deux arguments. Sans stanza `[acl_inventory(2)]`, la forme parametree
+        # du §13 echoue avec « macro cannot be found ».
+        arites = {
+            int(m.group(1))
+            for m in (re.match(r"^acl_inventory\((\d+)\)$", s) for s in self.conf)
+            if m
+        }
+        self.assertEqual(arites, set(range(1, len(self.familles) + 1)))
+
+    def test_l_inventaire_ne_s_appuie_pas_sur_le_handler_d_agregation(self):
+        definition = self.conf["acl_inventory_base(1)"]["definition"]
+        self.assertNotIn("admin/directory", definition)
+        self.assertIn("inputlookup acl_object_families", definition)
+
+    def test_l_inventaire_emet_exactement_le_contrat_d_entree(self):
+        definition = self.conf["acl_inventory_base(1)"]["definition"]
+        self.assertEqual(tuple(champs_de_table(definition)), CONTRAT_ENTREE)
+
+    def test_l_inventaire_synthetise_eai_type(self):
+        # Sans cette synthese l'aller fonctionne — `id` est exploitable — mais le retour
+        # arriere est impossible : la restauration resout par `eai:type` (§6.7-4).
+        definition = self.conf["acl_inventory_base(1)"]["definition"]
+        self.assertIn("acl_family", definition)
+        self.assertRegex(
+            definition,
+            r"eval \"eai:type\" = if\(isnull\('eai:type'\).*acl_family",
+        )
+
+    def test_la_selection_precede_les_appels_rest(self):
+        # Le levier de cout du §6.7-2 : une famille non demandee ne doit couter aucun
+        # appel REST. Si le `where` passait apres le `map`, tout serait enumere.
+        definition = self.conf["acl_inventory_base(1)"]["definition"]
+        self.assertLess(definition.index("| where match(family"),
+                        definition.index("| map "))
+
+    def test_l_argument_de_famille_est_filtre_avant_injection_en_regex(self):
+        definition = self.conf["acl_inventory_base(1)"]["definition"]
+        self.assertIn('replace("$families$", "[^A-Za-z0-9_,-]", "")', definition)
+
+    def test_le_rollback_produit_exactement_les_sept_champs_attendus(self):
+        definition = self.conf["editacl_rollback(1)"]["definition"]
+        emis = re.findall(r'AS\s+"?([A-Za-z:._*]+)"?', definition)
+        self.assertEqual(
+            tuple(c for c in emis if c != "restorable"), CONTRAT_ROLLBACK
+        )
+
+    def test_le_rollback_ne_consomme_que_des_champs_journalises(self):
+        definition = self.conf["editacl_rollback(1)"]["definition"]
+        for champ in ("before_perms_read", "before_perms_write", "before_sharing",
+                      "owner", "app", "title", "eai_type", "endpoint", "phase",
+                      "status", "sid"):
+            self.assertIn(champ, definition)
+            self.assertIn(champ, ROLLBACK_FIELDS_FROM_INTENT + ("status",))
+
+    def test_le_rollback_n_apparie_que_les_ecritures_abouties(self):
+        # Un objet dont le POST a echoue n'a pas ete modifie : le « restaurer »
+        # l'ecrirait vers un etat qu'il n'a jamais quitte.
+        definition = self.conf["editacl_rollback(1)"]["definition"]
+        self.assertIn('phase="outcome" AND status="updated"', definition)
+        self.assertIn("eventstats max(_restorable) AS restorable BY endpoint",
+                      definition)
+
+    def test_le_rollback_est_invocable_en_position_generatrice(self):
+        # Invoquee par `| `editacl_rollback(...)``, la definition doit commencer par une
+        # commande. Le §8.6 ecrit le SPL sans son `search` de tete.
+        self.assertTrue(
+            self.conf["editacl_rollback(1)"]["definition"].startswith("search index=")
+        )
+
+
+class CoherenceTableEtLookupTest(unittest.TestCase):
+    """La table est lue par le code Python, le lookup par la macro. Une divergence
+    entre les deux ne se voit qu'a l'execution, et sans message."""
+
+    def setUp(self):
+        self.familles = {
+            row["family"]: row["handler_path"]
+            for row in read_csv_lookup("acl_object_families.csv")
+        }
+        self.table = endpoint_map()
+
+    def test_chaque_famille_est_une_cle_de_la_table(self):
+        for famille, handler in self.familles.items():
+            self.assertIn(famille, self.table)
+            self.assertEqual(self.table[famille], handler)
+
+    def test_chaque_handler_de_la_table_est_inventorie(self):
+        self.assertEqual(set(self.familles.values()), set(self.table.values()))
+
+    def test_un_seul_enregistrement_par_handler(self):
+        # Deux cles de la table peuvent viser le meme handler ; l'inventaire ne doit
+        # l'enumerer qu'une fois, sinon il produit des doublons.
+        handlers = list(self.familles.values())
+        self.assertEqual(len(handlers), len(set(handlers)))
+
+
+class SavedsearchesTest(unittest.TestCase):
+    def setUp(self):
+        self.conf = read_splunk_conf("default", "savedsearches.conf")
+
+    NOMS = (
+        "ACL — inventaire par rôle",
+        "ACL — références aux rôles décommissionnés",
+        "ACL — journal des modifications",
+    )
+
+    def test_les_trois_recherches_du_paragraphe_12_7_sont_livrees(self):
+        for nom in self.NOMS:
+            self.assertIn(nom, self.conf)
+
+    def test_les_inventaires_sont_batis_sur_la_macro_et_pas_sur_le_handler(self):
+        for nom in self.NOMS[:2]:
+            recherche = self.conf[nom]["search"]
+            self.assertIn("`acl_inventory`", recherche)
+            self.assertNotIn("admin/directory", recherche)
+
+    def test_la_recherche_de_roles_decommissionnes_alimente_directement_editacl(self):
+        recherche = self.conf[self.NOMS[1]]["search"]
+        self.assertIn("lookup acl_decommissioned_roles", recherche)
+        emis = champs_de_table(recherche)
+        for champ in CONTRAT_ENTREE:
+            self.assertIn(champ, emis)
+
+    def test_aucune_recherche_n_est_planifiee(self):
+        # L'inventaire est une macro invocable en ligne ; la planification est un usage
+        # recommande, jamais la modalite d'acces (§6.7 contrainte 1).
+        for nom in self.NOMS:
+            self.assertEqual(self.conf[nom]["enableSched"], "0")
+
+
+class LookupsEtMetadataTest(unittest.TestCase):
+    def test_les_definitions_de_lookup_pointent_sur_des_fichiers_livres(self):
+        conf = read_splunk_conf("default", "transforms.conf")
+        for stanza in ("acl_object_families", "acl_decommissioned_roles"):
+            self.assertIn(stanza, conf)
+            chemin = os.path.join(REPO_ROOT, "lookups", conf[stanza]["filename"])
+            self.assertTrue(os.path.exists(chemin), chemin)
+
+    def test_le_lookup_de_roles_ne_porte_que_des_identifiants_generiques(self):
+        # Le depot est public : la liste livree est un gabarit, jamais des roles reels.
+        roles = {row["role"] for row in read_csv_lookup("acl_decommissioned_roles.csv")}
+        self.assertEqual(roles, {"ancien_role", "role_a", "role_b"})
+
+    def test_macros_transforms_et_lookups_sont_exportes_au_systeme(self):
+        # Une macro confinee au contexte de l'app n'est pas invocable en ligne depuis
+        # une recherche ad hoc, et une macro exportee qui s'appuie sur un lookup non
+        # exporte echoue hors de son app.
+        meta = read_splunk_conf("metadata", "default.meta")
+        for stanza in ("macros", "transforms", "lookups"):
+            self.assertEqual(meta[stanza]["export"], "system")
+
+
+class RevalidationTest(unittest.TestCase):
+    """§6.5 — la procedure reutilise le noyau, elle ne le reimplemente pas."""
+
+    def setUp(self):
+        chemin = os.path.join(REPO_ROOT, "tools", "revalidate_mapping.py")
+        with open(chemin, encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_la_procedure_est_livree(self):
+        self.assertTrue(self.source)
+
+    def test_elle_reutilise_le_noyau_plutot_que_de_le_reecrire(self):
+        self.assertIn("from acltools.mapping import load_mapping", self.source)
+        self.assertIn("from acltools.endpoint import build_object_path", self.source)
+
+    def test_elle_produit_les_trois_listes_exigees(self):
+        for marqueur in ("== A. ", "== B. ", "== C. "):
+            self.assertIn(marqueur, self.source)
+
+    def test_le_mot_de_passe_n_est_jamais_un_argument_de_ligne_de_commande(self):
+        self.assertIn("sys.stdin.readline()", self.source)
+        self.assertNotIn("--password", self.source)
+
+
+if __name__ == "__main__":
+    unittest.main()

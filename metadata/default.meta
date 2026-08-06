@@ -18,3 +18,28 @@ export = system
 [commands/editacl]
 access = read : [ * ], write : [ admin ]
 export = system
+
+# Les macros sont exportees au systeme pour la meme raison que la commande :
+# `acl_inventory` doit etre invocable en ligne depuis n'importe quelle recherche
+# ad hoc (§6.7 contrainte 1). Confinee au contexte de l'app, elle ne le serait pas.
+#
+# La definition de lookup et le fichier de lookup qu'elle designe suivent : une macro
+# exportee qui s'appuie sur un `inputlookup` non exporte echoue hors de son app.
+
+[macros]
+access = read : [ * ], write : [ admin ]
+export = system
+
+[transforms]
+access = read : [ * ], write : [ admin ]
+export = system
+
+[lookups]
+access = read : [ * ], write : [ admin ]
+export = system
+
+# Les recherches livrees restent dans le contexte de l'app : elles sont un point de
+# depart d'audit, pas une dependance d'autres apps.
+[savedsearches]
+access = read : [ * ], write : [ admin ]
+export = none

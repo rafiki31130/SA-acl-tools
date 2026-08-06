@@ -1,0 +1,4 @@
+role,remplacement_lecture,remplacement_ecriture,commentaire
+ancien_role,nouveau_role_lecture,nouveau_role_admin,Exemple a remplacer par les roles reellement decommissionnes
+role_a,nouveau_role_lecture,nouveau_role_admin,Exemple a remplacer
+role_b,nouveau_role_lecture,nouveau_role_admin,Exemple a remplacer

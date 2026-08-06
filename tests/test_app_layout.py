@@ -153,20 +153,26 @@ class PropsConfTest(unittest.TestCase):
         self.assertEqual(self.conf.get("editacl:journal", "TRUNCATE"), "0")
 
 
-class MacrosEtSavedsearchesTest(unittest.TestCase):
-    """Livrables de la phase suivante, volontairement absents de cet increment."""
+class ArtefactsSplTest(unittest.TestCase):
+    """Livrables SPL de la phase 2b. Leur contenu est eprouve par
+    `tests/test_spl_artifacts.py` ; ici on ne verifie que leur presence."""
 
-    def test_macros_et_savedsearches_ne_sont_pas_encore_livres(self):
-        for nom in ("macros.conf", "savedsearches.conf"):
-            chemin = os.path.join(REPO_ROOT, "default", nom)
-            if os.path.exists(chemin):
-                with open(chemin, encoding="utf-8") as handle:
-                    contenu = handle.read().strip()
-                self.assertEqual(
-                    contenu, "",
-                    "%s doit rester vide tant que la macro d'inventaire et les "
-                    "recherches sauvegardees ne sont pas livrees" % nom,
-                )
+    ATTENDUS = (
+        ("default", "macros.conf"),
+        ("default", "savedsearches.conf"),
+        ("default", "transforms.conf"),
+        ("lookups", "acl_object_families.csv"),
+        ("lookups", "acl_decommissioned_roles.csv"),
+        ("tools", "revalidate_mapping.py"),
+        ("tools", "acl_probe_bootstrap.sh"),
+        ("tools", "acl_probe_bootstrap_rest.py"),
+    )
+
+    def test_les_artefacts_spl_sont_livres(self):
+        for parts in self.ATTENDUS:
+            chemin = os.path.join(REPO_ROOT, *parts)
+            self.assertTrue(os.path.exists(chemin), chemin)
+            self.assertTrue(os.path.getsize(chemin) > 0, chemin)
 
 
 if __name__ == "__main__":
