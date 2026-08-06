@@ -41,6 +41,7 @@ from splunklib.searchcommands import (  # noqa: E402
     validators,
 )
 
+from acltools.diag import NullDiagnostics, open_diagnostics  # noqa: E402
 from acltools.errors import FatalError, MaxObjectsReached  # noqa: E402
 from acltools.journal import JournalWriter, journal_path  # noqa: E402
 from acltools.mapping import load_mapping  # noqa: E402
@@ -84,6 +85,19 @@ def _read_app_setting(name, default):
     if parser.has_option("editacl", name):
         return parser.get("editacl", name)
     return default
+
+
+def _app_version():
+    """Version declaree par `default/app.conf`, pour la ligne de demarrage du §8.1."""
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(os.path.join(_APP_ROOT, "default", "app.conf"), encoding="utf-8")
+    except (configparser.Error, OSError):
+        return ""
+    for section in ("launcher", "id"):
+        if parser.has_option(section, "version"):
+            return parser.get(section, "version")
+    return ""
 
 
 def _truthy(value, default=True):
@@ -166,6 +180,9 @@ class EditAclCommand(StreamingCommand):
         self._journal_writer = None
         self._params = None
         self._ready = False
+        # Diagnostic inerte tant que le fichier n'est pas ouvert : aucun appel de
+        # diagnostic ne peut lever avant `_setup()`.
+        self._diag = NullDiagnostics()
         # Le message de divergence runtime/disque (§5.6) est emis **une fois** par
         # execution : un lot dont le systeme de fichiers refuse toute ecriture le
         # produirait sinon a chaque objet, et le noierait.
@@ -175,6 +192,22 @@ class EditAclCommand(StreamingCommand):
 
     def _setup(self):
         info = self._metadata.searchinfo
+        sid = str(getattr(info, "sid", "") or "")
+        splunk_home = os.environ.get("SPLUNK_HOME")
+        log_dir = (
+            os.path.join(splunk_home, "var", "log", "splunk") if splunk_home else ""
+        )
+
+        # Ouvert en tout premier, pour que la ligne de demarrage et **toute** erreur
+        # fatale ulterieure — y compris un parametre invalide — soient consignees. Son
+        # echec d'ouverture ne coute rien : `open_diagnostics` ne leve pas et rend un
+        # diagnostic inerte (§8.1, le fichier de diagnostic n'est pas le filet).
+        self._diag = open_diagnostics(log_dir, sid)
+        self._diag.startup(
+            version=_app_version(),
+            user=str(getattr(info, "username", "") or ""),
+            splunkd_uri=str(getattr(info, "splunkd_uri", "") or ""),
+        )
 
         params = validate_params(
             fields_raw=self.fields,
@@ -185,9 +218,12 @@ class EditAclCommand(StreamingCommand):
             max_objects_explicit=self.max_objects is not None,
         )
         self._params = params
+        self._diag.params(params)
         for warning in params.warnings:
             self.write_warning(warning)
 
+        # La cle de session ne quitte jamais cette portee vers le diagnostic : aucune
+        # methode de `Diagnostics` n'a de parametre qui la porte (§8.1, R5).
         session_key = getattr(info, "session_key", None)
         splunkd_uri = getattr(info, "splunkd_uri", None)
         if not session_key or not splunkd_uri:
@@ -200,12 +236,15 @@ class EditAclCommand(StreamingCommand):
 
         verify_ssl = _truthy(_read_app_setting("verify_ssl", "true"), default=True)
         ca_file = None
-        splunk_home = os.environ.get("SPLUNK_HOME")
         if verify_ssl and splunk_home:
             candidate = os.path.join(splunk_home, "etc", "auth", "cacert.pem")
             if os.path.exists(candidate):
                 ca_file = candidate
         if not verify_ssl:
+            self._diag.warning(
+                "verify_ssl=false : verification du certificat de splunkd desactivee "
+                "par local/editacl.conf."
+            )
             self.write_warning(
                 "verify_ssl=false : la verification du certificat de splunkd est "
                 "desactivee par local/editacl.conf."
@@ -214,18 +253,22 @@ class EditAclCommand(StreamingCommand):
         rest = RestClient(splunkd_uri, session_key, verify_ssl=verify_ssl, ca_file=ca_file)
 
         check_capability(rest)
+        self._diag.capability(True)
 
-        sid = str(getattr(info, "sid", "") or "")
-        if check_realtime(rest, sid) == "unknown":
+        verdict = check_realtime(rest, sid)
+        self._diag.realtime(verdict)
+        if verdict == "unknown":
             self.write_warning(
                 "mode temps reel non determinable pour ce sid : le garde-fou du §4.2 "
                 "n'a pas pu s'appliquer."
             )
 
         roles_catalog = load_roles_catalog(rest) if params.validate_roles else frozenset()
-        mapping = load_mapping(_MAP_JSON, _OVERRIDE_CSV)
+        mapping = load_mapping(_MAP_JSON, _OVERRIDE_CSV, diag=self._diag)
+        self._diag.mapping(mapping.coverage())
 
         host = resolve_server_name(rest) or socket.gethostname()
+        self._diag.info("membre : %s" % host)
         ctx = RunContext(
             sid=sid,
             user=str(getattr(info, "username", "") or ""),
@@ -234,13 +277,14 @@ class EditAclCommand(StreamingCommand):
         )
 
         if params.journal:
-            log_dir = os.path.join(splunk_home or "", "var", "log", "splunk")
             path = journal_path(log_dir, sid)
             try:
                 self._journal_writer = JournalWriter(path)
+                self._diag.journal(path, True)
             except FatalError:
                 # L'echec d'ouverture n'est fatal que si une ecriture reelle est
                 # prevue (§5.1 etape 7, §9). En simulation il degrade en avertissement.
+                self._diag.journal(path, False)
                 if not params.dryrun:
                     raise
                 self._journal_writer = None
@@ -269,8 +313,12 @@ class EditAclCommand(StreamingCommand):
                     self._setup()
                 yield self._handle(record)
         except MaxObjectsReached as exc:
+            self._diag.fatal(str(exc))
             self.error_exit(exc, str(exc))
         except FatalError as exc:
+            # Point de consignation unique des erreurs fatales du §9 : `_setup()` est
+            # appele depuis ce `try`, ses erreurs passent donc ici.
+            self._diag.fatal(str(exc))
             self.error_exit(exc, str(exc))
         finally:
             # Une erreur fatale ne doit pas laisser de ligne non ecrite dans le tampon.
@@ -286,6 +334,11 @@ class EditAclCommand(StreamingCommand):
                     writer.close()
                 except Exception:                                    # noqa: BLE001
                     pass
+            diag, self._diag = self._diag, NullDiagnostics()
+            try:
+                diag.close()
+            except Exception:                                        # noqa: BLE001
+                pass
 
     def _handle(self, record):
         event = EventInput(

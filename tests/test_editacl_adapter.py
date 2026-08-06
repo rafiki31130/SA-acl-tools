@@ -300,6 +300,68 @@ class CollisionDeNomsTest(unittest.TestCase):
         self.fail("methode stream() introuvable")
 
 
+class ConsignationDesErreursFatalesTest(unittest.TestCase):
+    """A-3 — le §8.1 exige que les erreurs fatales figurent dans `editacl.log`.
+
+    C'est le seul endroit ou une erreur fatale survit a la fin de la recherche : le
+    message utilisateur est ephemere, le job disparait a l'expiration.
+    """
+
+    def setUp(self):
+        from acltools.diag import NullDiagnostics
+        from acltools.errors import FatalCapabilityError, MaxObjectsReached
+
+        self.module = _charger_editacl()
+        self.commande = self.module.EditAclCommand()
+        self.commande.journal = True
+        self.commande.dryrun = True
+        self.consignees = []
+
+        consignees = self.consignees
+
+        class _FauxDiag(NullDiagnostics):
+            def fatal(self, message):
+                consignees.append(message)
+
+        self.commande._diag = _FauxDiag()
+        self.FatalCapabilityError = FatalCapabilityError
+        self.MaxObjectsReached = MaxObjectsReached
+
+    def _echouer_avec(self, exception):
+        def _setup_qui_echoue():
+            raise exception
+
+        self.commande._setup = _setup_qui_echoue
+        try:
+            list(self.commande.stream([{"title": "un_objet"}]))
+        except SystemExit:
+            pass
+
+    def test_une_erreur_fatale_de_preflight_est_consignee(self):
+        self._echouer_avec(self.FatalCapabilityError("capability absente"))
+        self.assertEqual(self.consignees, ["capability absente"])
+
+    def test_latteinte_du_plafond_est_consignee(self):
+        self._echouer_avec(self.MaxObjectsReached(2))
+        self.assertEqual(len(self.consignees), 1)
+        self.assertIn("max_objects atteint (2)", self.consignees[0])
+
+    def test_le_diagnostic_est_referme_en_fin_dexecution(self):
+        fermetures = []
+        from acltools.diag import NullDiagnostics
+
+        class _DiagQuiCompte(NullDiagnostics):
+            def close(self):
+                fermetures.append(True)
+
+        self.commande._diag = _DiagQuiCompte()
+        self.commande._setup = lambda: setattr(self.commande, "_ready", True)
+        self.commande._processor = None
+        self.commande._handle = lambda record: record
+        list(self.commande.stream([{"title": "un_objet"}]))
+        self.assertEqual(fermetures, [True])
+
+
 class AvertissementDivergenceRuntimeTest(unittest.TestCase):
     """A-2 — l'operateur doit lire, au niveau de la recherche, ce que le jeton
     `acl_warning` ne peut pas dire.

@@ -153,9 +153,10 @@ class LayeringTest(unittest.TestCase):
     def test_le_noyau_nutilise_aucune_dependance_tierce(self):
         """Aucune bibliotheque hors bibliotheque standard, sur aucun module."""
         autorises = {
-            "ast", "csv", "json", "os", "re", "ssl", "sys", "time", "typing",
-            "dataclasses", "datetime", "urllib", "urllib.parse", "urllib.request",
-            "urllib.error", "collections", "collections.abc",
+            "ast", "csv", "json", "logging", "logging.handlers", "os", "re", "ssl",
+            "sys", "time", "typing", "dataclasses", "datetime", "urllib",
+            "urllib.parse", "urllib.request", "urllib.error", "collections",
+            "collections.abc",
         }
         for name, path in _python_files():
             with self.subTest(module=name):

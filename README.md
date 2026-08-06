@@ -508,6 +508,48 @@ une recherche manuelle — peuvent perdre des lignes au moment d'une rotation. L
 étant le **seul** filet de sécurité d'une opération irréversible, une fenêtre connue de
 perte de lignes n'est pas acceptable quand le correctif coûte un nom de fichier.
 
+> **Les deux fichiers n'ont pas la même nature, et c'est délibéré.** Le journal de
+> restauration porte l'état antérieur d'objets mutés : sa perte est inacceptable, d'où
+> l'absence de rotation. Le fichier de diagnostic ne porte aucun état restaurable : sa
+> perte n'est **pas** critique, il reste donc unique et rotatif. Conséquence directe :
+> **aucun échec du diagnostic n'est fatal**, et aucun ne diffère ni n'annule une
+> écriture. Un diagnostic qui interromprait l'opération qu'il observe ajouterait une
+> défaillance à celle qu'il signale.
+
+### `editacl.log` — diagnostic d'exécution
+
+Texte brut, une ligne par enregistrement, horodatage ISO 8601 avec fuseau et
+millisecondes, `sid` en tête de chaque message pour distinguer des exécutions
+concurrentes :
+
+```
+2026-08-06T16:29:53.030+00:00 INFO sid=1786033792.6 demarrage editacl version=1.0.0 user=... splunkd=...
+2026-08-06T16:29:53.031+00:00 INFO sid=1786033792.6 parametres fields=perms.write dryrun=false validate_roles=true journal=true max_objects=5
+2026-08-06T16:29:53.190+00:00 INFO sid=1786033792.6 controle d'habilitation : capability accordee
+2026-08-06T16:29:53.240+00:00 INFO sid=1786033792.6 controle temps reel : batch
+2026-08-06T16:29:53.310+00:00 INFO sid=1786033792.6 table de correspondance : 28 entrees (28 livrees, 0 d'override, 0 surchargees, 0 ecartees)
+2026-08-06T16:29:53.350+00:00 INFO sid=1786033792.6 journal de restauration ouvert : .../editacl_journal_1786033792.6.log
+2026-08-06T16:29:54.020+00:00 CRITICAL sid=1786033792.6 erreur fatale : max_objects atteint (5) : ...
+```
+
+Il porte ce qu'énumère le cahier des charges : **démarrage** (version de l'app,
+utilisateur, membre, `splunkd_uri`, état de la vérification TLS), **paramètres** validés
+et leurs avertissements, **contrôle d'habilitation**, contrôle du mode temps réel,
+**résolution de la table de correspondance** — décompte et entrées écartées, override
+compris —, ouverture du journal de restauration, et **erreurs fatales**.
+
+> **Aucun secret n'y entre.** La garantie est d'abord structurelle : le module de
+> diagnostic ne reçoit jamais la clé de session — aucune de ses méthodes n'a de
+> paramètre qui la porte, et le client REST ne lui parle pas. Une rédaction couvre en
+> seconde ligne les messages d'erreur recopiés depuis la plateforme : en-tête
+> `Authorization`, `session_key`, `token`, `password`, `api_key` et apparentés sont
+> remplacés par `[redige]`, **jamais tronqués** — un secret tronqué reste un secret
+> partiellement divulgué. Ce fichier est collecté vers un index : il est lu par bien
+> plus de monde que le disque du search head.
+
+C'est la seule trace d'une erreur fatale qui survive à la fin de la recherche : le
+message utilisateur est éphémère et le job disparaît à son expiration.
+
 ### Deux lignes par écriture
 
 ```mermaid
