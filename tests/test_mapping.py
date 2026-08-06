@@ -70,6 +70,29 @@ class HandlerPathValidationTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(is_valid_handler_path(path))
 
+    def test_aucun_segment_de_traversee_nest_admis(self):
+        """A-5 — `..` en position ulterieure etait admis par le seul motif.
+
+        La surete ne doit pas dependre du refus de splunkd : il repond 404 sur
+        Splunk 9.4.6, mais un socle qui normaliserait le chemin ferait sortir la
+        requete du namespace reconstruit.
+        """
+        for path in (
+            "a/../../services/authentication/users",
+            "saved/../admin/directory",
+            "saved/searches/..",
+            "saved/./searches",
+            "a/.../b",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(is_valid_handler_path(path))
+
+    def test_un_point_a_linterieur_dun_segment_reste_admis(self):
+        """Le refus porte sur le segment de traversee, pas sur le point lui-meme."""
+        for path in ("data/ui.views", "a.b/c-d_e~f", "saved/searches.v2"):
+            with self.subTest(path=path):
+                self.assertTrue(is_valid_handler_path(path))
+
 
 class LoadMappingTest(unittest.TestCase):
 

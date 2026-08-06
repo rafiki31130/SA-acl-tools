@@ -22,9 +22,28 @@ from .errors import FatalMappingError
 #: pourrait viser un endpoint arbitraire.
 HANDLER_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$")
 
+#: Segment de traversee de chemin — `.`, `..`, et toute suite de points. Le motif
+#: ci-dessus exige un premier caractere alphanumerique, ce qui ecarte un `../` en tete,
+#: mais admet un `..` en position ulterieure : le point figure dans la classe de
+#: caracteres des segments suivants.
+_DOT_SEGMENT_RE = re.compile(r"^\.+$")
+
 
 def is_valid_handler_path(path):
-    return bool(path) and bool(HANDLER_PATH_RE.match(path))
+    """Vrai si `path` est un chemin de handler admissible.
+
+    Le refus des segments `.` et `..` est **la defense de l'outil**, pas un doublon de
+    celle de la plateforme. Splunk 9.4.6 ne normalise pas `..` — il le traite comme une
+    action de handler et repond 404 — mais faire reposer le confinement au namespace
+    sur le comportement d'un tiers n'est pas s'en defendre : un socle qui normaliserait
+    le chemin, ou un changement de comportement en amont, rendrait la reconstruction
+    d'URI exploitable. `handler_path` est le seul des quatre segments a n'etre
+    deliberement pas `%`-encode (§5.2), et il provient soit de la table livree, soit du
+    fichier d'override edite par l'exploitant, soit du champ `id` de l'evenement.
+    """
+    if not path or not HANDLER_PATH_RE.match(path):
+        return False
+    return not any(_DOT_SEGMENT_RE.match(segment) for segment in path.split("/"))
 
 
 class Mapping(object):

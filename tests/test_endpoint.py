@@ -132,6 +132,22 @@ class HandlerPathFromIdTest(unittest.TestCase):
         )
         self.assertEqual(path, "data/ui/views")
 
+    def test_id_portant_une_traversee_est_ecarte(self):
+        """A-5 — un `id` forge ne doit pas sortir du namespace reconstruit.
+
+        Sur Splunk 9.4.6 la requete aboutissait a un 404 emis par splunkd, qui traite
+        `..` comme une action de handler inconnue. Le confinement est desormais porte
+        par l'outil : le `handler_path` est ecarte a la source.
+        """
+        for id_value in (
+            "https://base.invalid:0/servicesNS/nobody/mon_app/"
+            "a/../../../services/authentication/users/objet",
+            "https://base.invalid:0/servicesNS/nobody/mon_app/"
+            "saved/../admin/directory/objet",
+        ):
+            with self.subTest(id_value=id_value):
+                self.assertIsNone(handler_path_from_id(id_value))
+
 
 class ResolveHandlerPathTest(unittest.TestCase):
 
@@ -158,6 +174,16 @@ class ResolveHandlerPathTest(unittest.TestCase):
     def test_id_malforme_bascule_sur_la_table(self):
         handler, source = resolve_handler_path(
             "pas-une-uri", "views", FIXTURE_MAPPING
+        )
+        self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
+
+    def test_id_a_traversee_bascule_sur_la_table(self):
+        """A-5 — le refus n'ouvre pas un trou fonctionnel : la table prend le relais."""
+        handler, source = resolve_handler_path(
+            "https://base.invalid:0/servicesNS/nobody/mon_app/"
+            "saved/../../services/authentication/users/objet",
+            "views",
+            FIXTURE_MAPPING,
         )
         self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
 
