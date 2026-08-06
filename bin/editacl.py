@@ -152,7 +152,14 @@ class EditAclCommand(StreamingCommand):
     def __init__(self):
         super(EditAclCommand, self).__init__()
         self._processor = None
-        self._journal = None
+        # `_journal_writer`, et surtout PAS `_journal` : le SDK range la valeur d'une
+        # `Option` dans l'attribut `"_" + <nom de l'option>`
+        # (`searchcommands/decorators.py`). L'option `journal` occupe donc `_journal`.
+        # Y ranger le writer creait une collision bidirectionnelle — le booleen de
+        # l'option se faisait fermer comme un fichier sur le chemin d'erreur fatale, et
+        # l'ecriture du writer rendait la valeur de l'option illisible.
+        # `tests/test_editacl_adapter.py` interdit mecaniquement le retour du defaut.
+        self._journal_writer = None
         self._params = None
         self._ready = False
 
@@ -222,13 +229,13 @@ class EditAclCommand(StreamingCommand):
             log_dir = os.path.join(splunk_home or "", "var", "log", "splunk")
             path = journal_path(log_dir, sid)
             try:
-                self._journal = JournalWriter(path)
+                self._journal_writer = JournalWriter(path)
             except FatalError:
                 # L'echec d'ouverture n'est fatal que si une ecriture reelle est
                 # prevue (§5.1 etape 7, §9). En simulation il degrade en avertissement.
                 if not params.dryrun:
                     raise
-                self._journal = None
+                self._journal_writer = None
                 self.write_warning(
                     "journal non ouvrable (%s) : execution en simulation poursuivie "
                     "sans journal." % path
@@ -238,7 +245,7 @@ class EditAclCommand(StreamingCommand):
             params=params,
             ctx=ctx,
             rest=rest,
-            journal=self._journal,
+            journal=self._journal_writer,
             mapping=mapping,
             roles_catalog=roles_catalog,
             app_disabled_fn=AppStateCache(rest).is_app_disabled,
@@ -259,9 +266,18 @@ class EditAclCommand(StreamingCommand):
             self.error_exit(exc, str(exc))
         finally:
             # Une erreur fatale ne doit pas laisser de ligne non ecrite dans le tampon.
-            if self._journal is not None:
-                self._journal.close()
-                self._journal = None
+            #
+            # Et le nettoyage ne doit JAMAIS supplanter l'erreur en cours de
+            # propagation : une exception levee dans un `finally` remplace celle qui
+            # remontait, c'est-a-dire le message que l'operateur attend. Le `close()`
+            # est donc protege, et l'attribut detache avant l'appel pour qu'un second
+            # passage ne le referme pas.
+            writer, self._journal_writer = self._journal_writer, None
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:                                    # noqa: BLE001
+                    pass
 
     def _handle(self, record):
         event = EventInput(
