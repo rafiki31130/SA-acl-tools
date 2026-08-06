@@ -22,6 +22,29 @@ MANIFEST = os.path.join(LIB, "MANIFEST.sha256")
 #: versionnes, pas produits par pip.
 EXCLUDED = {"MANIFEST.sha256", "VENDOR.md"}
 
+#: Repertoires d'artefacts de compilation, exclus du parcours.
+EXCLUDED_DIRS = {"__pycache__"}
+
+#: Suffixes d'artefacts de compilation, exclus du parcours.
+EXCLUDED_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_build_artifact(relative):
+    """Vrai pour un artefact produit par l'interprete, jamais par `pip`.
+
+    Le manifeste decrit ce que `tools/vendor.sh` installe ; l'elagage y retire deja
+    `__pycache__` et `*.pyc`. Le parcours de verification doit appliquer la meme
+    exclusion, faute de quoi **le simple fait d'importer le SDK vendorise met le
+    verificateur en echec** — un import cree les `.pyc` sous `bin/lib/`, que le
+    parcours compte alors comme des fichiers non declares. Un controle d'integrite mis
+    en echec par l'usage de ce qu'il controle n'est pas exploitable, et il oriente vers
+    une reconstruction complete pour un faux positif.
+    """
+    segments = relative.split("/")
+    if any(segment in EXCLUDED_DIRS for segment in segments[:-1]):
+        return True
+    return segments[-1].endswith(EXCLUDED_SUFFIXES)
+
 
 def _digest(path):
     hasher = hashlib.sha256()
@@ -33,11 +56,11 @@ def _digest(path):
 
 def _entries():
     for dirpath, dirnames, filenames in os.walk(LIB):
-        dirnames.sort()
+        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_DIRS)
         for name in sorted(filenames):
             full = os.path.join(dirpath, name)
             relative = os.path.relpath(full, LIB).replace(os.sep, "/")
-            if relative in EXCLUDED:
+            if relative in EXCLUDED or _is_build_artifact(relative):
                 continue
             yield relative, _digest(full)
 

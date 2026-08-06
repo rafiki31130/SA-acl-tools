@@ -884,6 +884,14 @@ Toute montée de version passe par `tools/requirements-vendor.txt` puis la réex
 des deux scripts — **jamais** par une édition directe dans `bin/lib/`, que
 `verify_vendor.sh` détecterait. Détail : [`bin/lib/VENDOR.md`](bin/lib/VENDOR.md).
 
+Le manifeste décrit **ce que `tools/vendor.sh` installe**, pas le contenu brut du
+répertoire : les artefacts de compilation de l'interpréteur (`__pycache__/`, `*.pyc`,
+`*.pyo`) sont exclus du parcours, à l'écriture comme à la vérification. Ils
+apparaissent dès le premier import du SDK — c'est-à-dire dès la première exécution de
+la commande sur une app déployée — et les compter comme une divergence rendrait le
+contrôle inexploitable là où il sert. Une modification réelle d'un fichier vendorisé,
+son ajout ou sa disparition restent détectés.
+
 ---
 
 ## Limites connues
