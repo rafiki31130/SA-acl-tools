@@ -42,7 +42,7 @@ from splunklib.searchcommands import (  # noqa: E402
 )
 
 from acltools.diag import NullDiagnostics, open_diagnostics  # noqa: E402
-from acltools.errors import FatalError, MaxObjectsReached  # noqa: E402
+from acltools.errors import FatalError  # noqa: E402
 from acltools.journal import JournalWriter, journal_path  # noqa: E402
 from acltools.mapping import load_mapping  # noqa: E402
 from acltools.model import EventInput, RunContext  # noqa: E402
@@ -98,6 +98,17 @@ def _app_version():
         if parser.has_option(section, "version"):
             return parser.get(section, "version")
     return ""
+
+
+def _abort_process(code=1):
+    """Quitte le processus **sans** derouler les `finally` ni le protocole du SDK.
+
+    Point d'indirection unique, pour deux raisons. La premiere est de nommer ce que
+    fait `os._exit` : il n'y a pas de retour, pas de nettoyage, pas de chunk final.
+    La seconde est de rendre le chemin d'echec **eprouvable** — un `os._exit` en dur
+    tuerait le processus de test au lieu de le faire echouer.
+    """
+    os._exit(code)                                                   # pragma: no cover
 
 
 def _truthy(value, default=True):
@@ -203,10 +214,12 @@ class EditAclCommand(StreamingCommand):
         # echec d'ouverture ne coute rien : `open_diagnostics` ne leve pas et rend un
         # diagnostic inerte (§8.1, le fichier de diagnostic n'est pas le filet).
         self._diag = open_diagnostics(log_dir, sid)
+        verify_ssl = _truthy(_read_app_setting("verify_ssl", "true"), default=True)
         self._diag.startup(
             version=_app_version(),
             user=str(getattr(info, "username", "") or ""),
             splunkd_uri=str(getattr(info, "splunkd_uri", "") or ""),
+            verify_ssl=verify_ssl,
         )
 
         params = validate_params(
@@ -234,7 +247,6 @@ class EditAclCommand(StreamingCommand):
                 "s'adresser a la plateforme."
             )
 
-        verify_ssl = _truthy(_read_app_setting("verify_ssl", "true"), default=True)
         ca_file = None
         if verify_ssl and splunk_home:
             candidate = os.path.join(splunk_home, "etc", "auth", "cacert.pem")
@@ -312,33 +324,76 @@ class EditAclCommand(StreamingCommand):
                 if not self._ready:
                     self._setup()
                 yield self._handle(record)
-        except MaxObjectsReached as exc:
-            self._diag.fatal(str(exc))
-            self.error_exit(exc, str(exc))
         except FatalError as exc:
-            # Point de consignation unique des erreurs fatales du §9 : `_setup()` est
-            # appele depuis ce `try`, ses erreurs passent donc ici.
+            # Point de consignation unique des erreurs fatales du §9 — `MaxObjectsReached`
+            # comprise, qui en derive. `_setup()` est appele depuis ce `try`, ses erreurs
+            # passent donc ici.
             self._diag.fatal(str(exc))
-            self.error_exit(exc, str(exc))
+            self._cleanup()
+            self._fatal_exit(exc)
         finally:
-            # Une erreur fatale ne doit pas laisser de ligne non ecrite dans le tampon.
-            #
-            # Et le nettoyage ne doit JAMAIS supplanter l'erreur en cours de
-            # propagation : une exception levee dans un `finally` remplace celle qui
-            # remontait, c'est-a-dire le message que l'operateur attend. Le `close()`
-            # est donc protege, et l'attribut detache avant l'appel pour qu'un second
-            # passage ne le referme pas.
-            writer, self._journal_writer = self._journal_writer, None
-            if writer is not None:
-                try:
-                    writer.close()
-                except Exception:                                    # noqa: BLE001
-                    pass
-            diag, self._diag = self._diag, NullDiagnostics()
+            self._cleanup()
+
+    def _cleanup(self):
+        """Referme journal et diagnostic. Idempotent, et ne leve jamais.
+
+        Une erreur fatale ne doit pas laisser de ligne non ecrite dans le tampon. Et le
+        nettoyage ne doit JAMAIS supplanter l'erreur en cours de propagation : une
+        exception levee dans un `finally` remplace celle qui remontait, c'est-a-dire le
+        message que l'operateur attend. Chaque `close()` est donc protege, et l'attribut
+        detache avant l'appel pour qu'un second passage ne le referme pas.
+        """
+        writer, self._journal_writer = self._journal_writer, None
+        if writer is not None:
             try:
-                diag.close()
+                writer.close()
             except Exception:                                        # noqa: BLE001
                 pass
+        diag, self._diag = self._diag, NullDiagnostics()
+        try:
+            diag.close()
+        except Exception:                                            # noqa: BLE001
+            pass
+
+    def _fatal_exit(self, exc):
+        """Interrompt la recherche **en marquant le job en echec** (§4.3, A-4).
+
+        `error_exit()` du SDK ecrit le message puis leve `SystemExit`, que le SDK
+        convertit en `finish()` — un chunk final `finished: true` — suivi d'une sortie 1.
+        Ce chunk dit a splunkd que la commande s'est terminee normalement, et splunkd
+        ignore alors le code de retour. Mesure sur Splunk 9.4.6 : le job ressort
+        `dispatchState=DONE`, `isFailed=false`, `resultCount=0`. Un ordonnanceur ou une
+        alerte batie sur ce pipeline ne distingue donc pas une interruption d'un lot
+        vide — le `MSG[ERROR]` n'est visible que pour qui inspecte le job.
+
+        Le message est donc emis dans un chunk **non final**, puis le processus quitte
+        avec un code non nul sans jamais envoyer `finished: true`. splunkd marque alors
+        `dispatchState=FAILED` / `isFailed=true` **et conserve le message** ; il ajoute
+        le sien, « External search command exited unexpectedly with non-zero error
+        code 1 », qui est exact.
+
+        `os._exit` court-circuite les `finally` : le nettoyage est fait par l'appelant
+        **avant** cet appel. Le journal ne perd rien pour autant — chaque ligne est
+        deja `flush()`ee a l'ecriture, et la ligne `intent` `fsync()`ee (§8.4).
+        """
+        message = str(exc)
+        try:
+            self.write_error(message)
+            record_writer = getattr(self, "_record_writer", None)
+            write_chunk = getattr(record_writer, "write_chunk", None)
+            if write_chunk is not None:
+                # Chunk **non final** : le message part, la fin de flux n'est pas
+                # annoncee. `_write_chunk` vide lui-meme le tampon de sortie.
+                write_chunk(finished=False)
+            else:                                                    # pragma: no cover
+                # Protocole v1 : pas de chunk, le flush suffit a pousser l'en-tete de
+                # messages.
+                self.flush()
+        except Exception:                                            # noqa: BLE001
+            # Aucune defaillance de la sortie ne doit empecher le marquage en echec :
+            # c'est la seule chose que cette methode doit garantir.
+            pass
+        _abort_process(1)
 
     def _handle(self, record):
         event = EventInput(

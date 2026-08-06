@@ -185,6 +185,43 @@ aucun moment la cardinalité totale de son entrée. Conséquences, toutes voulue
   sur échec unitaire produirait un état partiel non caractérisé. Le journal caractérise
   intégralement l'état partiel, et reste le moyen de le reprendre ou de l'annuler.
 
+#### À l'atteinte du plafond, la sortie de recherche est intégralement perdue
+
+Ce n'est pas une troncature : `resultCount = 0`. Les événements déjà émis — y compris
+les `updated` — disparaissent avec les autres. Le comportement vient de la plateforme,
+et il n'est pas modifiable depuis une commande de recherche.
+
+**Le journal reste la seule trace exploitable de ce qui a été écrit**, et il est
+complet : deux lignes par objet, `before` et `after` inclus. La reprise et l'annulation
+passent par lui, exactement comme dans le cas nominal :
+
+```
+| `editacl_rollback(<sid>)`          ← prévisualiser ce qui serait rétabli
+| `editacl_rollback_apply(<sid>)`    ← rétablir
+```
+
+Le `sid` s'obtient par l'inspecteur de recherche ou par le nom du fichier de journal.
+`editacl.log` porte de son côté la ligne `CRITICAL … erreur fatale : max_objects
+atteint (<n>)`, qui date l'interruption.
+
+**Le job est marqué en échec** — `dispatchState = FAILED`, `isFailed = true`. Ce n'était
+pas le cas auparavant : le job ressortait `DONE` à zéro résultat, indiscernable d'un lot
+vide pour une recherche planifiée ou une alerte, et le `MSG[ERROR]` n'était visible que
+pour qui inspectait le job. Le marquage tient à un seul fait, mesuré sur Splunk 9.4.6 :
+la commande n'émet **pas** de chunk final `finished: true` avant de quitter en code non
+nul. Conséquence à connaître, la liste des messages du job porte alors deux entrées —
+celle de la commande, explicite, et celle de splunkd, générique :
+
+```
+MSG[ERROR] max_objects atteint (2) : la recherche est interrompue, les objets deja
+           ecrits ne sont pas annules.
+MSG[ERROR] Error in 'editacl' command: External search command exited unexpectedly
+           with non-zero error code 1.
+```
+
+La seconde est exacte et attendue. Le même mécanisme s'applique à **toutes** les
+erreurs fatales de la liste ci-dessous, pas seulement au plafond.
+
 ### Une liste de valeurs passée à `fields` doit être entre guillemets
 
 La seule forme correcte, dès que `fields` porte plus d'une valeur :
@@ -1015,6 +1052,7 @@ son ajout ou sa disparition restent détectés.
 | **Table établie sur 9.4.6** | Une nomenclature différente sur un autre socle produit des rejets, voire un endpoint valide mais faux | Re-validation sur le socle cible, **prérequis à tout usage réel** ; fichier d'override |
 | **Double troncature d'inventaire** | L'opérateur traite un sous-ensemble sans le moindre message | `admin_all_objects` + inventaire par endpoints natifs |
 | **Aucune atomicité de lot** | Un arrêt en cours laisse un état partiel | Le journal caractérise intégralement l'état partiel |
+| **Sortie de recherche perdue sur erreur fatale** | À l'atteinte de `max_objects` comme sur toute erreur fatale, `resultCount = 0` : les événements déjà émis disparaissent. Non modifiable depuis une commande de recherche | Le journal reste complet et reste la voie de reprise et d'annulation ; `editacl.log` date l'interruption. Le job est marqué `isFailed = true`, ce qu'un ordonnanceur détecte |
 | **Aucune reprise sur le POST** | Un échec de transport après émission laisse une `intent` sans `outcome` | Contrôle croisé avec `splunkd_access.log` pour déterminer si l'écriture a eu lieu. Une reprise ne distinguerait pas « le POST n'est pas parti » de « le POST a abouti et la réponse s'est perdue » |
 | **`HTTP 500` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
 | **Réplication en cluster de search heads** | Chaque écriture déclenche une réplication d'objet de connaissance | Lots bornés par `max_objects`, déroulement hors fenêtre de forte activité. La commande sérialise ses appels et n'implémente **aucune** temporisation automatique |

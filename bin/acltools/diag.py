@@ -185,13 +185,15 @@ class Diagnostics(NullDiagnostics):
 
     # -- evenements enumeres par le §8.1 ------------------------------------ #
 
-    def startup(self, version="", user="", host="", splunkd_uri="", verify_ssl=None):
+    def startup(self, version="", user="", splunkd_uri="", verify_ssl=None):
+        """Ligne de demarrage. Le membre est journalise separement : `serverName` n'est
+        connu qu'apres un appel REST, et cette ligne doit preceder tout ce qui peut
+        echouer."""
         self.info(
-            "demarrage editacl version=%s user=%s host=%s splunkd=%s verify_ssl=%s"
+            "demarrage editacl version=%s user=%s splunkd=%s verify_ssl=%s"
             % (
                 version or "?",
                 user or "-",
-                host or "-",
                 splunkd_uri or "-",
                 "?" if verify_ssl is None else str(bool(verify_ssl)).lower(),
             )

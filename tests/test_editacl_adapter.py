@@ -58,18 +58,57 @@ class _FakeOption(object):
         setattr(instance, self.backing_field_name, value)
 
 
+class _FakeRecordWriter(object):
+    """Ecrivain de chunks factice. Enregistre l'etat `finished` de chaque chunk : c'est
+    lui qui decide si splunkd marque le job en echec (§4.3, A-4)."""
+
+    def __init__(self):
+        self.chunks = []
+
+    def write_chunk(self, finished=None):
+        self.chunks.append(finished)
+
+
 class _FakeSearchCommand(object):
     def __init__(self):
         self._metadata = types.SimpleNamespace(searchinfo=types.SimpleNamespace())
+        self._record_writer = _FakeRecordWriter()
         self.warnings = []
         self.errors = []
+        self.flushes = 0
+        self.finishes = 0
 
     def write_warning(self, message):
         self.warnings.append(message)
 
+    def write_error(self, message):
+        self.errors.append(message)
+
+    def flush(self):
+        self.flushes += 1
+
+    def finish(self):
+        self.finishes += 1
+
     def error_exit(self, error, message=None):
         self.errors.append(message or str(error))
         raise SystemExit(message or str(error))
+
+
+class Abandon(Exception):
+    """Substitut de `os._exit` dans les tests : le vrai tuerait le processus de test."""
+
+    def __init__(self, code):
+        super(Abandon, self).__init__("abandon(%s)" % code)
+        self.code = code
+
+
+def _intercepter_labandon(module):
+    """Remplace la sortie de processus par une exception observable."""
+    def _abandon(code=1):
+        raise Abandon(code)
+
+    module._abort_process = _abandon
 
 
 class _FakeBoolean(object):
@@ -130,6 +169,7 @@ class CheminErreurFataleTest(unittest.TestCase):
 
     def setUp(self):
         self.module = _charger_editacl()
+        _intercepter_labandon(self.module)
         from acltools.errors import FatalCapabilityError
 
         self.commande = self.module.EditAclCommand()
@@ -142,15 +182,14 @@ class CheminErreurFataleTest(unittest.TestCase):
         self.commande._setup = _setup_qui_echoue
 
     def test_le_message_dorigine_nest_pas_remplace_par_une_trace_python(self):
-        with self.assertRaises(SystemExit) as leve:
+        with self.assertRaises(Abandon):
             list(self.commande.stream([{"title": "un_objet"}]))
-        self.assertEqual(str(leve.exception), self.MESSAGE)
         self.assertEqual(self.commande.errors, [self.MESSAGE])
 
     def test_aucune_attributeerror_sur_le_nettoyage(self):
         try:
             list(self.commande.stream([{"title": "un_objet"}]))
-        except SystemExit:
+        except Abandon:
             pass
         except AttributeError as exc:                            # pragma: no cover
             self.fail(
@@ -164,6 +203,87 @@ class CheminErreurFataleTest(unittest.TestCase):
         self.assertIs(self.commande.journal, True)
         self.commande._journal_writer = object()
         self.assertIs(self.commande.journal, True)
+
+
+class MarquageDuJobEnEchecTest(unittest.TestCase):
+    """A-4 — a l'atteinte de `max_objects`, le job ressortait `DONE`, `isFailed=false`,
+    `resultCount=0` : indiscernable d'un lot vide pour un ordonnanceur.
+
+    Mesure sur Splunk 9.4.6 : le marquage depend d'un seul fait, le chunk final
+    `finished: true`. `error_exit()` du SDK l'envoie avant de quitter, et splunkd ignore
+    alors le code de retour du processus. Emettre le message dans un chunk **non final**
+    puis quitter en code non nul donne `dispatchState=FAILED`, `isFailed=true`, **et**
+    conserve le message.
+    """
+
+    MESSAGE = "max_objects atteint (2) : la recherche est interrompue"
+
+    def setUp(self):
+        self.module = _charger_editacl()
+        _intercepter_labandon(self.module)
+        from acltools.errors import MaxObjectsReached
+
+        self.commande = self.module.EditAclCommand()
+        self.commande.journal = True
+        self.commande.dryrun = False
+
+        def _setup_qui_atteint_le_plafond():
+            raise MaxObjectsReached(2)
+
+        self.commande._setup = _setup_qui_atteint_le_plafond
+        self.MaxObjectsReached = MaxObjectsReached
+
+    def _executer(self):
+        with self.assertRaises(Abandon) as leve:
+            list(self.commande.stream([{"title": "un_objet"}]))
+        return leve.exception
+
+    def test_le_processus_quitte_en_code_non_nul(self):
+        self.assertEqual(self._executer().code, 1)
+
+    def test_le_chunk_emis_nest_pas_final(self):
+        """Le point de fond : `finished: true` ferait ignorer le code de retour."""
+        self._executer()
+        self.assertEqual(self.commande._record_writer.chunks, [False])
+        self.assertEqual(self.commande.finishes, 0)
+
+    def test_le_message_est_conserve(self):
+        """Marquer le job en echec ne doit pas couter le message de l'operateur."""
+        self._executer()
+        self.assertEqual(len(self.commande.errors), 1)
+        self.assertIn("max_objects atteint (2)", self.commande.errors[0])
+
+    def test_le_sdk_error_exit_nest_plus_employe(self):
+        """`error_exit()` envoie `finished: true` : il ne peut pas marquer l'echec."""
+        chemin = os.path.join(BIN_DIR, "editacl.py")
+        with open(chemin, encoding="utf-8") as handle:
+            arbre = ast.parse(handle.read(), filename=chemin)
+        appels = {
+            ast.unparse(noeud.func)
+            for noeud in ast.walk(arbre)
+            if isinstance(noeud, ast.Call)
+        }
+        self.assertNotIn("self.error_exit", appels)
+        self.assertNotIn("self.finish", appels)
+
+    def test_journal_et_diagnostic_sont_refermes_avant_labandon(self):
+        """`os._exit` court-circuite les `finally` : le nettoyage doit preceder."""
+        etat = {"journal": False, "diag": False}
+
+        class _Journal(object):
+            def close(self):
+                etat["journal"] = True
+
+        from acltools.diag import NullDiagnostics
+
+        class _Diag(NullDiagnostics):
+            def close(self):
+                etat["diag"] = True
+
+        self.commande._journal_writer = _Journal()
+        self.commande._diag = _Diag()
+        self._executer()
+        self.assertEqual(etat, {"journal": True, "diag": True})
 
 
 class CollisionDeNomsTest(unittest.TestCase):
@@ -278,26 +398,48 @@ class CollisionDeNomsTest(unittest.TestCase):
             "SearchCommand / StreamingCommand : %s" % collisions,
         )
 
-    def test_le_nettoyage_du_finally_ne_peut_pas_masquer_lerreur_en_cours(self):
-        """Le `close()` du `finally` doit etre protege : une exception levee la
-        remplacerait l'erreur fatale en cours de propagation."""
+    def _methode(self, nom):
         for noeud in ast.walk(self._classe_commande()):
-            if isinstance(noeud, ast.FunctionDef) and noeud.name == "stream":
-                essais = [n for n in ast.walk(noeud) if isinstance(n, ast.Try)]
-                finallys = [n for n in essais if n.finalbody]
-                self.assertTrue(finallys, "le `stream()` n'a pas de bloc `finally`")
-                for bloc in finallys:
-                    protege = any(
-                        isinstance(n, ast.Try) and n.handlers
-                        for f in bloc.finalbody for n in ast.walk(f)
-                    )
-                    self.assertTrue(
-                        protege,
-                        "le corps du `finally` n'est pas protege : une exception y "
-                        "supplanterait l'erreur fatale en cours de propagation",
-                    )
-                return
-        self.fail("methode stream() introuvable")
+            if isinstance(noeud, ast.FunctionDef) and noeud.name == nom:
+                return noeud
+        self.fail("methode %s() introuvable" % nom)
+
+    def test_le_finally_de_stream_delegue_au_nettoyage(self):
+        essais = [n for n in ast.walk(self._methode("stream")) if isinstance(n, ast.Try)]
+        finallys = [n for n in essais if n.finalbody]
+        self.assertTrue(finallys, "le `stream()` n'a pas de bloc `finally`")
+        appels = {
+            ast.unparse(n.func)
+            for bloc in finallys
+            for f in bloc.finalbody
+            for n in ast.walk(f)
+            if isinstance(n, ast.Call)
+        }
+        self.assertIn("self._cleanup", appels)
+
+    def test_le_nettoyage_ne_peut_pas_masquer_lerreur_en_cours(self):
+        """Chaque `close()` du nettoyage doit etre protege : une exception levee dans
+        le `finally` remplacerait l'erreur fatale en cours de propagation."""
+        nettoyage = self._methode("_cleanup")
+        fermetures = [
+            n for n in ast.walk(nettoyage)
+            if isinstance(n, ast.Call) and ast.unparse(n.func).endswith(".close")
+        ]
+        self.assertTrue(fermetures, "le nettoyage ne referme rien")
+        proteges = {
+            n.lineno
+            for essai in ast.walk(nettoyage)
+            if isinstance(essai, ast.Try) and essai.handlers
+            for corps in essai.body
+            for n in ast.walk(corps)
+            if isinstance(n, ast.Call)
+        }
+        for fermeture in fermetures:
+            self.assertIn(
+                fermeture.lineno, proteges,
+                "un `close()` du nettoyage n'est pas protege : une exception y "
+                "supplanterait l'erreur fatale en cours de propagation",
+            )
 
 
 class ConsignationDesErreursFatalesTest(unittest.TestCase):
@@ -312,6 +454,7 @@ class ConsignationDesErreursFatalesTest(unittest.TestCase):
         from acltools.errors import FatalCapabilityError, MaxObjectsReached
 
         self.module = _charger_editacl()
+        _intercepter_labandon(self.module)
         self.commande = self.module.EditAclCommand()
         self.commande.journal = True
         self.commande.dryrun = True
@@ -334,7 +477,7 @@ class ConsignationDesErreursFatalesTest(unittest.TestCase):
         self.commande._setup = _setup_qui_echoue
         try:
             list(self.commande.stream([{"title": "un_objet"}]))
-        except SystemExit:
+        except Abandon:
             pass
 
     def test_une_erreur_fatale_de_preflight_est_consignee(self):
@@ -377,6 +520,7 @@ class AvertissementDivergenceRuntimeTest(unittest.TestCase):
         from acltools.pipeline import RUNTIME_DIVERGENCE_WARNING
 
         self.module = _charger_editacl()
+        _intercepter_labandon(self.module)
         self.commande = self.module.EditAclCommand()
         self.commande._ready = True
 
