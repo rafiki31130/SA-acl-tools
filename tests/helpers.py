@@ -23,6 +23,7 @@ FIXTURE_MAPPING = Mapping(
         "eventtypes": "saved/eventtypes",
         "macros": "data/macros",
         "lookup-table-file": "data/lookup-table-files",
+        "fvtags": "saved/fvtags",
     }
 )
 
@@ -34,16 +35,20 @@ def acl_body(
     read=("role_a",),
     write=("ancien_role",),
     can_change_perms=True,
+    name="objet_temoin",
 ):
     """Corps de reponse d'un `GET <objet>?output_mode=json&f=eai:acl*`.
 
     Seul le bloc `entry[0].acl` fait autorite (§5.3) ; `content` est volontairement
     reduit, le parametre `f` le filtre de toute facon.
+
+    `name` est l'identite canonique renvoyee par splunkd. Elle est distincte du `title`
+    de l'evenement d'entree et c'est elle qui alimente le rang 0 du §5.4 (§3.4, D-18).
     """
     document = {
         "entry": [
             {
-                "name": "objet_temoin",
+                "name": name,
                 "content": {},
                 "acl": {
                     "app": app,

@@ -432,6 +432,21 @@ class DivergenceRuntimeDisqueTest(unittest.TestCase):
         self.assertEqual(resultat.http_code, 500)
         self.assertIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
 
+    def test_toute_la_classe_5xx_porte_lavertissement(self):
+        """D-16 : l'avertissement porte sur tout `5xx`, pas sur le seul `500`.
+
+        Rien dans le mecanisme observe n'attache la divergence au code `500` : elle
+        tient a ce que le handler a mute son etat en memoire avant d'echouer a le
+        persister. Un `502`, un `503` ou un `507` produisent la meme situation, et la
+        restreindre a `500` laisserait passer sans signal exactement le cas a couvrir.
+        """
+        for code in (500, 501, 502, 503, 504, 507, 599):
+            with self.subTest(code=code):
+                resultat = self._resultat(code)
+                self.assertEqual(resultat.status, "error")
+                self.assertEqual(resultat.http_code, code)
+                self.assertIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
+
     def test_un_refus_qui_nest_pas_de_persistance_ne_le_porte_pas(self):
         """Le message ne doit pas devenir du bruit sur tout echec d'ecriture."""
         for code in (400, 403, 404, 409):

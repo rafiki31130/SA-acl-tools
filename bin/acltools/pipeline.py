@@ -13,6 +13,7 @@ import json
 from dataclasses import replace
 from datetime import datetime
 
+from .derived import CarrierProbe
 from .endpoint import build_object_path, resolve_handler_path
 from .errors import EventRejected, MaxObjectsReached
 from .journal import build_intent_record, build_outcome_record
@@ -26,10 +27,22 @@ MAX_ERROR_LEN = 512
 #: enumere limitativement les erreurs fatales et ne l'y fait pas figurer.
 FORBIDDEN_APP = "system"
 
-#: Code HTTP d'un refus de persistance cote handler splunkd. Mesure en lab : le POST
-#: est refuse, la vue **runtime** de splunkd est neanmoins mutee, le disque reste
-#: intact.
-PERSISTENCE_FAILURE_CODE = 500
+#: Classe de codes HTTP d'un refus de persistance cote handler splunkd. Mesure en lab :
+#: le POST est refuse, la vue **runtime** de splunkd est neanmoins mutee, le disque
+#: reste intact.
+#:
+#: **Toute la classe `5xx`, pas le seul `500`** (D-16). Rien dans le mecanisme observe
+#: n'attache la divergence au code `500` en particulier : elle tient a ce que le
+#: handler a mute son etat en memoire avant d'echouer a le persister, ce qu'un `502`,
+#: un `503` ou un `507` produisent aussi bien. Restreindre l'avertissement a `500`
+#: laisserait passer sans signal exactement le cas qu'il doit couvrir.
+PERSISTENCE_FAILURE_MIN = 500
+PERSISTENCE_FAILURE_MAX = 600
+
+
+def is_persistence_failure(status):
+    """Vrai si `status` releve de la classe `5xx` (D-16)."""
+    return PERSISTENCE_FAILURE_MIN <= int(status) < PERSISTENCE_FAILURE_MAX
 
 #: Avertissement porte par `acl_warning` quand la persistance est refusee. La
 #: divergence est produite par la plateforme et la commande ne peut pas l'empecher ;
@@ -39,7 +52,7 @@ RUNTIME_DIVERGENCE_WARNING = "runtime_divergence_possible"
 #: Texte adresse a l'operateur au niveau de la recherche, emis une fois par execution.
 #: `acl_warning` est un jeu de jetons concatenes : la phrase ne peut pas y tenir.
 RUNTIME_DIVERGENCE_MESSAGE = (
-    "au moins un objet a ete refuse en HTTP 500 (persistance) : la vue runtime de "
+    "au moins un objet a ete refuse en HTTP 5xx (persistance) : la vue runtime de "
     "splunkd peut avoir ete mutee alors que le disque ne l'est pas, et c'est cette vue "
     "que voient les utilisateurs, les recherches et les controles d'acces jusqu'au "
     "prochain rechargement de configuration. Ces objets ne sont PAS couverts par "
@@ -69,7 +82,7 @@ class _Work(object):
     __slots__ = (
         "title", "app", "eai_type", "endpoint", "owner", "http_code", "status",
         "error", "warnings", "before", "after", "journaled", "post_attempted",
-        "counted", "source",
+        "counted", "source", "platform_name",
     )
 
     def __init__(self, event):
@@ -88,6 +101,10 @@ class _Work(object):
         self.post_attempted = False
         self.counted = False
         self.source = ""
+        #: Identite renvoyee par splunkd dans la reponse du GET (§5.3), jamais le
+        #: `title` de l'evenement : le §5.3 pose que le GET fait autorite, et un `eval`
+        #: en amont peut avoir forge le `title`.
+        self.platform_name = None
 
     def warn(self, message):
         if message not in self.warnings:
@@ -161,6 +178,10 @@ class EventProcessor(object):
         self._roles = frozenset(roles_catalog or ())
         self._app_disabled_fn = app_disabled_fn
         self._clock = clock or default_clock
+        #: Sonde du rang 0 (§3.4, D-18). Elle n'emet un appel que sur un objet dont la
+        #: famille et la cle composite designent deja un porteur : sur un lot sans
+        #: `fvtags`, son cout est nul.
+        self._carrier = CarrierProbe(rest)
         self.counter = 0
         #: endpoint -> etat resultant d'un POST **abouti**.
         self._written = {}
@@ -203,6 +224,23 @@ class EventProcessor(object):
 
         before = self._read_state(work)
         work.owner = before.owner or work.owner
+
+        # Rang 0 (§3.4, D-18) — il precede TOUS les autres controles, y compris
+        # `can_change_perms`. La relation de derivation est decouverte aupres de la
+        # plateforme : famille issue du chemin de handler resolu, identite issue de la
+        # reponse du GET, existence du porteur confirmee par un GET reel. Rien n'est
+        # reconstruit par concatenation a partir du nom d'un parent.
+        #
+        # Le controle est place ici, apres le GET et **avant** la fusion : l'objet n'est
+        # pas modifie, il n'a donc pas d'etat cible, et sa ligne `outcome` ne porte pas
+        # de `before_*` / `after_*` — ce qui est exactement l'enumeration du §8.2.
+        carrier, carrier_warning = self._carrier.carrier_of(
+            event.owner, event.app, handler_path, work.platform_name
+        )
+        if carrier_warning:
+            work.warn(carrier_warning)
+        if carrier is not None:
+            raise EventRejected("skipped_derived", "derived_object:%s" % carrier)
 
         if self._app_disabled_fn is not None and self._app_disabled_fn(event.app):
             work.warn("app_disabled")
@@ -279,7 +317,7 @@ class EventProcessor(object):
                 "post_failed:%d:%s"
                 % (response.status, response.error or response.text())
             )
-            if response.status == PERSISTENCE_FAILURE_CODE:
+            if is_persistence_failure(response.status):
                 # Un refus de persistance laisse la vue **runtime** de splunkd mutee
                 # alors que le disque est intact : la commande dit vrai vis-a-vis du
                 # disque et faux vis-a-vis de ce que voient les utilisateurs, les
@@ -351,7 +389,12 @@ class EventProcessor(object):
             )
         try:
             document = json.loads(response.body.decode("utf-8", "replace"))
-            acl_block = document["entry"][0]["acl"]
+            entry = document["entry"][0]
+            acl_block = entry["acl"]
+            # Identite canonique de l'objet telle que splunkd la renvoie. Elle alimente
+            # le rang 0 du §5.4 : c'est la donnee de plateforme sur laquelle repose
+            # l'identification d'un derive, par opposition au `title` de l'evenement.
+            work.platform_name = entry.get("name")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise EventRejected(
                 "error", _truncate("get_parse_failed:%s" % (exc,))
