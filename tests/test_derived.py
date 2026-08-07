@@ -129,7 +129,7 @@ class TestSondeDuPorteur(unittest.TestCase):
     def test_le_porteur_est_confirme_par_un_get_reel(self):
         rest = derive_rest()
         porteur, avertissement = CarrierProbe(rest).carrier_of(
-            "nobody", "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+            "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
         )
         self.assertEqual(porteur, "mon_eventtype")
         self.assertIsNone(avertissement)
@@ -147,7 +147,7 @@ class TestSondeDuPorteur(unittest.TestCase):
         """
         rest = derive_rest(carrier_status=404)
         porteur, avertissement = CarrierProbe(rest).carrier_of(
-            "nobody", "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+            "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
         )
         self.assertIsNone(porteur)
         self.assertIsNone(avertissement)
@@ -157,7 +157,7 @@ class TestSondeDuPorteur(unittest.TestCase):
             with self.subTest(code=code):
                 rest = derive_rest(carrier_status=code)
                 porteur, avertissement = CarrierProbe(rest).carrier_of(
-                    "nobody", "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+                    "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
                 )
                 self.assertEqual(porteur, "mon_eventtype")
                 self.assertEqual(
@@ -169,14 +169,14 @@ class TestSondeDuPorteur(unittest.TestCase):
         sonde = CarrierProbe(rest)
         for _ in range(3):
             sonde.carrier_of(
-                "nobody", "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+                "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
             )
         self.assertEqual(rest.count("JSON"), 1)
 
     def test_aucun_appel_hors_de_la_famille_fvtags(self):
         rest = derive_rest()
         CarrierProbe(rest).carrier_of(
-            "nobody", "mon_app", "saved/searches", "eventtype=mon_eventtype"
+            "mon_app", "saved/searches", "eventtype=mon_eventtype"
         )
         self.assertEqual(rest.count("JSON"), 0)
 
@@ -226,7 +226,7 @@ class TestRang0(unittest.TestCase):
         resultat, _ = run(
             derive_rest(),
             derive_event(sharing=""),
-            params=make_params(fields=("perms.write", "sharing")),
+            params=make_params(),
         )
         self.assertEqual(resultat.status, "skipped_derived")
 

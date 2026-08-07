@@ -41,18 +41,21 @@ from splunklib.searchcommands import (  # noqa: E402
     validators,
 )
 
+from acltools.binding import build_event  # noqa: E402
 from acltools.diag import NullDiagnostics, open_diagnostics  # noqa: E402
 from acltools.errors import FatalError  # noqa: E402
 from acltools.journal import JournalWriter, journal_path  # noqa: E402
 from acltools.mapping import load_mapping  # noqa: E402
-from acltools.model import EventInput, RunContext  # noqa: E402
+from acltools.model import DEFAULT_FIELD_NAMES, RunContext  # noqa: E402
 from acltools.normalize import serialize_roles  # noqa: E402
 from acltools.pipeline import (  # noqa: E402
     RUNTIME_DIVERGENCE_MESSAGE,
     RUNTIME_DIVERGENCE_WARNING,
     EventProcessor,
+    ceiling_message,
 )
 from acltools.preflight import (  # noqa: E402
+    DEFAULT_MAX_OBJECTS,
     AppStateCache,
     check_capability,
     check_realtime,
@@ -130,30 +133,80 @@ class EditAclCommand(StreamingCommand):
     ##Syntax
 
     .. code-block::
-        editacl [fields=<liste>] [dryrun=<bool>] [validate_roles=<bool>]
-                [journal=<bool>] [max_objects=<entier>]
+        editacl [title=<champ>] [app=<champ>] [id=<champ>] [type=<champ>]
+                [sharing=<champ>] [new_perms_read=<champ>] [new_perms_write=<champ>]
+                [new_sharing=<champ>] [new_owner=<champ>] [dryrun=<bool>]
+                [validate_roles=<bool>] [journal=<bool>] [max_objects=<entier>]
 
     ##Description
 
-    Chaque evenement d'entree designe un objet (`title`, `eai:acl.app`,
-    `eai:acl.owner`, plus `id` ou `eai:type`) et porte l'etat ACL cible. La commande
-    lit l'etat courant par l'API REST, calcule l'etat cible en ne prenant de
-    l'evenement que les attributs listes dans `fields`, et ecrit — sauf en simulation.
+    Chaque parametre nomme le champ SPL ou lire une information, et prend pour defaut
+    la nomenclature native : l'operateur qui l'emploie n'ecrit aucun parametre.
+
+    C'est la **presence de la colonne** dans le jeu de resultats qui decide : colonne
+    absente, attribut preserve ; colonne presente et cellule vide, attribut vide ;
+    colonne presente et valuee, valeur appliquee.
 
     ##Example
 
     .. code-block::
         | `acl_inventory` | search "eai:acl.perms.write"="ancien_role"
         | eval "eai:acl.perms.write" = "nouveau_role_admin"
-        | editacl fields=perms.write dryrun=f max_objects=200
+        | editacl dryrun=f max_objects=200
     """
 
-    fields = Option(
-        doc="Attributs ACL a prendre depuis l'evenement : perms.read, perms.write, "
-            "sharing. Toute autre valeur, y compris owner, est une erreur fatale.",
+    # -- parametres de nommage (§3.1) : desigen l'objet ---------------------- #
+    title = Option(
+        doc="Champ portant le nom de l'objet. Defaut : title.",
         require=False,
-        default="perms.read,perms.write",
+        default=None,
     )
+    app = Option(
+        doc="Champ portant l'application du namespace. Defaut : eai:acl.app.",
+        require=False,
+        default=None,
+    )
+    id = Option(
+        doc="Champ portant l'URI complete de l'objet. Defaut : id.",
+        require=False,
+        default=None,
+    )
+    type = Option(
+        doc="Champ portant le type d'objet, resolu par la table. Defaut : eai:type.",
+        require=False,
+        default=None,
+    )
+    sharing = Option(
+        doc="Champ portant la portee COURANTE, qui sert a ecarter les objets prives. "
+            "Defaut : eai:acl.sharing.",
+        require=False,
+        default=None,
+    )
+
+    # -- parametres de nommage (§3.3) : valeurs cibles ----------------------- #
+    new_perms_read = Option(
+        doc="Champ portant la valeur cible de perms.read. "
+            "Defaut : eai:acl.perms.read.",
+        require=False,
+        default=None,
+    )
+    new_perms_write = Option(
+        doc="Champ portant la valeur cible de perms.write. "
+            "Defaut : eai:acl.perms.write.",
+        require=False,
+        default=None,
+    )
+    new_sharing = Option(
+        doc="Champ portant la valeur cible de sharing. Defaut : eai:acl.sharing.",
+        require=False,
+        default=None,
+    )
+    new_owner = Option(
+        doc="Champ portant la valeur cible de owner. Defaut : eai:acl.owner.",
+        require=False,
+        default=None,
+    )
+
     dryrun = Option(
         doc="Simulation : aucune ecriture. Defaut : vrai.",
         require=False,
@@ -173,7 +226,8 @@ class EditAclCommand(StreamingCommand):
         validate=validators.Boolean(),
     )
     max_objects = Option(
-        doc="Nombre maximal d'objets ecrits par execution. Defaut : 500.",
+        doc="Nombre maximal d'objets ECRITS par execution. Defaut : 10. Sans effet en "
+            "simulation, qui n'emet aucun POST et porte donc sur tout le lot.",
         require=False,
         default=None,
     )
@@ -198,6 +252,11 @@ class EditAclCommand(StreamingCommand):
         # execution : un lot dont le systeme de fichiers refuse toute ecriture le
         # produirait sinon a chaque objet, et le noierait.
         self._runtime_divergence_signaled = False
+        # L'avertissement de plafond (§4.3, D-28) est emis **une fois**, en fin
+        # d'execution : c'est le seul moment ou le nombre d'objets ecartes est connu
+        # d'une commande qui recoit son entree par chunks successifs. Emis a la premiere
+        # atteinte, il ne pourrait pas le porter ; emis par objet, il serait du bruit.
+        self._ceiling_signaled = False
 
     # -- cablage ----------------------------------------------------------- #
 
@@ -223,11 +282,23 @@ class EditAclCommand(StreamingCommand):
         )
 
         params = validate_params(
-            fields_raw=self.fields,
+            names_raw={
+                "title": self.title,
+                "app": self.app,
+                "id": self.id,
+                "type": self.type,
+                "sharing": self.sharing,
+                "new_perms_read": self.new_perms_read,
+                "new_perms_write": self.new_perms_write,
+                "new_sharing": self.new_sharing,
+                "new_owner": self.new_owner,
+            },
             dryrun=self.dryrun,
             validate_roles=self.validate_roles,
             journal=self.journal,
-            max_objects=500 if self.max_objects is None else self.max_objects,
+            max_objects=(
+                DEFAULT_MAX_OBJECTS if self.max_objects is None else self.max_objects
+            ),
             max_objects_explicit=self.max_objects is not None,
         )
         self._params = params
@@ -324,15 +395,42 @@ class EditAclCommand(StreamingCommand):
                 if not self._ready:
                     self._setup()
                 yield self._handle(record)
+            self._signal_ceiling()
         except FatalError as exc:
-            # Point de consignation unique des erreurs fatales du §9 — `MaxObjectsReached`
-            # comprise, qui en derive. `_setup()` est appele depuis ce `try`, ses erreurs
-            # passent donc ici.
+            # Point de consignation unique des erreurs fatales du §9. `_setup()` est
+            # appele depuis ce `try`, ses erreurs passent donc ici. Le plafond, lui,
+            # n'y figure plus : depuis D-28 il ne leve pas, il produit un statut.
             self._diag.fatal(str(exc))
             self._cleanup()
             self._fatal_exit(exc)
         finally:
             self._cleanup()
+
+    def _signal_ceiling(self):
+        """Avertissement unique de plafond, apres le dernier enregistrement (§4.3).
+
+        La commande recoit son entree par chunks successifs : `stream()` est reinvoquee
+        a chaque chunk, et le compteur du processeur les cumule. Le nombre d'objets
+        ecartes n'est donc juste qu'au **dernier** chunk — que le SDK signale par
+        `self._finished`, renseigne depuis la metadonnee du chunk avant l'appel.
+
+        Emettre plus tot sous-compterait ; emettre a chaque chunk multiplierait un
+        avertissement que le §4.3 veut unique. `_ceiling_signaled` ferme le cas du
+        protocole v1, ou `_finished` n'est jamais renseigne.
+        """
+        processor = self._processor
+        if processor is None or self._ceiling_signaled:
+            return
+        if processor.skipped_ceiling <= 0:
+            return
+        if getattr(self, "_finished", None) is False:
+            return
+        self._ceiling_signaled = True
+        message = ceiling_message(
+            self._params.max_objects, processor.skipped_ceiling
+        )
+        self._diag.warning(message)
+        self.write_warning(message)
 
     def _cleanup(self):
         """Referme journal et diagnostic. Idempotent, et ne leve jamais.
@@ -396,16 +494,12 @@ class EditAclCommand(StreamingCommand):
         _abort_process(1)
 
     def _handle(self, record):
-        event = EventInput(
-            title=record.get("title") or "",
-            app=record.get("eai:acl.app") or "",
-            owner=record.get("eai:acl.owner") or "",
-            id_value=record.get("id"),
-            eai_type=record.get("eai:type"),
-            raw_perms_read=record.get("eai:acl.perms.read"),
-            raw_perms_write=record.get("eai:acl.perms.write"),
-            raw_sharing=record.get("eai:acl.sharing"),
-        )
+        # `record` est l'enregistrement brut du chunk : la presence d'une cle y est
+        # exactement la presence de la colonne dans le jeu de resultats (§3.2). C'est le
+        # seul endroit ou l'enregistrement est lu, et il est passe tel quel a
+        # `build_event` — aucun `get()` avec defaut ne vient effacer la distinction entre
+        # « colonne absente » et « cellule vide » avant que la regle ne l'ait tranchee.
+        event = build_event(record, self._params.names)
         result = self._processor.process(event)
 
         if (
@@ -421,13 +515,14 @@ class EditAclCommand(StreamingCommand):
         output["acl_http_code"] = result.http_code
         output["acl_error"] = result.error or ""
         output["acl_warning"] = ";".join(result.warnings)
-        output["acl_owner"] = result.owner
         output["acl_journaled"] = "true" if result.journaled else "false"
         if result.before is not None:
+            output["acl_before_owner"] = result.before.owner
             output["acl_before_perms_read"] = serialize_roles(result.before.perms_read)
             output["acl_before_perms_write"] = serialize_roles(result.before.perms_write)
             output["acl_before_sharing"] = result.before.sharing
         if result.after is not None:
+            output["acl_after_owner"] = result.after.owner
             output["acl_after_perms_read"] = serialize_roles(result.after.perms_read)
             output["acl_after_perms_write"] = serialize_roles(result.after.perms_write)
             output["acl_after_sharing"] = result.after.sharing

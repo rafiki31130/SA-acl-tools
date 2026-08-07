@@ -201,14 +201,32 @@ class Diagnostics(NullDiagnostics):
 
     def params(self, params):
         self.info(
-            "parametres fields=%s dryrun=%s validate_roles=%s journal=%s "
-            "max_objects=%s"
+            "parametres dryrun=%s validate_roles=%s journal=%s max_objects=%s"
             % (
-                ",".join(sorted(params.fields)),
                 str(bool(params.dryrun)).lower(),
                 str(bool(params.validate_roles)).lower(),
                 str(bool(params.journal)).lower(),
                 params.max_objects,
+            )
+        )
+        # Les neuf parametres de nommage sont consignes separement : ils determinent
+        # quelle colonne du jeu de resultats est lue pour quoi, donc quels attributs
+        # seront modifies et lesquels preserves (§3.2). Sans eux, une execution dont un
+        # nom de champ a ete redirige est illisible a posteriori.
+        names = params.names
+        self.info(
+            "nommage title=%s app=%s id=%s type=%s sharing=%s new_perms_read=%s "
+            "new_perms_write=%s new_sharing=%s new_owner=%s"
+            % (
+                names.title,
+                names.app,
+                names.id,
+                names.type,
+                names.sharing,
+                names.new_perms_read,
+                names.new_perms_write,
+                names.new_sharing,
+                names.new_owner,
             )
         )
         for warning in params.warnings or ():

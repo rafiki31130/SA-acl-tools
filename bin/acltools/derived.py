@@ -143,24 +143,27 @@ def designated_carrier(handler_path, platform_name):
 class CarrierProbe(object):
     """Confirme aupres de la plateforme l'existence du porteur designe.
 
-    Un GET par couple `(owner, app, porteur)` distinct, memoise sur la duree de
-    l'execution. Sur un lot ou la famille `fvtags` est absente, le cout est nul : la
-    sonde n'est interrogee que lorsque `designated_carrier` a deja repondu.
+    Un GET par couple `(app, porteur)` distinct, memoise sur la duree de l'execution.
+    Sur un lot ou la famille `fvtags` est absente, le cout est nul : la sonde n'est
+    interrogee que lorsque `designated_carrier` a deja repondu.
+
+    Le porteur est cherche au **contexte fixe** (§5.2, D-25), comme l'objet lui-meme :
+    la sonde ne recoit pas de proprietaire, `build_object_path` n'en accepte plus.
     """
 
     def __init__(self, rest):
         self._rest = rest
         self._cache = {}
 
-    def _carrier_exists(self, owner, app, carrier):
-        key = (str(owner), str(app), str(carrier))
+    def _carrier_exists(self, app, carrier):
+        key = (str(app), str(carrier))
         if key not in self._cache:
-            path = build_object_path(owner, app, EVENTTYPE_HANDLER_PATH, carrier)
+            path = build_object_path(app, EVENTTYPE_HANDLER_PATH, carrier)
             response = self._rest.get_json(path)
             self._cache[key] = response.status
         return self._cache[key]
 
-    def carrier_of(self, owner, app, handler_path, platform_name):
+    def carrier_of(self, app, handler_path, platform_name):
         """Renvoie `(porteur, avertissement)`.
 
         `porteur` vaut `None` quand l'objet n'est pas un derive d'`eventtype` — soit
@@ -182,7 +185,7 @@ class CarrierProbe(object):
         if carrier is None:
             return None, None
 
-        status = self._carrier_exists(owner, app, carrier)
+        status = self._carrier_exists(app, carrier)
         if status == 404:
             return None, None
         if 200 <= status < 300:

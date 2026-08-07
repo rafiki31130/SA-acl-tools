@@ -206,32 +206,35 @@ class CheminErreurFataleTest(unittest.TestCase):
 
 
 class MarquageDuJobEnEchecTest(unittest.TestCase):
-    """A-4 — a l'atteinte de `max_objects`, le job ressortait `DONE`, `isFailed=false`,
-    `resultCount=0` : indiscernable d'un lot vide pour un ordonnanceur.
+    """A-4 — une erreur fatale du §9 doit marquer le job en echec.
 
     Mesure sur Splunk 9.4.6 : le marquage depend d'un seul fait, le chunk final
     `finished: true`. `error_exit()` du SDK l'envoie avant de quitter, et splunkd ignore
     alors le code de retour du processus. Emettre le message dans un chunk **non final**
     puis quitter en code non nul donne `dispatchState=FAILED`, `isFailed=true`, **et**
     conserve le message.
+
+    Le plafond `max_objects` **ne passe plus par ici** (D-28) : il n'est plus fatal. Le
+    chemin est desormais exerce par la capability absente, qui reste au §9.
     """
 
-    MESSAGE = "max_objects atteint (2) : la recherche est interrompue"
+    MESSAGE = "capability 'edit_acl_bulk' absente. Roles de l'utilisateur : (aucun)"
 
     def setUp(self):
         self.module = _charger_editacl()
         _intercepter_labandon(self.module)
-        from acltools.errors import MaxObjectsReached
+        from acltools.errors import FatalCapabilityError
 
         self.commande = self.module.EditAclCommand()
         self.commande.journal = True
         self.commande.dryrun = False
 
-        def _setup_qui_atteint_le_plafond():
-            raise MaxObjectsReached(2)
+        message = self.MESSAGE
 
-        self.commande._setup = _setup_qui_atteint_le_plafond
-        self.MaxObjectsReached = MaxObjectsReached
+        def _setup_qui_echoue():
+            raise FatalCapabilityError(message)
+
+        self.commande._setup = _setup_qui_echoue
 
     def _executer(self):
         with self.assertRaises(Abandon) as leve:
@@ -251,7 +254,7 @@ class MarquageDuJobEnEchecTest(unittest.TestCase):
         """Marquer le job en echec ne doit pas couter le message de l'operateur."""
         self._executer()
         self.assertEqual(len(self.commande.errors), 1)
-        self.assertIn("max_objects atteint (2)", self.commande.errors[0])
+        self.assertIn("edit_acl_bulk", self.commande.errors[0])
 
     def test_le_sdk_error_exit_nest_plus_employe(self):
         """`error_exit()` envoie `finished: true` : il ne peut pas marquer l'echec."""
@@ -372,8 +375,19 @@ class CollisionDeNomsTest(unittest.TestCase):
     def test_les_options_declarees_sont_bien_celles_du_paragraphe_4_1(self):
         self.assertEqual(
             self._noms_doptions(),
-            {"fields", "dryrun", "validate_roles", "journal", "max_objects"},
+            {
+                # parametres de nommage — champs de reference (§3.1)
+                "title", "app", "id", "type", "sharing",
+                # parametres de nommage — valeurs cibles (§3.3)
+                "new_perms_read", "new_perms_write", "new_sharing", "new_owner",
+                # parametres fonctionnels (§4.1)
+                "dryrun", "validate_roles", "journal", "max_objects",
+            },
         )
+
+    def test_le_parametre_fields_a_disparu(self):
+        """D-23 — il n'est plus declare, et sa matrice a dix-huit lignes avec lui."""
+        self.assertNotIn("fields", self._noms_doptions())
 
     def test_aucun_attribut_prive_ne_collisionne_avec_un_champ_de_stockage(self):
         # `backing_field_name = "_" + name`, decorators.py. Une option nommee `journal`
@@ -451,7 +465,7 @@ class ConsignationDesErreursFatalesTest(unittest.TestCase):
 
     def setUp(self):
         from acltools.diag import NullDiagnostics
-        from acltools.errors import FatalCapabilityError, MaxObjectsReached
+        from acltools.errors import FatalCapabilityError
 
         self.module = _charger_editacl()
         _intercepter_labandon(self.module)
@@ -468,7 +482,6 @@ class ConsignationDesErreursFatalesTest(unittest.TestCase):
 
         self.commande._diag = _FauxDiag()
         self.FatalCapabilityError = FatalCapabilityError
-        self.MaxObjectsReached = MaxObjectsReached
 
     def _echouer_avec(self, exception):
         def _setup_qui_echoue():
@@ -484,10 +497,15 @@ class ConsignationDesErreursFatalesTest(unittest.TestCase):
         self._echouer_avec(self.FatalCapabilityError("capability absente"))
         self.assertEqual(self.consignees, ["capability absente"])
 
-    def test_latteinte_du_plafond_est_consignee(self):
-        self._echouer_avec(self.MaxObjectsReached(2))
-        self.assertEqual(len(self.consignees), 1)
-        self.assertIn("max_objects atteint (2)", self.consignees[0])
+    def test_le_plafond_nest_plus_une_erreur_fatale(self):
+        """D-28 — la classe d'exception a disparu, et rien ne doit la ressusciter.
+
+        Chercher `MaxObjectsReached` dans `acltools.errors` est l'erreur qu'un lecteur
+        de la v1 commettrait ; ce test la rend impossible a commettre en silence.
+        """
+        import acltools.errors as errors
+
+        self.assertFalse(hasattr(errors, "MaxObjectsReached"))
 
     def test_le_diagnostic_est_referme_en_fin_dexecution(self):
         fermetures = []
@@ -519,12 +537,19 @@ class AvertissementDivergenceRuntimeTest(unittest.TestCase):
         from acltools.model import EventResult
         from acltools.pipeline import RUNTIME_DIVERGENCE_WARNING
 
+        from acltools.preflight import validate_params
+
         self.module = _charger_editacl()
         _intercepter_labandon(self.module)
         self.commande = self.module.EditAclCommand()
         self.commande._ready = True
+        # `_handle` lit les parametres de nommage : la commande est cablee comme apres
+        # un `_setup()` reussi, sans reseau.
+        self.commande._params = validate_params()
 
         class _ProcesseurQuiDiverge(object):
+            skipped_ceiling = 0
+
             def process(self, event):
                 return EventResult(
                     status="error",
@@ -536,6 +561,8 @@ class AvertissementDivergenceRuntimeTest(unittest.TestCase):
                 )
 
         class _ProcesseurNominal(object):
+            skipped_ceiling = 0
+
             def process(self, event):
                 return EventResult(status="updated", title="un_objet", http_code=200)
 
@@ -594,6 +621,8 @@ class AvertissementDeSimulationTest(unittest.TestCase):
         _intercepter_labandon(self.module)
 
         class _ProcesseurNominal(object):
+            skipped_ceiling = 0
+
             def process(self, event):
                 return EventResult(status="dryrun", title="un_objet", http_code=0)
 
@@ -609,11 +638,10 @@ class AvertissementDeSimulationTest(unittest.TestCase):
 
     def _commande(self, dryrun):
         commande = self.module.EditAclCommand()
-        commande.fields = "perms.read,perms.write"
         commande.dryrun = dryrun
         commande.validate_roles = False
         commande.journal = False              # aucun fichier ecrit par ce test
-        commande.max_objects = 500
+        commande.max_objects = 10
         commande._metadata = types.SimpleNamespace(
             searchinfo=types.SimpleNamespace(
                 sid="1700000000.1",

@@ -18,6 +18,24 @@ from .mapping import is_valid_handler_path
 #: Marqueur de namespace dans un chemin REST Splunk.
 NAMESPACE_MARKER = "/servicesNS/"
 
+#: **Contexte d'adressage fixe** (§5.2, D-25). Il ne vient pas de l'evenement, il n'est
+#: pas parametrable, et aucune signature de ce module n'expose de proprietaire.
+#:
+#: Mesure : un objet partage appartenant a un tiers est atteignable par ce contexte, en
+#: lecture comme en ecriture, aux deux portees de partage, et la reponse du GET porte
+#: **toujours le proprietaire reel** — jamais le contexte d'adressage. L'`id` renvoye
+#: par la plateforme est lui-meme en `nobody`.
+#:
+#: Ce que ce contexte corrige : la v1 adressait par `eai:acl.owner`, or **un objet prive
+#: masque un objet partage homonyme dans le namespace de son detenteur**. La commande
+#: atteignait alors le prive et ecrivait son ACL — `200` au GET, POST abouti, ligne
+#: rapportee `updated`. Une ecriture silencieuse sur la mauvaise cible.
+#:
+#: Le contexte joker `-` n'est **jamais** employe : il refuse l'ecriture, et sur deux
+#: objets homonymes il renvoie deux entrees sur un chemin mono-objet, ou un client
+#: lisant la premiere choisirait a l'aveugle.
+FIXED_CONTEXT = "nobody"
+
 #: Handler d'agregation : il sait lister, pas ecrire une ACL. Une source `id` qui y
 #: pointe est ecartee (§5.2). La mesure en lab etablit que 100 % des `id` emis par ce
 #: handler sont auto-referents.
@@ -109,8 +127,12 @@ def resolve_handler_path(id_value, eai_type, mapping):
     )
 
 
-def build_object_path(owner, app, handler_path, title):
+def build_object_path(app, handler_path, title):
     """Construit le chemin de l'objet, **sans** le suffixe `/acl` (§5.2).
+
+    Le contexte est `FIXED_CONTEXT`, toujours, et cette fonction **n'a pas de parametre
+    de proprietaire** : l'adressage ne peut donc pas en porter un, quelle que soit
+    l'evolution des appelants. C'est la garantie structurelle de D-25.
 
     Le GET du §5.3 porte sur ce chemin, le POST du §5.6 sur ce chemin suffixe `/acl`.
     C'est aussi la chaine exposee en sortie via `acl_endpoint` et la cle de correlation
@@ -122,7 +144,7 @@ def build_object_path(owner, app, handler_path, title):
     """
     return "%s%s/%s/%s/%s" % (
         NAMESPACE_MARKER,
-        encode_namespace_segment(owner),
+        encode_namespace_segment(FIXED_CONTEXT),
         encode_namespace_segment(app),
         handler_path.strip("/"),
         encode_title_segment(title),

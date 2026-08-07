@@ -4,7 +4,9 @@ import json
 import unittest
 
 from acltools.errors import FatalCapabilityError, FatalConfigError
+from acltools.model import DEFAULT_FIELD_NAMES
 from acltools.preflight import (
+    DEFAULT_MAX_OBJECTS,
     DRYRUN_WARNING,
     AppStateCache,
     check_capability,
@@ -28,23 +30,60 @@ class ValidateParamsTest(unittest.TestCase):
 
     def test_defauts_du_cahier_des_charges(self):
         params = validate_params()
-        self.assertEqual(params.fields, frozenset({"perms.read", "perms.write"}))
+        self.assertEqual(params.names, DEFAULT_FIELD_NAMES)
         self.assertTrue(params.dryrun)
         self.assertTrue(params.validate_roles)
         self.assertTrue(params.journal)
-        self.assertEqual(params.max_objects, 500)
+        self.assertEqual(params.max_objects, 10)
 
-    def test_fields_owner_est_une_erreur_fatale(self):
-        with self.assertRaises(FatalConfigError):
-            validate_params(fields_raw="owner")
+    def test_le_plafond_par_defaut_vaut_dix(self):
+        """D-30 — et non cinq cents.
 
-    def test_fields_contenant_owner_est_une_erreur_fatale(self):
-        with self.assertRaises(FatalConfigError):
-            validate_params(fields_raw="perms.read,perms.write,owner")
+        Un plafond de cinq cents laissait passer sans un mot des operations de plusieurs
+        centaines d'objets. Dix laisse passer la correction ponctuelle et fait de la
+        levee du plafond un acte conscient.
+        """
+        self.assertEqual(DEFAULT_MAX_OBJECTS, 10)
+        self.assertEqual(validate_params().max_objects, 10)
 
-    def test_fields_valeur_non_admise_est_une_erreur_fatale(self):
+    def test_defauts_de_nommage_conformes_au_cahier_des_charges(self):
+        """§3.1 et §3.3 : les defauts sont la nomenclature native, ce qui rend le cas
+        nominal implicite — l'operateur qui l'emploie n'ecrit aucun parametre."""
+        names = validate_params().names
+        self.assertEqual(names.title, "title")
+        self.assertEqual(names.app, "eai:acl.app")
+        self.assertEqual(names.id, "id")
+        self.assertEqual(names.type, "eai:type")
+        self.assertEqual(names.sharing, "eai:acl.sharing")
+        self.assertEqual(names.new_perms_read, "eai:acl.perms.read")
+        self.assertEqual(names.new_perms_write, "eai:acl.perms.write")
+        self.assertEqual(names.new_sharing, "eai:acl.sharing")
+        self.assertEqual(names.new_owner, "eai:acl.owner")
+
+    def test_un_nom_de_champ_renomme_est_repris(self):
+        params = validate_params(
+            names_raw={"type": "object_type", "new_perms_write": " write "}
+        )
+        self.assertEqual(params.names.type, "object_type")
+        self.assertEqual(params.names.new_perms_write, "write")
+        self.assertEqual(params.names.title, "title")
+
+    def test_un_nom_de_champ_vide_est_une_erreur_fatale(self):
         with self.assertRaises(FatalConfigError):
-            validate_params(fields_raw="perms.execute")
+            validate_params(names_raw={"title": "   "})
+
+    def test_une_liste_de_champs_est_une_erreur_fatale(self):
+        """Le parametre `fields` de la v1 n'existe plus : chaque parametre nomme UN
+        champ. Refuser la virgule attrape l'operateur qui raisonne encore en v1 et
+        supprime par construction le piege de quotation du §4.4."""
+        with self.assertRaises(FatalConfigError) as leve:
+            validate_params(names_raw={"new_perms_read": "perms.read,perms.write"})
+        self.assertIn("fields", str(leve.exception))
+
+    def test_le_parametre_fields_nexiste_plus(self):
+        """`validate_params` ne l'accepte plus, meme sous son ancien nom d'appel."""
+        with self.assertRaises(TypeError):
+            validate_params(fields_raw="perms.read,perms.write")
 
     def test_max_objects_non_entier_est_une_erreur_fatale(self):
         with self.assertRaises(FatalConfigError):
@@ -134,14 +173,14 @@ class AvertissementDeSimulationTest(unittest.TestCase):
         """Le SDK expose une option absente de la ligne de commande comme `None`, pas
         comme sa valeur par defaut : la retombee est portee ici, pas dans l'enveloppe."""
         params = validate_params(
-            fields_raw=None, dryrun=None, validate_roles=None, journal=None,
+            names_raw=None, dryrun=None, validate_roles=None, journal=None,
             max_objects=None,
         )
-        self.assertEqual(params.fields, frozenset({"perms.read", "perms.write"}))
+        self.assertEqual(params.names, DEFAULT_FIELD_NAMES)
         self.assertTrue(params.dryrun)
         self.assertTrue(params.validate_roles)
         self.assertTrue(params.journal)
-        self.assertEqual(params.max_objects, 500)
+        self.assertEqual(params.max_objects, 10)
 
     def test_booleens_acceptes_sous_forme_de_chaine(self):
         params = validate_params(dryrun="f", journal="t", validate_roles="false")

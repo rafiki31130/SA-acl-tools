@@ -8,8 +8,7 @@ import json
 
 from .endpoint import encode_namespace_segment
 from .errors import FatalCapabilityError, FatalConfigError
-from .merge import parse_fields
-from .model import Params
+from .model import DEFAULT_FIELD_NAMES, FieldNames, Params
 # Import relatif d'un **predicat pur** : `preflight` continue de ne consommer qu'un
 # port `RestPort` et reste substituable sans socket. Voir `rest.is_tls_failure`.
 from .rest import TLS_REMEDIATION, is_tls_failure
@@ -23,7 +22,18 @@ REQUIRED_CAPABILITY = "edit_acl_bulk"
 #: liste de roles (§10.2).
 WILDCARD_ROLE = "*"
 
-DEFAULT_MAX_OBJECTS = 500
+#: Plafond d'ecritures par defaut (§4.1, D-30). **Dix, et non cinq cents.**
+#:
+#: Une correction ponctuelle — quelques objets identifies, verifies en simulation —
+#: passe sans que l'operateur ait a s'occuper du plafond. Au-dela, il doit l'ecrire,
+#: donc enoncer le volume qu'il s'apprete a muter. Un plafond de cinq cents laissait
+#: passer sans un mot des operations de plusieurs centaines d'objets, ce qui revenait a
+#: ne rien garder du garde-fou dans la plupart des cas reels.
+#:
+#: Ce defaut n'est tenable que parce que **le plafond ne se declenche jamais en
+#: simulation** : le compteur n'est incremente que par un POST emis, et la simulation
+#: n'en emet aucun. La friction porte sur l'ecriture reelle, jamais sur l'examen.
+DEFAULT_MAX_OBJECTS = 10
 
 #: Rappel emis en tete d'execution quand la simulation est active (§4.1).
 #:
@@ -76,8 +86,69 @@ def _as_bool(raw, name, default=None):
     raise FatalConfigError("parametre invalide : '%s' n'est pas un booleen (%r)" % (name, raw))
 
 
+#: Ordre stable des neuf parametres de nommage (§3.1, §3.3), pour la validation et les
+#: messages d'erreur.
+FIELD_NAME_PARAMS = (
+    "title",
+    "app",
+    "id",
+    "type",
+    "sharing",
+    "new_perms_read",
+    "new_perms_write",
+    "new_sharing",
+    "new_owner",
+)
+
+#: Caracteres qui ne peuvent pas apparaitre dans un nom de champ SPL passe en parametre.
+#:
+#: La virgule est la plus utile des trois : elle attrape l'operateur qui raisonne encore
+#: en `fields` de la v1 et ecrit `new_perms_read="perms.read,perms.write"`. Chaque
+#: parametre ne porte plus qu'un **nom de champ unique** — c'est ce qui fait disparaitre
+#: par construction le piege de quotation de la v1.3 (§4.4), ou SPL tronquait
+#: silencieusement une liste non quotee a sa premiere valeur. Le refuser explicitement
+#: vaut mieux que de traiter « perms.read,perms.write » comme un nom de champ improbable.
+_FORBIDDEN_NAME_CHARS = (",", "|", "\n")
+
+
+def parse_field_names(raw_names):
+    """Valide les parametres de nommage et rend un `FieldNames` (§3.1, §3.3, §5.1-2).
+
+    `raw_names` est un mapping `<parametre> -> <valeur brute>`. Une valeur `None` ou
+    absente retombe sur le defaut du cahier des charges — la nomenclature native — ce
+    qui rend le cas nominal implicite : l'operateur qui l'emploie n'ecrit aucun
+    parametre.
+
+    Erreurs : `FatalConfigError` si un parametre designe un identifiant de champ vide ou
+    syntaxiquement invalide (§9).
+    """
+    raw_names = raw_names or {}
+    resolved = {}
+    for param in FIELD_NAME_PARAMS:
+        raw = raw_names.get(param)
+        if raw is None:
+            resolved[param] = getattr(DEFAULT_FIELD_NAMES, param)
+            continue
+        value = str(raw).strip()
+        if not value:
+            raise FatalConfigError(
+                "parametre invalide : '%s' designe un nom de champ vide. Omettre le "
+                "parametre pour reprendre le defaut (%s)."
+                % (param, getattr(DEFAULT_FIELD_NAMES, param))
+            )
+        for char in _FORBIDDEN_NAME_CHARS:
+            if char in value:
+                raise FatalConfigError(
+                    "parametre invalide : '%s=%s' n'est pas un nom de champ. Chaque "
+                    "parametre de nommage designe UN champ, jamais une liste — le "
+                    "parametre 'fields' de la v1 n'existe plus." % (param, value)
+                )
+        resolved[param] = value
+    return FieldNames(**resolved)
+
+
 def validate_params(
-    fields_raw=None,
+    names_raw=None,
     dryrun=True,
     validate_roles=True,
     journal=True,
@@ -86,10 +157,10 @@ def validate_params(
 ):
     """Valide les parametres du §4.1. Fonction pure.
 
-    Erreurs : `FatalConfigError` si `fields` contient une valeur non admise — dont
-    `owner` — ou si `max_objects` n'est pas un entier strictement positif (§9).
+    Erreurs : `FatalConfigError` si un parametre de nommage est invalide, ou si
+    `max_objects` n'est pas un entier strictement positif (§9).
     """
-    fields = parse_fields(fields_raw)
+    names = parse_field_names(names_raw)
     dryrun = _as_bool(dryrun, "dryrun", default=True)
     validate_roles = _as_bool(validate_roles, "validate_roles", default=True)
     journal = _as_bool(journal, "journal", default=True)
@@ -119,7 +190,7 @@ def validate_params(
         )
 
     return Params(
-        fields=fields,
+        names=names,
         dryrun=dryrun,
         validate_roles=validate_roles,
         journal=journal,

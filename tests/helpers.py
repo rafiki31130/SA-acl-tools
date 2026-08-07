@@ -11,8 +11,24 @@ jamais des captures brutes, et n'emploient que des identifiants generiques (§14
 import json
 
 from acltools.mapping import Mapping
-from acltools.model import AclState, EventInput, Params, RunContext
+from acltools.model import (
+    DEFAULT_FIELD_NAMES,
+    TARGET_ATTRIBUTES,
+    AclState,
+    EventInput,
+    FieldNames,
+    Params,
+    RunContext,
+)
 from acltools.rest import RestResponse
+
+#: Sentinelle de **colonne absente** pour `make_event`.
+#:
+#: Elle existe parce que `None` ne peut pas jouer ce role : depuis le §3.2, `None` est
+#: une valeur possible d'une colonne *presente*, et confondre les deux serait
+#: precisement l'erreur que la refonte corrige. Un test qui veut une colonne absente
+#: l'ecrit `ABSENT` ; tout le reste est present.
+ABSENT = object()
 
 #: Table de correspondance minimale utilisee par les tests. Sous-ensemble strict de la
 #: table livree ; les tests de resolution n'ont pas besoin des 28 entrees.
@@ -156,14 +172,14 @@ class FakeClock(object):
 
 
 def make_params(
-    fields=("perms.read", "perms.write"),
+    names=None,
     dryrun=False,
     validate_roles=False,
     journal=True,
     max_objects=500,
 ):
     return Params(
-        fields=frozenset(fields),
+        names=names or FieldNames(),
         dryrun=dryrun,
         validate_roles=validate_roles,
         journal=journal,
@@ -178,22 +194,46 @@ def make_ctx(sid="sid_de_test", user="operateur", host="sh01", dryrun=False):
 def make_event(
     title="Ma recherche",
     app="mon_app",
-    owner="nobody",
     id_value=None,
     eai_type="savedsearch",
-    read=None,
-    write=None,
-    sharing=None,
+    current_sharing=None,
+    read=ABSENT,
+    write=ABSENT,
+    sharing=ABSENT,
+    owner=ABSENT,
 ):
+    """Construit un `EventInput`, **colonnes absentes par defaut**.
+
+    Chacun des quatre attributs cibles vaut `ABSENT` tant qu'on ne le donne pas : un
+    test qui ne parle pas d'un attribut decrit donc une colonne absente, ce qui est le
+    cas nominal de preservation (§3.2). Passer `read=""` decrit au contraire une
+    colonne presente a cellule vide — l'ordre de vidage.
+    """
+    present = set()
+    values = {}
+    for attribute, raw in (
+        ("perms.read", read),
+        ("perms.write", write),
+        ("sharing", sharing),
+        ("owner", owner),
+    ):
+        if raw is ABSENT:
+            values[attribute] = None
+            continue
+        present.add(attribute)
+        values[attribute] = raw
+
     return EventInput(
         title=title,
         app=app,
-        owner=owner,
         id_value=id_value,
         eai_type=eai_type,
-        raw_perms_read=read,
-        raw_perms_write=write,
-        raw_sharing=sharing,
+        current_sharing=current_sharing,
+        new_perms_read=values["perms.read"],
+        new_perms_write=values["perms.write"],
+        new_sharing=values["sharing"],
+        new_owner=values["owner"],
+        present=frozenset(present),
     )
 
 

@@ -2,11 +2,11 @@
 
 import unittest
 
-from acltools.errors import MaxObjectsReached
 from acltools.pipeline import (
     RUNTIME_DIVERGENCE_MESSAGE,
     RUNTIME_DIVERGENCE_WARNING,
     EventProcessor,
+    ceiling_message,
 )
 from acltools.rest import RestResponse
 
@@ -65,7 +65,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(rest.posts(), [])
 
     def test_noop_lemporte_sur_dryrun(self):
-        """Rang 6 avant rang 7 : un objet deja conforme est un `noop` meme en simulation."""
+        """Rang 7 avant rang 8 : un objet deja conforme est un `noop` meme en simulation."""
         rest = FakeRest(
             default_get=RestResponse(200, acl_body(read=("role_a",), write=("w",)))
         )
@@ -112,11 +112,26 @@ class StatusTest(unittest.TestCase):
         self.assertTrue(result.counted)
 
     def test_rejected_champ_obligatoire_absent(self):
-        for champ in ("title", "app", "owner"):
+        for champ in ("title", "app"):
             with self.subTest(champ=champ):
                 result = processor().process(make_event(**{champ: ""}))
                 self.assertEqual(result.status, "rejected")
                 self.assertTrue(result.error.startswith("missing_field:"))
+
+    def test_le_proprietaire_nest_plus_un_champ_obligatoire(self):
+        """D-25 : l'adressage se fait par contexte fixe, il n'y a plus rien a exiger.
+
+        Un pipeline qui ne porte aucun proprietaire doit fonctionner de bout en bout :
+        c'est le cas nominal depuis la refonte.
+        """
+        rest = FakeRest(
+            default_get=RestResponse(
+                200, acl_body(owner="un_tiers", write=("ancien_role",))
+            )
+        )
+        result = processor(rest).process(make_event(write="nouveau_role_admin"))
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(rest.posts()[0][2]["owner"], "un_tiers")
 
     def test_rejected_app_system(self):
         result = processor().process(make_event(app="system"))
@@ -130,10 +145,17 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(result.error, "unresolved_endpoint:type_inexistant")
 
     def test_rejected_sharing_vide(self):
-        proc = processor(params=make_params(fields=("sharing",)))
-        result = proc.process(make_event(sharing=None))
+        result = processor().process(make_event(sharing=""))
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.error, "sharing_empty_not_allowed")
+
+    def test_rejected_owner_vide(self):
+        """§3.3 — pendant exact du refus sur `sharing`, statut par evenement."""
+        rest = FakeRest()
+        result = processor(rest).process(make_event(owner=""))
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.error, "owner_empty_not_allowed")
+        self.assertEqual(rest.posts(), [])
 
     def test_skipped_immutable(self):
         rest = FakeRest(
@@ -159,7 +181,7 @@ class StatusTest(unittest.TestCase):
         )
         proc = processor(
             rest,
-            params=make_params(fields=("perms.write",), validate_roles=True),
+            params=make_params(validate_roles=True),
             roles=frozenset({"*", "role_mort_absent", "nouveau_role_admin"}),
         )
         result = proc.process(make_event(write="nouveau_role_admin"))
@@ -167,13 +189,120 @@ class StatusTest(unittest.TestCase):
         self.assertIn("stale_role_preserved:role_mort", result.warnings)
 
 
+class SkippedPrivateTest(unittest.TestCase):
+    """§3.5, D-26 — les objets prives sortent du perimetre.
+
+    Un objet en `sharing=user` n'est visible que de son proprietaire et des
+    administrateurs : les permissions qu'il porterait n'accordent rien a personne.
+    """
+
+    def test_objet_prive_ecarte_sans_get_ni_post(self):
+        rest = FakeRest()
+        result = processor(rest).process(
+            make_event(current_sharing="user", write="nouveau_role_admin")
+        )
+        self.assertEqual(result.status, "skipped_private")
+        self.assertEqual(result.error, "private_object_out_of_scope")
+        self.assertEqual(rest.gets(), [])
+        self.assertEqual(rest.posts(), [])
+
+    def test_objet_prive_nincremente_pas_le_plafond(self):
+        proc = processor(params=make_params(max_objects=1))
+        proc.process(make_event(current_sharing="user"))
+        self.assertEqual(proc.counter, 0)
+        self.assertEqual(proc.skipped_ceiling, 0)
+
+    def test_objet_prive_porte_sa_ligne_de_journal(self):
+        journal = FakeJournal()
+        proc = processor(journal=journal)
+        proc.process(make_event(current_sharing="user"))
+        self.assertEqual(len(journal.outcomes), 1)
+        self.assertEqual(journal.outcomes[0]["status"], "skipped_private")
+        self.assertEqual(journal.intents, [])
+
+    def test_la_portee_courante_est_lue_insensiblement_a_la_casse(self):
+        result = processor().process(make_event(current_sharing=" User "))
+        self.assertEqual(result.status, "skipped_private")
+
+    def test_portee_courante_non_fournie_repli_en_not_found(self):
+        """§3.5 — sans colonne de portee, la commande ne peut pas ecarter en amont.
+
+        Le GET par contexte fixe repond alors `404` et l'objet ressort en `not_found`.
+        C'est honnete, mais moins informatif : d'ou la recommandation de batir le
+        pipeline sur la macro d'inventaire, qui emet toujours la portee.
+        """
+        rest = FakeRest(default_get=RestResponse(404, b"{}"))
+        result = processor(rest).process(make_event(current_sharing=None))
+        self.assertEqual(result.status, "not_found")
+        self.assertEqual(len(rest.gets()), 1)
+
+    def test_un_objet_partage_nest_pas_ecarte(self):
+        for portee in ("app", "global"):
+            with self.subTest(portee=portee):
+                result = processor().process(
+                    make_event(current_sharing=portee, write="nouveau_role_admin")
+                )
+                self.assertEqual(result.status, "updated")
+
+
+class AdressageSansProprietaireTest(unittest.TestCase):
+    """§5.2, D-25 — l'URI construite ne porte jamais de proprietaire.
+
+    C'est le defaut de ciblage de la v1 : un objet prive **masque** un objet partage
+    homonyme dans le namespace de son detenteur. La commande atteignait alors le prive
+    et ecrivait son ACL, en rapportant `updated`.
+    """
+
+    def test_luri_du_get_porte_le_contexte_fixe(self):
+        rest = FakeRest()
+        processor(rest).process(make_event(title="Ma recherche", app="mon_app"))
+        self.assertEqual(
+            rest.gets()[0][1],
+            "/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche",
+        )
+
+    def test_luri_du_post_porte_le_contexte_fixe(self):
+        rest = FakeRest(default_get=RestResponse(200, acl_body(owner="un_tiers")))
+        processor(rest).process(make_event(write="nouveau_role_admin"))
+        self.assertTrue(rest.posts()[0][1].startswith("/servicesNS/nobody/"))
+
+    def test_le_proprietaire_reel_du_get_ne_fuit_pas_dans_ladresse(self):
+        """Le GET renvoie **toujours** le proprietaire reel, jamais le contexte
+        d'adressage. Le reinjecter dans l'URI reintroduirait le defaut de la v1."""
+        rest = FakeRest(default_get=RestResponse(200, acl_body(owner="un_tiers")))
+        processor(rest).process(make_event(write="nouveau_role_admin"))
+        for _, path, _ in rest.calls:
+            self.assertNotIn("un_tiers", path)
+
+    def test_le_contexte_joker_nest_jamais_employe(self):
+        rest = FakeRest()
+        processor(rest).process(make_event(write="nouveau_role_admin"))
+        for _, path, _ in rest.calls:
+            self.assertNotIn("/servicesNS/-/", path)
+
+    def test_une_reprise_de_propriete_nechange_pas_ladresse(self):
+        """`new_owner` est une **valeur cible**, pas une adresse : l'URI reste identique
+        avec et sans lui."""
+        sans = FakeRest()
+        processor(sans).process(make_event(write="nouveau_role_admin"))
+        avec = FakeRest()
+        processor(avec).process(
+            make_event(write="nouveau_role_admin", owner="autre_proprietaire")
+        )
+        self.assertEqual(sans.posts()[0][1], avec.posts()[0][1])
+
+
 class WarningTest(unittest.TestCase):
 
     def test_sharing_change(self):
         rest = FakeRest(default_get=RestResponse(200, acl_body(sharing="app")))
-        proc = processor(rest, params=make_params(fields=("sharing",)))
-        result = proc.process(make_event(sharing="global"))
+        result = processor(rest).process(make_event(sharing="global"))
         self.assertIn("sharing_change", result.warnings)
+
+    def test_owner_change(self):
+        rest = FakeRest(default_get=RestResponse(200, acl_body(owner="un_proprietaire")))
+        result = processor(rest).process(make_event(owner="autre_proprietaire"))
+        self.assertIn("owner_change", result.warnings)
 
     def test_app_disabled(self):
         proc = EventProcessor(
@@ -191,18 +320,22 @@ class WarningTest(unittest.TestCase):
 class JournalInvariantTest(unittest.TestCase):
     """Les trois invariants verifiables du §8.2."""
 
-    NEUF_STATUTS = (
+    DOUZE_STATUTS = (
         "updated", "noop", "dryrun", "rejected", "not_found", "forbidden",
-        "invalid_role", "skipped_immutable", "error",
+        "invalid_role", "skipped_immutable", "skipped_private", "skipped_ceiling",
+        "error",
     )
 
-    def test_invariant_1_une_ligne_outcome_par_evenement_de_sortie_neuf_statuts(self):
+    def test_invariant_1_une_ligne_outcome_par_evenement_de_sortie_tous_statuts(self):
         journal = FakeJournal()
         vus = []
 
-        chemin = lambda titre: (
-            "/servicesNS/nobody/mon_app/saved/searches/" + titre.replace(" ", "%20")
-        )
+        def chemin(titre):
+            return (
+                "/servicesNS/nobody/mon_app/saved/searches/"
+                + titre.replace(" ", "%20")
+            )
+
         rest = FakeRest(
             get_responses={
                 chemin("obj_updated"): RestResponse(200, acl_body(write=("ancien_role",))),
@@ -217,12 +350,13 @@ class JournalInvariantTest(unittest.TestCase):
             }
         )
         proc = EventProcessor(
-            params=make_params(fields=("perms.write",), validate_roles=True),
+            params=make_params(validate_roles=True),
             ctx=make_ctx(),
             rest=rest,
             journal=journal,
             mapping=FIXTURE_MAPPING,
-            roles_catalog=frozenset({"*", "w", "nouveau_role_admin", "ancien_role"}),
+            roles_catalog=frozenset({"*", "w", "role_a", "nouveau_role_admin",
+                                     "ancien_role"}),
             clock=FakeClock(),
         )
         vus.append(proc.process(make_event(title="obj_updated", write="nouveau_role_admin")).status)
@@ -235,9 +369,32 @@ class JournalInvariantTest(unittest.TestCase):
             proc.process(make_event(title="obj_invalidrole", write="role_inexistant")).status
         )
         vus.append(proc.process(make_event(title="obj_rejected", app="system")).status)
+        vus.append(
+            proc.process(make_event(title="obj_prive", current_sharing="user")).status
+        )
+        # Plafond a 1, sur un processeur dedie : le premier objet est ecrit, le second
+        # est ecarte. Partager le journal fait entrer ses lignes dans le meme decompte.
+        proc_plafond = EventProcessor(
+            params=make_params(max_objects=1),
+            ctx=make_ctx(),
+            rest=FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",)))),
+            journal=journal,
+            mapping=FIXTURE_MAPPING,
+            clock=FakeClock(),
+        )
+        vus.append(
+            proc_plafond.process(
+                make_event(title="obj_ecrit", write="nouveau_role_admin")
+            ).status
+        )
+        vus.append(
+            proc_plafond.process(
+                make_event(title="obj_plafond", write="nouveau_role_admin")
+            ).status
+        )
 
         proc_dryrun = EventProcessor(
-            params=make_params(fields=("perms.write",), dryrun=True),
+            params=make_params(dryrun=True),
             ctx=make_ctx(dryrun=True),
             rest=FakeRest(),
             journal=journal,
@@ -250,7 +407,7 @@ class JournalInvariantTest(unittest.TestCase):
             ).status
         )
 
-        self.assertEqual(sorted(set(vus)), sorted(self.NEUF_STATUTS))
+        self.assertEqual(sorted(set(vus)), sorted(self.DOUZE_STATUTS))
         self.assertEqual(
             len(journal.outcomes), len(vus),
             "une ligne outcome par evenement de sortie, sans exception",
@@ -265,7 +422,7 @@ class JournalInvariantTest(unittest.TestCase):
             default_get=RestResponse(200, acl_body(write=("ancien_role",))),
             default_post=RestResponse(200, b"{}"),
         )
-        proc = processor(rest, journal=journal, params=make_params(fields=("perms.write",)))
+        proc = processor(rest, journal=journal)
         for index in range(4):
             proc.process(
                 make_event(title="objet_%d" % index, write="nouveau_role_admin")
@@ -276,7 +433,7 @@ class JournalInvariantTest(unittest.TestCase):
     def test_invariant_2_aucune_intent_sans_post(self):
         journal = FakeJournal()
         rest = FakeRest(default_get=RestResponse(200, acl_body(read=(), write=("w",))))
-        proc = processor(rest, journal=journal, params=make_params(fields=("perms.write",)))
+        proc = processor(rest, journal=journal)
         proc.process(make_event(write="w"))                        # noop
         self.assertEqual(journal.intents, [])
         self.assertEqual(rest.posts(), [])
@@ -291,38 +448,41 @@ class JournalInvariantTest(unittest.TestCase):
                 raise KeyboardInterrupt("interruption entre fsync et reponse")
 
         journal = FakeJournal()
-        proc = processor(
-            RestInterrompu(), journal=journal, params=make_params(fields=("perms.write",))
-        )
+        proc = processor(RestInterrompu(), journal=journal)
         with self.assertRaises(KeyboardInterrupt):
             proc.process(make_event(write="nouveau_role_admin"))
         self.assertEqual(len(journal.intents), 1)
         self.assertEqual(journal.outcomes, [])
 
-    def test_invariant_3_le_cas_nominal_du_plafond_ne_bruite_pas_le_signal(self):
-        """L'evenement qui declenche `max_objects` ne produit **ni** `intent` **ni**
-        `outcome` : le controle du plafond precede l'ecriture du journal."""
+    def test_invariant_3_le_plafond_ne_bruite_pas_le_signal(self):
+        """Un objet ecarte par le plafond produit un `outcome` et **aucune** `intent` :
+        le controle du plafond precede toute ecriture de journal."""
         journal = FakeJournal()
         rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
-        proc = processor(
-            rest, journal=journal,
-            params=make_params(fields=("perms.write",), max_objects=2),
-        )
-        for index in range(2):
+        proc = processor(rest, journal=journal, params=make_params(max_objects=2))
+        for index in range(4):
             proc.process(make_event(title="objet_%d" % index, write="nouveau_role_admin"))
-        with self.assertRaises(MaxObjectsReached):
-            proc.process(make_event(title="objet_2", write="nouveau_role_admin"))
         self.assertEqual(len(journal.intents), 2)
-        self.assertEqual(len(journal.outcomes), 2)
+        self.assertEqual(len(journal.outcomes), 4)
 
     def test_echec_decriture_de_outcome_est_signale_sans_rien_annuler(self):
         journal = FakeJournal(fail_outcome=True)
         rest = FakeRest()
-        proc = processor(rest, journal=journal, params=make_params(fields=("perms.write",)))
+        proc = processor(rest, journal=journal)
         result = proc.process(make_event(write="nouveau_role_admin"))
         self.assertEqual(result.status, "updated")
         self.assertIn("journal_outcome_failed", result.warnings)
         self.assertEqual(len(rest.posts()), 1)
+
+    def test_le_journal_porte_before_owner_et_after_owner(self):
+        """§8.2, D-22 — le journal reprend le proprietaire, sur les deux phases."""
+        journal = FakeJournal()
+        rest = FakeRest(default_get=RestResponse(200, acl_body(owner="un_proprietaire")))
+        proc = processor(rest, journal=journal)
+        proc.process(make_event(owner="autre_proprietaire"))
+        intent = journal.intents[0]
+        self.assertEqual(intent["before_owner"], "un_proprietaire")
+        self.assertEqual(intent["after_owner"], "autre_proprietaire")
 
 
 class IntentFailureTest(unittest.TestCase):
@@ -330,7 +490,7 @@ class IntentFailureTest(unittest.TestCase):
     def test_echec_de_fsync_annule_le_post(self):
         journal = FakeJournal(fail_intent=True)
         rest = FakeRest()
-        proc = processor(rest, journal=journal, params=make_params(fields=("perms.write",)))
+        proc = processor(rest, journal=journal)
         result = proc.process(make_event(write="nouveau_role_admin"))
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error, "journal_intent_failed")
@@ -340,32 +500,123 @@ class IntentFailureTest(unittest.TestCase):
         self.assertIn("before_perms_read", journal.outcomes[0])
 
 
-class MaxObjectsTest(unittest.TestCase):
-    """§4.3 : portillon avant ecriture, pas de pre-condition sur le lot."""
+class PlafondNonFatalTest(unittest.TestCase):
+    """§4.3, D-28 — a l'atteinte du plafond la commande cesse d'ecrire **sans**
+    interrompre le pipeline.
+
+    Dans sa forme anterieure, l'atteinte du plafond levait une erreur fatale : la
+    recherche s'interrompait, la sortie etait integralement perdue, et l'operateur se
+    retrouvait avec une mutation partielle **et** l'aveuglement sur ce qui venait de se
+    passer. Un garde-fou doit informer, pas aveugler.
+    """
+
+    def _lot(self, taille, max_objects, dryrun=False):
+        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
+        journal = FakeJournal()
+        proc = processor(
+            rest, journal=journal,
+            params=make_params(max_objects=max_objects, dryrun=dryrun),
+        )
+        resultats = [
+            proc.process(make_event(title="objet_%02d" % i, write="nouveau_role_admin"))
+            for i in range(taille)
+        ]
+        return proc, rest, journal, resultats
 
     def test_le_nombre_decritures_vaut_exactement_max_objects(self):
-        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
-        proc = processor(rest, params=make_params(fields=("perms.write",), max_objects=3))
-        for index in range(3):
-            proc.process(make_event(title="objet_%d" % index, write="nouveau_role_admin"))
-        with self.assertRaises(MaxObjectsReached):
-            proc.process(make_event(title="objet_3", write="nouveau_role_admin"))
+        proc, rest, _, _ = self._lot(taille=7, max_objects=3)
         self.assertEqual(len(rest.posts()), 3)
         self.assertEqual(proc.counter, 3)
 
-    def test_un_lot_exactement_egal_au_plafond_ne_leve_pas(self):
-        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
-        proc = processor(rest, params=make_params(fields=("perms.write",), max_objects=2))
-        for index in range(2):
-            proc.process(make_event(title="objet_%d" % index, write="nouveau_role_admin"))
+    def test_la_sortie_reste_complete(self):
+        """Un evenement de sortie par evenement d'entree, plafond ou non (§5.7)."""
+        _, _, _, resultats = self._lot(taille=7, max_objects=3)
+        self.assertEqual(len(resultats), 7)
+
+    def test_les_objets_ecartes_ressortent_en_skipped_ceiling(self):
+        _, _, _, resultats = self._lot(taille=7, max_objects=3)
+        statuts = [r.status for r in resultats]
+        self.assertEqual(statuts, ["updated"] * 3 + ["skipped_ceiling"] * 4)
+
+    def test_un_objet_ecarte_ne_produit_ni_get_ni_post(self):
+        _, rest, _, _ = self._lot(taille=7, max_objects=3)
+        self.assertEqual(len(rest.gets()), 3)
+        self.assertEqual(len(rest.posts()), 3)
+
+    def test_le_compteur_dobjets_ecartes_est_tenu(self):
+        proc, _, _, _ = self._lot(taille=7, max_objects=3)
+        self.assertEqual(proc.skipped_ceiling, 4)
+
+    def test_chaque_objet_ecarte_porte_sa_ligne_de_journal(self):
+        _, _, journal, _ = self._lot(taille=7, max_objects=3)
+        self.assertEqual(len(journal.outcomes), 7)
+        ecartes = [o for o in journal.outcomes if o["status"] == "skipped_ceiling"]
+        self.assertEqual(len(ecartes), 4)
+
+    def test_lerreur_nomme_le_plafond_atteint(self):
+        _, _, _, resultats = self._lot(taille=7, max_objects=3)
+        self.assertEqual(resultats[-1].error, "max_objects_reached:3")
+
+    def test_un_lot_exactement_egal_au_plafond_necarte_rien(self):
+        proc, _, _, resultats = self._lot(taille=2, max_objects=2)
         self.assertEqual(proc.counter, 2)
+        self.assertEqual(proc.skipped_ceiling, 0)
+        self.assertEqual([r.status for r in resultats], ["updated", "updated"])
 
     def test_les_statuts_sans_post_ne_comptent_pas(self):
         rest = FakeRest(default_get=RestResponse(404, b"{}"))
-        proc = processor(rest, params=make_params(fields=("perms.write",), max_objects=1))
+        proc = processor(rest, params=make_params(max_objects=1))
         for index in range(5):
             proc.process(make_event(title="objet_%d" % index, write="w"))
         self.assertEqual(proc.counter, 0)
+        self.assertEqual(proc.skipped_ceiling, 0)
+
+    def test_le_plafond_ne_se_declenche_jamais_en_simulation(self):
+        """§4.3 (D-30) — la simulation n'emet aucun POST, le compteur reste a zero.
+
+        C'est cette propriete qui rend tenable un plafond par defaut aussi bas que dix :
+        elle place la friction sur l'ecriture reelle, jamais sur l'examen. Un `dryrun`
+        sur cent objets qui en ecarterait quatre-vingt-dix serait un defaut.
+        """
+        proc, rest, _, resultats = self._lot(taille=40, max_objects=10, dryrun=True)
+        self.assertEqual(len(resultats), 40)
+        self.assertEqual([r.status for r in resultats], ["dryrun"] * 40)
+        self.assertEqual(proc.skipped_ceiling, 0)
+        self.assertEqual(proc.counter, 0)
+        self.assertEqual(rest.posts(), [])
+
+    def test_la_reprise_apres_plafond_ne_reecrit_pas_les_premiers(self):
+        """§4.3 (D-30) — un lot interrompu se termine en relancant la meme recherche.
+
+        Les objets deja ecrits ressortent `noop` par idempotence ; seuls les ecartes
+        sont traites. La simulation ici porte sur le fait que la seconde passe lit
+        l'etat **deja converge** des trois premiers.
+        """
+        deja_ecrits = {
+            "/servicesNS/nobody/mon_app/saved/searches/objet_%02d" % i: RestResponse(
+                200, acl_body(write=("nouveau_role_admin",))
+            )
+            for i in range(3)
+        }
+        rest = FakeRest(
+            get_responses=deja_ecrits,
+            default_get=RestResponse(200, acl_body(write=("ancien_role",))),
+        )
+        proc = processor(rest, params=make_params(max_objects=10))
+        resultats = [
+            proc.process(make_event(title="objet_%02d" % i, write="nouveau_role_admin"))
+            for i in range(7)
+        ]
+        statuts = [r.status for r in resultats]
+        self.assertEqual(statuts, ["noop"] * 3 + ["updated"] * 4)
+        self.assertEqual(len(rest.posts()), 4)
+        self.assertEqual(proc.skipped_ceiling, 0)
+
+    def test_le_message_dit_le_plafond_et_le_nombre_decartes(self):
+        message = ceiling_message(10, 32)
+        self.assertIn("10", message)
+        self.assertIn("32", message)
+        self.assertIn("skipped_ceiling", message)
 
 
 class DeduplicationTest(unittest.TestCase):
@@ -375,7 +626,7 @@ class DeduplicationTest(unittest.TestCase):
     def test_deux_evenements_identiques(self):
         journal = FakeJournal()
         rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
-        proc = processor(rest, journal=journal, params=make_params(fields=("perms.write",)))
+        proc = processor(rest, journal=journal)
         premier = proc.process(make_event(write="nouveau_role_admin"))
         second = proc.process(make_event(write="nouveau_role_admin"))
         self.assertEqual(premier.status, "updated")
@@ -386,7 +637,7 @@ class DeduplicationTest(unittest.TestCase):
 
     def test_un_doublon_demandant_une_valeur_differente_produit_une_seconde_ecriture(self):
         rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
-        proc = processor(rest, params=make_params(fields=("perms.write",)))
+        proc = processor(rest)
         proc.process(make_event(write="nouveau_role_admin"))
         second = proc.process(make_event(write="encore_un_autre_role"))
         self.assertEqual(second.status, "updated")
@@ -395,7 +646,7 @@ class DeduplicationTest(unittest.TestCase):
 
     def test_un_objet_dont_le_traitement_a_echoue_nest_pas_memorise(self):
         rest = FakeRest(default_get=RestResponse(404, b"{}"))
-        proc = processor(rest, params=make_params(fields=("perms.write",)))
+        proc = processor(rest)
         proc.process(make_event(write="w"))
         proc.process(make_event(write="w"))
         self.assertEqual(len(rest.gets()), 2)
@@ -419,8 +670,7 @@ class DivergenceRuntimeDisqueTest(unittest.TestCase):
             default_get=RestResponse(200, acl_body(write=("ancien_role",))),
             default_post=RestResponse(code, corps),
         )
-        proc = processor(rest, params=make_params(fields=("perms.write",)))
-        return proc.process(make_event(write="nouveau_role_admin"))
+        return processor(rest).process(make_event(write="nouveau_role_admin"))
 
     def test_un_refus_de_persistance_porte_lavertissement(self):
         resultat = self._resultat(
@@ -433,13 +683,7 @@ class DivergenceRuntimeDisqueTest(unittest.TestCase):
         self.assertIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
 
     def test_toute_la_classe_5xx_porte_lavertissement(self):
-        """D-16 : l'avertissement porte sur tout `5xx`, pas sur le seul `500`.
-
-        Rien dans le mecanisme observe n'attache la divergence au code `500` : elle
-        tient a ce que le handler a mute son etat en memoire avant d'echouer a le
-        persister. Un `502`, un `503` ou un `507` produisent la meme situation, et la
-        restreindre a `500` laisserait passer sans signal exactement le cas a couvrir.
-        """
+        """D-16 : l'avertissement porte sur tout `5xx`, pas sur le seul `500`."""
         for code in (500, 501, 502, 503, 504, 507, 599):
             with self.subTest(code=code):
                 resultat = self._resultat(code)
@@ -448,7 +692,6 @@ class DivergenceRuntimeDisqueTest(unittest.TestCase):
                 self.assertIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
 
     def test_un_refus_qui_nest_pas_de_persistance_ne_le_porte_pas(self):
-        """Le message ne doit pas devenir du bruit sur tout echec d'ecriture."""
         for code in (400, 403, 404, 409):
             with self.subTest(code=code):
                 resultat = self._resultat(code)
@@ -457,14 +700,11 @@ class DivergenceRuntimeDisqueTest(unittest.TestCase):
 
     def test_une_ecriture_aboutie_ne_le_porte_pas(self):
         rest = FakeRest(default_get=RestResponse(200, acl_body(write=("ancien_role",))))
-        resultat = processor(
-            rest, params=make_params(fields=("perms.write",))
-        ).process(make_event(write="nouveau_role_admin"))
+        resultat = processor(rest).process(make_event(write="nouveau_role_admin"))
         self.assertEqual(resultat.status, "updated")
         self.assertNotIn(RUNTIME_DIVERGENCE_WARNING, resultat.warnings)
 
     def test_le_message_operateur_nomme_les_deux_faits(self):
-        """Le jeton `acl_warning` est machine ; la phrase doit dire les deux choses."""
         texte = RUNTIME_DIVERGENCE_MESSAGE.lower()
         self.assertIn("runtime", texte)
         self.assertIn("disque", texte)
@@ -472,12 +712,11 @@ class DivergenceRuntimeDisqueTest(unittest.TestCase):
         self.assertIn("rechargement de configuration", texte)
 
     def test_le_doublon_dun_objet_diverge_conserve_lavertissement(self):
-        """La deduplication du §10.8 ne doit pas effacer l'information (A-7 + A-2)."""
         rest = FakeRest(
             default_get=RestResponse(200, acl_body(write=("ancien_role",))),
             default_post=RestResponse(500, b'{"messages":[]}'),
         )
-        proc = processor(rest, params=make_params(fields=("perms.write",)))
+        proc = processor(rest)
         proc.process(make_event(write="nouveau_role_admin"))
         second = proc.process(make_event(write="nouveau_role_admin"))
         self.assertIn(RUNTIME_DIVERGENCE_WARNING, second.warnings)
@@ -496,19 +735,11 @@ def rest_post_refuse():
 
 
 class DeduplicationApresPostRefuseTest(unittest.TestCase):
-    """A-7 — le cache n'etait peuple qu'apres un POST **abouti**.
-
-    Deux occurrences du meme objet dont le premier POST echoue produisaient deux lignes
-    `intent` rigoureusement identiques, deux POST et deux increments du compteur — le
-    §8.5 et D-6 declarent pourtant le triplet `sid` + `endpoint` + `phase` univoque, et
-    le §10.8 pose que la deduplication economise le GET **et** le POST.
-    """
+    """A-7 — le cache n'etait peuple qu'apres un POST **abouti**."""
 
     def _proc(self, rest, journal, max_objects=500):
         return processor(
-            rest,
-            journal=journal,
-            params=make_params(fields=("perms.write",), max_objects=max_objects),
+            rest, journal=journal, params=make_params(max_objects=max_objects)
         )
 
     def test_un_seul_intent_un_seul_post_apres_un_refus(self):
@@ -535,7 +766,6 @@ class DeduplicationApresPostRefuseTest(unittest.TestCase):
         self.assertEqual(len(set(cles)), len(cles))
 
     def test_le_doublon_produit_un_evenement_et_une_ligne_outcome(self):
-        """§5.7 et §8.2 priment : la deduplication n'efface aucune sortie."""
         rest, journal = rest_post_refuse(), FakeJournal()
         proc = self._proc(rest, journal)
         premier = proc.process(make_event(write="nouveau_role_admin"))
@@ -549,11 +779,6 @@ class DeduplicationApresPostRefuseTest(unittest.TestCase):
         self.assertFalse(second.counted)
 
     def test_le_doublon_ne_ressort_jamais_updated_ni_noop(self):
-        """L'objet n'a pas ete ecrit : le doublon ne doit pas dire le contraire.
-
-        C'est ce qui interdit de peupler le cache d'etat avec l'etat **cible** apres un
-        refus — le doublon ressortirait `noop`, indiscernable d'une reussite.
-        """
         rest, journal = rest_post_refuse(), FakeJournal()
         proc = self._proc(rest, journal)
         proc.process(make_event(write="nouveau_role_admin"))
@@ -561,7 +786,6 @@ class DeduplicationApresPostRefuseTest(unittest.TestCase):
         self.assertNotIn(second.status, ("updated", "noop"))
 
     def test_une_cible_differente_apres_un_refus_est_bien_retentee(self):
-        """La suppression porte sur le doublon, pas sur une demande distincte."""
         rest, journal = rest_post_refuse(), FakeJournal()
         proc = self._proc(rest, journal)
         proc.process(make_event(write="nouveau_role_admin"))

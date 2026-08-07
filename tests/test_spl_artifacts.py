@@ -162,7 +162,7 @@ class MacrosTest(unittest.TestCase):
     def test_le_rollback_ne_consomme_que_des_champs_journalises(self):
         definition = self.conf["editacl_rollback(1)"]["definition"]
         for champ in ("before_perms_read", "before_perms_write", "before_sharing",
-                      "owner", "app", "title", "eai_type", "endpoint", "phase",
+                      "before_owner", "app", "title", "eai_type", "endpoint", "phase",
                       "status", "sid"):
             self.assertIn(champ, definition)
             self.assertIn(champ, ROLLBACK_FIELDS_FROM_INTENT + ("status",))
@@ -181,12 +181,35 @@ class MacrosTest(unittest.TestCase):
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
         self.assertIn("`editacl_rollback($sid$)`", definition)
 
-    def test_le_rollback_applique_porte_l_invocation_complete_et_quotee(self):
-        # D-13 : la macro existe pour que la quotation ne repose pas sur la vigilance
-        # de l'operateur au moment ou il restaure apres un incident.
+    def test_le_rollback_applique_porte_l_invocation_complete(self):
+        # D-13 : la macro existe pour que l'operateur n'ait rien a saisir au moment ou
+        # il restaure apres un incident.
+        #
+        # Elle ne porte plus AUCUN parametre de nommage : la macro emet la nomenclature
+        # native, que les quatre valeurs cibles reprennent par defaut. La classe
+        # d'erreur de la v1.3 — liste `fields` non quotee, tronquee par SPL a sa
+        # premiere valeur, restauration qui ne retablit que `perms.read` en rapportant
+        # un succes — est eliminee par construction : il n'y a plus de liste a quoter.
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
-        self.assertIn('| editacl fields="perms.read,perms.write,sharing"', definition)
+        self.assertIn("| editacl ", definition)
         self.assertIn("dryrun=f", definition)
+        self.assertNotIn("fields=", definition)
+
+    def test_le_rollback_applique_leve_le_plafond_par_defaut(self):
+        # Le defaut vaut dix (D-30) : une restauration s'y heurterait des le onzieme
+        # objet. Le volume a deja ete decide par l'operateur au moment de l'aller, et
+        # le `sid` delimite le jeu.
+        definition = self.conf["editacl_rollback_apply(1)"]["definition"]
+        self.assertIn("max_objects=", definition)
+
+    def test_le_rollback_reemet_le_proprietaire_anterieur(self):
+        # §8.6, D-22 + D-27 : la macro emet `eai:acl.owner` portant le proprietaire
+        # ANTERIEUR, que le defaut de `new_owner` reprend sans parametre explicite.
+        # C'est ce que le modele de parametres rend exprimable et que la v1 ne pouvait
+        # pas faire — le constat C-1 du cadrage tenait a cette impossibilite.
+        definition = self.conf["editacl_rollback(1)"]["definition"]
+        self.assertIn('earliest(before_owner)', definition)
+        self.assertIn('AS "eai:acl.owner"', definition)
 
     def test_seul_le_rollback_applique_ecrit(self):
         # `editacl_rollback(1)` reste la forme de previsualisation : elle ne doit porter
@@ -353,27 +376,31 @@ class RevalidationTest(unittest.TestCase):
         self.assertNotIn("--password", self.source)
 
 
-class QuotationDeFieldsTest(unittest.TestCase):
-    """Balayage mecanique du depot : aucune liste `fields` a plus d'une valeur ne doit
-    y figurer sans guillemets — ni en SPL, ni en README, ni en commentaire de conf, ni
-    en docstring, ni en contre-exemple.
+class DisparitionDeFieldsTest(unittest.TestCase):
+    """Balayage mecanique du depot : le parametre `fields` n'existe plus (D-23), et
+    aucune ligne copiable ne doit encore l'offrir.
 
-    Une consigne de quotation ne se verifie pas a la relecture : la forme fautive est
-    lisible, s'execute sans erreur, et ne se distingue de la forme correcte que par
-    deux caracteres. La seule garantie tenable est qu'aucune ligne copiable n'existe
-    dans le depot.
+    Ce test remplace celui de la v1.3, qui balayait le depot a la recherche d'une liste
+    `fields` **non quotee** — SPL la tronquait a sa premiere valeur sans erreur, et une
+    restauration ainsi tronquee rapportait un succes sans restaurer. C'etait le defaut
+    le plus grave qu'ait connu ce projet.
+
+    La refonte l'elimine **par construction** : chaque parametre ne porte plus qu'un nom
+    de champ unique, sans virgule, et la troncature silencieuse n'a plus d'objet. Ce qui
+    reste a garder, c'est qu'aucune documentation ni aucun exemple ne propose encore la
+    forme disparue — un operateur qui la copierait obtiendrait une erreur de parametre
+    inconnu, et surtout une syntaxe qui ne fait plus ce qu'elle dit.
+
+    Le repertoire des tests est exclu : il **doit** pouvoir nommer le parametre disparu
+    pour prouver qu'il l'est.
     """
 
     #: Construit par concatenation pour que ce fichier ne puisse pas etre son propre
-    #: contre-exemple : le motif reconnait une liste de valeurs d'attribut ACL
-    #: (`[A-Za-z._]`) separees par des virgules et NON precedee d'un guillemet. Il ne
-    #: reconnait donc pas un argument nomme Python (`fields=fields,`), ou la virgule
-    #: separe des arguments et non des valeurs.
-    MOTIF = re.compile("fields=" + r"[A-Za-z._]+(?:,[A-Za-z._]+)+")
+    #: contre-exemple. Le motif reconnait l'assignation d'option SPL `fields=`, pas la
+    #: commande `| fields ...` ni un identifiant Python comme `field_present`.
+    MOTIF = re.compile("fields" + r"\s*=")
 
-    #: Exclus : metadonnees git, caches d'interpretation, et le SDK vendorise, qui est
-    #: du code amont non modifie (verifie : il ne contient aucune occurrence).
-    EXCLUS = ("/.git/", "/__pycache__/", "/bin/lib/")
+    EXCLUS = ("/.git/", "/__pycache__/", "/bin/lib/", "/tests/")
 
     EXTENSIONS = (".py", ".md", ".conf", ".csv", ".json", ".xml", ".sh", ".example",
                   ".txt", ".meta", ".gitattributes", ".gitignore")
@@ -381,7 +408,7 @@ class QuotationDeFieldsTest(unittest.TestCase):
     def _fichiers(self):
         for racine, dossiers, fichiers in os.walk(REPO_ROOT):
             dossiers[:] = [
-                d for d in dossiers if d not in (".git", "__pycache__", "lib")
+                d for d in dossiers if d not in (".git", "__pycache__", "lib", "tests")
             ]
             for nom in fichiers:
                 chemin = os.path.join(racine, nom)
@@ -395,18 +422,18 @@ class QuotationDeFieldsTest(unittest.TestCase):
     def test_le_balayage_couvre_bien_les_livrables(self):
         """Un balayage qui ne lit rien passerait toujours."""
         lus = [os.path.basename(c) for c in self._fichiers()]
-        for attendu in ("README.md", "macros.conf", "editacl.py", "rest.py"):
+        for attendu in ("README.md", "macros.conf", "editacl.py", "rest.py",
+                        "searchbnf.conf"):
             self.assertIn(attendu, lus)
 
-    def test_le_motif_reconnait_la_forme_fautive_et_epargne_les_formes_licites(self):
-        # Assemble en deux morceaux : ce fichier est lui-meme balaye par le test
-        # suivant, il ne doit pas porter la forme fautive sur une seule ligne.
-        self.assertTrue(self.MOTIF.search("| editacl fields=a.b" + ",c.d dryrun=f"))
-        self.assertIsNone(self.MOTIF.search('| editacl fields="a.b,c.d" dryrun=f'))
-        self.assertIsNone(self.MOTIF.search("| editacl fields=perms.write dryrun=f"))
-        self.assertIsNone(self.MOTIF.search("validate_params(" + "fields=fields,)"))
+    def test_le_motif_reconnait_la_forme_disparue_et_epargne_les_formes_licites(self):
+        self.assertTrue(self.MOTIF.search("| editacl " + "fields=perms.write"))
+        self.assertTrue(self.MOTIF.search("| editacl " + 'fields="a.b,c.d"'))
+        self.assertIsNone(self.MOTIF.search('| fields title "eai:acl.*"'))
+        self.assertIsNone(self.MOTIF.search("def field_present(record, name):"))
+        self.assertIsNone(self.MOTIF.search("FIELD_NAME_PARAMS = ("))
 
-    def test_aucune_liste_fields_non_quotee_dans_le_depot(self):
+    def test_le_parametre_fields_ne_figure_plus_dans_les_livrables(self):
         fautifs = []
         for chemin in self._fichiers():
             try:
@@ -421,8 +448,8 @@ class QuotationDeFieldsTest(unittest.TestCase):
                     )
         self.assertEqual(
             fautifs, [],
-            "liste `fields` non quotee — SPL la tronque a sa premiere valeur, sans "
-            "erreur : %s" % ", ".join(fautifs),
+            "le parametre `fields` a disparu (D-23) mais est encore offert ici : %s"
+            % ", ".join(fautifs),
         )
 
 

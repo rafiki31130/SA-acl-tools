@@ -25,10 +25,10 @@ ROLLBACK_FIELDS_FROM_INTENT = (
     "sid",
     "phase",
     "endpoint",
+    "before_owner",
     "before_perms_read",
     "before_perms_write",
     "before_sharing",
-    "owner",
     "app",
     "title",
     "eai_type",
@@ -44,7 +44,6 @@ def result(status="updated", **kwargs):
         app="mon_app",
         eai_type="savedsearch",
         endpoint="/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche",
-        owner="nobody",
         http_code=200,
         before=state(sharing="global", read=("role_a",), write=("ancien_role",)),
         after=state(sharing="global", read=("role_a",), write=("nouveau_role_admin",)),
@@ -59,12 +58,13 @@ class IntentRecordTest(unittest.TestCase):
         record = build_intent_record(CTX, result(), "2026-01-01T00:00:00.000+01:00")
         for field in (
             "ts", "phase", "sid", "user", "host", "dryrun", "endpoint", "app",
-            "owner", "title", "eai_type",
+            "title", "eai_type",
         ):
             self.assertIn(field, record)
         for field in (
-            "before_perms_read", "before_perms_write", "before_sharing",
-            "after_perms_read", "after_perms_write", "after_sharing",
+            "before_owner", "before_perms_read", "before_perms_write",
+            "before_sharing",
+            "after_owner", "after_perms_read", "after_perms_write", "after_sharing",
         ):
             self.assertIn(field, record)
         self.assertEqual(record["phase"], "intent")
@@ -209,7 +209,7 @@ class RollbackContractTest(unittest.TestCase):
         sortie_macro = {
             "title": intent["title"],
             "eai:acl.app": intent["app"],
-            "eai:acl.owner": intent["owner"],
+            "eai:acl.owner": intent["before_owner"],
             "eai:type": intent["eai_type"],
         }
         if intent["before_perms_read"]:
@@ -229,8 +229,8 @@ class RollbackContractTest(unittest.TestCase):
                 read=sortie_macro.get("eai:acl.perms.read"),
                 write=sortie_macro.get("eai:acl.perms.write"),
                 sharing=sortie_macro.get("eai:acl.sharing"),
+                owner=sortie_macro.get("eai:acl.owner"),
             ),
-            frozenset({"perms.read", "perms.write", "sharing"}),
         )
         self.assertIsNone(reinjection.rejection)
         self.assertEqual(reinjection.payload["perms.read"], "")

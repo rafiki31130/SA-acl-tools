@@ -41,7 +41,15 @@ def journal_path(log_dir, sid):
 
 
 def _state_fields(prefix, state):
+    """Les **quatre** attributs d'un etat, prefixes `before_` ou `after_` (§8.2).
+
+    `owner` y figure depuis D-22 : c'est desormais une valeur cible, et la macro de
+    restauration du §8.6 lit `before_owner` pour reemettre `eai:acl.owner`. Le porter
+    dans le bloc d'etat plutot qu'en champ commun est ce qui donne au journal un
+    `before_owner` **et** un `after_owner` distincts quand la propriete change.
+    """
     return {
+        prefix + "_owner": state.owner or "",
         prefix + "_perms_read": serialize_roles(state.perms_read),
         prefix + "_perms_write": serialize_roles(state.perms_write),
         prefix + "_sharing": state.sharing or "",
@@ -64,7 +72,6 @@ def _common_record(ctx, result, phase):
         "dryrun": bool(ctx.dryrun),
         "endpoint": str(result.endpoint or ""),
         "app": str(result.app or ""),
-        "owner": str(result.owner or ""),
         "title": str(result.title or ""),
         "eai_type": str(result.eai_type or ""),
     }

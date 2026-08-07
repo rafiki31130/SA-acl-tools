@@ -31,7 +31,7 @@ from acltools.diag import (
     redact,
 )
 from acltools.mapping import load_mapping
-from acltools.model import Params
+from acltools.model import FieldNames, Params
 
 from . import BIN_DIR, REPO_ROOT
 
@@ -58,13 +58,13 @@ class ArbreDiag(object):
             return handle.read()
 
 
-def params(fields=("perms.read", "perms.write"), warnings=()):
+def params(names=None, warnings=()):
     return Params(
-        fields=frozenset(fields),
+        names=names or FieldNames(),
         dryrun=False,
         validate_roles=True,
         journal=True,
-        max_objects=500,
+        max_objects=10,
         warnings=tuple(warnings),
     )
 
@@ -140,7 +140,7 @@ class ContenuExigeParLeParagraphe81Test(unittest.TestCase):
             diag.mapping(load_mapping(os.path.join(BIN_DIR, "acl_endpoint_map.json"))
                          .coverage())
             diag.journal("/var/log/splunk/editacl_journal_1786033792.6.log", True)
-            diag.fatal("max_objects atteint (2)")
+            diag.fatal("capability 'edit_acl_bulk' absente")
             diag.close()
 
             texte = arbre.contenu()
@@ -148,15 +148,16 @@ class ContenuExigeParLeParagraphe81Test(unittest.TestCase):
         for attendu in (
             "demarrage editacl",
             "version=1.0.0",
-            # Assemble en deux morceaux : ce fichier est balaye par le controle de
-            # quotation de `fields` (§4.4, D-12), il ne doit pas porter la forme
-            # fautive sur une seule ligne.
-            "parametres fields=" + "perms.read,perms.write",
-            "max_objects=500",
+            "parametres dryrun=false",
+            # Les neuf parametres de nommage sont consignes : sans eux, une execution
+            # dont un nom de champ a ete redirige est illisible a posteriori.
+            "nommage title=title",
+            "new_owner=eai:acl.owner",
+            "max_objects=10",
             "controle d'habilitation",
             "table de correspondance : 28 entrees",
             "journal de restauration ouvert",
-            "erreur fatale : max_objects atteint (2)",
+            "erreur fatale : capability 'edit_acl_bulk' absente",
         ):
             with self.subTest(attendu=attendu):
                 self.assertIn(attendu, texte)

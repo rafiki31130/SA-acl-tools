@@ -15,13 +15,18 @@ from datetime import datetime
 
 from .derived import CarrierProbe
 from .endpoint import build_object_path, resolve_handler_path
-from .errors import EventRejected, MaxObjectsReached
+from .errors import EventRejected
 from .journal import build_intent_record, build_outcome_record
 from .merge import is_noop, merge, validate_roles
 from .model import EventResult
 from .normalize import parse_acl_state
 
 MAX_ERROR_LEN = 512
+
+#: Portee de partage des objets hors perimetre (§3.5, D-26). Un objet en `sharing=user`
+#: n'est visible que de son proprietaire et des administrateurs : les permissions qu'il
+#: porterait n'accordent rien a personne, elles sont **inertes**.
+PRIVATE_SHARING = "user"
 
 #: Contexte applicatif hors perimetre (§1.3, §4.2). Refus **par evenement** : le §9
 #: enumere limitativement les erreurs fatales et ne l'y fait pas figurer.
@@ -62,6 +67,26 @@ RUNTIME_DIVERGENCE_MESSAGE = (
 )
 
 
+def ceiling_message(max_objects, skipped):
+    """Avertissement **unique** de l'atteinte du plafond (§4.3, D-28).
+
+    Il porte les deux informations dont l'operateur a besoin : que le plafond a ete
+    atteint, et **combien** d'objets ont ete ecartes — d'ou son emission en fin
+    d'execution, seul moment ou ce nombre est connu d'une commande qui recoit son entree
+    par chunks successifs.
+
+    Il reste un avertissement : le job n'est pas marque en echec, la sortie de la
+    recherche est complete, et chaque objet ecarte porte son propre
+    `acl_status = "skipped_ceiling"`.
+    """
+    return (
+        "plafond max_objects=%d atteint : %d objet(s) ecarte(s) sans GET ni POST, en "
+        "acl_status=skipped_ceiling. Les objets deja ecrits ne sont pas annules et la "
+        "sortie de cette recherche est complete. Pour traiter le reste, relancer avec "
+        "un max_objects superieur." % (int(max_objects), int(skipped))
+    )
+
+
 def default_clock():
     """Horodatage ISO 8601 avec fuseau explicite et **millisecondes obligatoires**.
 
@@ -80,7 +105,7 @@ class _Work(object):
     """Etat mutable du traitement d'un evenement, fige en `EventResult` a la sortie."""
 
     __slots__ = (
-        "title", "app", "eai_type", "endpoint", "owner", "http_code", "status",
+        "title", "app", "eai_type", "endpoint", "http_code", "status",
         "error", "warnings", "before", "after", "journaled", "post_attempted",
         "counted", "source", "platform_name",
     )
@@ -90,7 +115,6 @@ class _Work(object):
         self.app = str(event.app or "")
         self.eai_type = str(event.eai_type or "")
         self.endpoint = ""
-        self.owner = str(event.owner or "")
         self.http_code = 0
         self.status = "error"
         self.error = None
@@ -117,7 +141,6 @@ class _Work(object):
             app=self.app,
             eai_type=self.eai_type,
             endpoint=self.endpoint,
-            owner=self.owner,
             http_code=int(self.http_code or 0),
             error=self.error,
             warnings=tuple(self.warnings),
@@ -183,6 +206,10 @@ class EventProcessor(object):
         #: `fvtags`, son cout est nul.
         self._carrier = CarrierProbe(rest)
         self.counter = 0
+        #: Nombre d'objets ecartes faute de plafond (§4.3, D-28). Il alimente
+        #: l'avertissement unique de fin d'execution ; il ne vaut zero que si le plafond
+        #: n'a jamais mordu.
+        self.skipped_ceiling = 0
         #: endpoint -> etat resultant d'un POST **abouti**.
         self._written = {}
         #: endpoint -> `_FailedPost` d'un POST **emis et refuse**.
@@ -205,11 +232,6 @@ class EventProcessor(object):
         work = _Work(event)
         try:
             self._run(event, work)
-        except MaxObjectsReached:
-            # Sortie fatale : ni ligne `intent`, ni ligne `outcome`, ni evenement de
-            # sortie. Le controle du plafond precede toute ecriture de journal
-            # precisement pour ne pas bruiter la signature « intent sans outcome ».
-            raise
         except EventRejected as exc:
             work.status = exc.status
             work.error = exc.error
@@ -225,16 +247,38 @@ class EventProcessor(object):
     def _run(self, event, work):
         self._check_required(event)
 
+        # Plafond (§4.3, D-28) — **avant le GET**, donc avant tout echange HTTP et avant
+        # toute ligne de journal `intent`, ce que le §4.3 exige. Une fois le compteur
+        # d'ecritures a son plafond, chaque objet suivant ressort ici : sans GET, sans
+        # POST, avec sa ligne `outcome` comme tout autre statut, et la recherche
+        # poursuit son cours. La sortie reste complete — c'est tout l'objet de D-28.
+        if self.counter >= self._params.max_objects:
+            self.skipped_ceiling += 1
+            raise EventRejected(
+                "skipped_ceiling", "max_objects_reached:%d" % self._params.max_objects
+            )
+
+        # Resolution de l'endpoint (§5.2) : calcul pur, aucun echange HTTP. Elle precede
+        # la table de controles du §5.4 — c'est deja son rang dans la v1 — et donne un
+        # `acl_endpoint` exploitable a **tous** les statuts qui suivent, `skipped_private`
+        # compris.
         handler_path, source = resolve_handler_path(
             event.id_value, event.eai_type, self._mapping
         )
         work.source = source
-        work.endpoint = build_object_path(
-            event.owner, event.app, handler_path, event.title
-        )
+        work.endpoint = build_object_path(event.app, handler_path, event.title)
+
+        # Rang -1 (§3.5, D-26) — objets prives, ecartes **sans GET ni POST**, sur la
+        # seule portee courante lue dans l'evenement. Si la colonne de portee est absente
+        # du jeu de resultats, `current_sharing` vaut `None` : la commande ne peut pas
+        # les ecarter en amont, le GET par contexte fixe repond `404` et l'objet ressort
+        # en `not_found`. C'est honnete, mais moins informatif — d'ou la recommandation
+        # du README de batir le pipeline sur la macro d'inventaire, qui emet toujours la
+        # portee.
+        if (event.current_sharing or "").strip().lower() == PRIVATE_SHARING:
+            raise EventRejected("skipped_private", "private_object_out_of_scope")
 
         before = self._read_state(work)
-        work.owner = before.owner or work.owner
 
         # Rang 0 (§3.4, D-18) — il precede TOUS les autres controles, y compris
         # `can_change_perms`. La relation de derivation est decouverte aupres de la
@@ -246,7 +290,7 @@ class EventProcessor(object):
         # pas modifie, il n'a donc pas d'etat cible, et sa ligne `outcome` ne porte pas
         # de `before_*` / `after_*` — ce qui est exactement l'enumeration du §8.2.
         carrier, carrier_warning = self._carrier.carrier_of(
-            event.owner, event.app, handler_path, work.platform_name
+            event.app, handler_path, work.platform_name
         )
         if carrier_warning:
             work.warn(carrier_warning)
@@ -256,16 +300,16 @@ class EventProcessor(object):
         if self._app_disabled_fn is not None and self._app_disabled_fn(event.app):
             work.warn("app_disabled")
 
-        merged = merge(before, event, self._params.fields)
+        merged = merge(before, event)
         work.before = merged.before
         work.after = merged.after
         for warning in merged.warnings:
             work.warn(warning)
 
-        if merged.rejection is not None:                              # rangs 1 a 4
+        if merged.rejection is not None:                              # rangs 1 a 5
             raise merged.rejection
 
-        if self._params.validate_roles:                               # rang 5
+        if self._params.validate_roles:                               # rang 6
             unknown_added, stale_preserved = validate_roles(
                 merged.before, merged.after, self._roles
             )
@@ -276,14 +320,14 @@ class EventProcessor(object):
                     "invalid_role", "invalid_role:%s" % ",".join(unknown_added)
                 )
 
-        if is_noop(merged.before, merged.after):                      # rang 6
-            # Le rang 6 precede le rang 7 : un objet deja conforme est un `noop` meme
+        if is_noop(merged.before, merged.after):                      # rang 7
+            # Le rang 7 precede le rang 8 : un objet deja conforme est un `noop` meme
             # en simulation. C'est ce qui permet de mesurer la convergence d'un lot
             # sans ecrire.
             work.status = "noop"
             return
 
-        if self._params.dryrun:                                       # rang 7
+        if self._params.dryrun:                                       # rang 8
             work.status = "dryrun"
             return
 
@@ -301,9 +345,6 @@ class EventProcessor(object):
                 work.warn(warning)
             work.warn("duplicate_post_suppressed")
             return
-
-        if self.counter >= self._params.max_objects:
-            raise MaxObjectsReached(self._params.max_objects)
 
         if self._journal is not None:
             record = build_intent_record(self._ctx, work.result(), self._clock())
@@ -350,11 +391,13 @@ class EventProcessor(object):
     # -- etapes --------------------------------------------------------- #
 
     def _check_required(self, event):
-        for name, value in (
-            ("title", event.title),
-            ("eai:acl.app", event.app),
-            ("eai:acl.owner", event.owner),
-        ):
+        """`title` et `app` sont requis (§3.1). Le proprietaire ne l'est plus.
+
+        Il ne l'est plus parce qu'il n'entre plus : l'adressage se fait par contexte
+        fixe et la valeur transmise au POST est celle du GET tant que `new_owner` n'est
+        pas fourni (D-25).
+        """
+        for name, value in (("title", event.title), ("app", event.app)):
             if not str(value or "").strip():
                 raise EventRejected("rejected", "missing_field:%s" % name)
         if str(event.app).strip().lower() == FORBIDDEN_APP:

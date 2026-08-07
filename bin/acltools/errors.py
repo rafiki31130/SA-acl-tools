@@ -40,15 +40,20 @@ class FatalJournalError(FatalError):
     """Journal non ouvrable en ecriture alors que `journal=true` ET `dryrun=false`."""
 
 
-class MaxObjectsReached(FatalError):
-    """Plafond `max_objects` atteint avant une ecriture (§4.3)."""
-
-    def __init__(self, max_objects):
-        super().__init__(
-            "max_objects atteint (%s) : la recherche est interrompue, "
-            "les objets deja ecrits ne sont pas annules." % max_objects
-        )
-        self.max_objects = max_objects
+# **Le plafond `max_objects` n'est plus une erreur fatale** (D-28). Il l'etait en v1 :
+# l'atteinte du plafond interrompait la recherche, la sortie etait integralement perdue,
+# et l'operateur se retrouvait avec une mutation partielle **et** l'aveuglement sur ce
+# qui venait de se passer. Le garde-fou produisait le pire des deux mondes a l'instant
+# precis ou il se declenchait.
+#
+# Sa valeur reelle — borner le rayon d'action d'une ecriture lancee sans simulation —
+# est integralement conservee par l'arret des ecritures. Ce qui disparait, c'est la
+# cecite : le plafond ressort desormais en `acl_status = "skipped_ceiling"`, statut par
+# evenement, et la sortie de la recherche reste complete. Un garde-fou doit informer,
+# pas aveugler.
+#
+# Il n'y a donc plus de classe d'exception pour le plafond : le chercher ici est
+# l'erreur qu'un lecteur de la v1 commettrait.
 
 
 # --------------------------------------------------------------------------- #

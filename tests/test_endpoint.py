@@ -5,9 +5,11 @@ la barre oblique mais pas les autres caracteres speciaux, il n'est donc pas reut
 tel quel comme URI.
 """
 
+import inspect
 import unittest
 
 from acltools.endpoint import (
+    FIXED_CONTEXT,
     TITLE_ENCODING_MODE,
     build_object_path,
     build_object_url,
@@ -61,7 +63,7 @@ class TitleEncodingTest(unittest.TestCase):
 class BuildObjectPathTest(unittest.TestCase):
 
     def test_chemin_reconstruit_sans_suffixe_acl(self):
-        path = build_object_path("nobody", "mon_app", "saved/searches", "Ma recherche")
+        path = build_object_path("mon_app", "saved/searches", "Ma recherche")
         self.assertEqual(
             path, "/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche"
         )
@@ -69,21 +71,64 @@ class BuildObjectPathTest(unittest.TestCase):
         self.assertNotIn("/acl", path)
 
     def test_handler_path_nest_pas_reencode(self):
-        path = build_object_path("nobody", "mon_app", "saved/searches", "objet")
+        path = build_object_path("mon_app", "saved/searches", "objet")
         self.assertIn("saved/searches", path)
         self.assertNotIn("saved%2Fsearches", path)
 
-    def test_namespace_construit_sur_le_proprietaire_de_lobjet(self):
-        """§10.3 : un objet `sharing=user` d'un tiers s'adresse dans SON namespace."""
-        path = build_object_path(
-            "un_proprietaire", "mon_app", "saved/searches", "objet_prive"
-        )
-        self.assertTrue(path.startswith("/servicesNS/un_proprietaire/mon_app/"))
-
     def test_url_prefixee_par_la_base_splunkd_sans_hote_en_dur(self):
-        path = build_object_path("nobody", "mon_app", "saved/searches", "objet")
+        path = build_object_path("mon_app", "saved/searches", "objet")
         url = build_object_url("https://base.invalid:0/", path)
         self.assertEqual(url, "https://base.invalid:0" + path)
+
+
+class AdressageParContexteFixeTest(unittest.TestCase):
+    """§5.2, D-25 — l'adressage ne porte **jamais** de proprietaire.
+
+    Ce que le contexte fixe corrige : la v1 adressait par `eai:acl.owner`, or un objet
+    prive **masque** un objet partage homonyme dans le namespace de son detenteur. Si le
+    proprietaire d'un objet partage possedait aussi un objet prive de meme nom dans la
+    meme application, la commande atteignait le **prive** et ecrivait son ACL — `200` au
+    GET, fusion calculee, POST abouti, ligne rapportee `updated`. Une ecriture
+    silencieuse sur la mauvaise cible, que ni la recette ni deux audits n'avaient
+    detectee faute d'avoir mesure la resolution de namespace.
+    """
+
+    def test_le_contexte_est_toujours_nobody(self):
+        self.assertEqual(FIXED_CONTEXT, "nobody")
+        path = build_object_path("mon_app", "saved/searches", "objet")
+        self.assertTrue(path.startswith("/servicesNS/nobody/mon_app/"))
+
+    def test_la_signature_nexpose_aucun_proprietaire(self):
+        """Garantie **structurelle** : il n'y a pas de parametre a mal alimenter.
+
+        Un futur appelant ne peut donc pas reintroduire le defaut de la v1 par
+        inadvertance — la fonction refuserait l'argument.
+        """
+        parametres = list(
+            inspect.signature(build_object_path).parameters
+        )
+        self.assertEqual(parametres, ["app", "handler_path", "title"])
+        for nom in parametres:
+            self.assertNotIn("owner", nom)
+
+    def test_deux_objets_homonymes_de_proprietaires_differents_ont_la_meme_uri(self):
+        """Le corollaire du contexte fixe : l'adresse ne depend que de l'application et
+        du nom. C'est ce qui garantit qu'on atteint l'objet **partage**, quel qu'en soit
+        le detenteur, et jamais l'homonyme prive de qui que ce soit."""
+        premiere = build_object_path("mon_app", "saved/searches", "objet_homonyme")
+        seconde = build_object_path("mon_app", "saved/searches", "objet_homonyme")
+        self.assertEqual(premiere, seconde)
+        self.assertNotIn("un_proprietaire", premiere)
+
+    def test_le_contexte_joker_nest_pas_le_contexte_retenu(self):
+        """Le joker refuse l'ecriture, et sur deux objets homonymes il renvoie deux
+        entrees sur un chemin mono-objet — un client lisant la premiere choisirait a
+        l'aveugle."""
+        self.assertNotEqual(FIXED_CONTEXT, "-")
+        self.assertNotIn(
+            "/servicesNS/-/",
+            build_object_path("mon_app", "saved/searches", "objet"),
+        )
 
 
 class HandlerPathFromIdTest(unittest.TestCase):

@@ -2,45 +2,9 @@
 
 import unittest
 
-from acltools.merge import DEFAULT_FIELDS, is_noop, merge, parse_fields, validate_roles
-from acltools.errors import FatalConfigError
+from acltools.merge import is_noop, merge, validate_roles
 
 from .helpers import make_event, state
-
-READ_WRITE = frozenset({"perms.read", "perms.write"})
-SHARING = frozenset({"sharing"})
-ALL_FIELDS = frozenset({"perms.read", "perms.write", "sharing"})
-
-
-class ParseFieldsTest(unittest.TestCase):
-
-    def test_defaut(self):
-        self.assertEqual(
-            parse_fields(DEFAULT_FIELDS), frozenset({"perms.read", "perms.write"})
-        )
-
-    def test_owner_est_une_erreur_fatale(self):
-        with self.assertRaises(FatalConfigError) as raised:
-            parse_fields("perms.read,owner")
-        self.assertIn("owner", str(raised.exception))
-
-    def test_owner_seul_est_une_erreur_fatale(self):
-        with self.assertRaises(FatalConfigError):
-            parse_fields("owner")
-
-    def test_valeur_non_admise_est_une_erreur_fatale(self):
-        with self.assertRaises(FatalConfigError):
-            parse_fields("perms.read,perms.delete")
-
-    def test_liste_vide_est_une_erreur_fatale(self):
-        with self.assertRaises(FatalConfigError):
-            parse_fields("  ,  ")
-
-    def test_espaces_et_multivalue_acceptes(self):
-        self.assertEqual(
-            parse_fields([" perms.read ", "sharing"]),
-            frozenset({"perms.read", "sharing"}),
-        )
 
 
 class ControlOrderTest(unittest.TestCase):
@@ -51,40 +15,66 @@ class ControlOrderTest(unittest.TestCase):
         current = state(
             owner="nobody", sharing="app", read=(), write=(), can_change_perms=False
         )
-        result = merge(current, make_event(sharing=""), ALL_FIELDS)
+        result = merge(current, make_event(sharing=""))
         self.assertEqual(result.rejection.status, "skipped_immutable")
 
     def test_rang_1_can_change_perms_lemporte_sur_sharing_invalide(self):
         current = state(
             owner="nobody", sharing="app", read=(), write=(), can_change_perms=False
         )
-        result = merge(current, make_event(sharing="galactique"), ALL_FIELDS)
+        result = merge(current, make_event(sharing="galactique"))
         self.assertEqual(result.rejection.status, "skipped_immutable")
 
-    def test_rang_2_sharing_vide_lemporte_sur_le_rang_4(self):
-        """Un `sharing` vide est rejete avant que la regle `user`/`nobody` s'applique."""
-        current = state(owner="nobody", sharing="user", read=(), write=())
-        result = merge(current, make_event(sharing=None), SHARING)
+    def test_rang_1_can_change_perms_lemporte_sur_le_rejet_de_owner(self):
+        current = state(
+            owner="un_proprietaire", sharing="app", read=(), write=(),
+            can_change_perms=False,
+        )
+        result = merge(current, make_event(owner=""))
+        self.assertEqual(result.rejection.status, "skipped_immutable")
+
+    def test_rang_2_sharing_vide_lemporte_sur_le_rejet_de_owner(self):
+        current = state(owner="un_proprietaire", sharing="app", read=(), write=())
+        result = merge(current, make_event(sharing="", owner=""))
         self.assertEqual(result.rejection.error, "sharing_empty_not_allowed")
 
-    def test_rang_3_sharing_invalide_lemporte_sur_le_rang_4(self):
-        current = state(owner="nobody", sharing="user", read=(), write=())
-        result = merge(current, make_event(sharing="galactique"), SHARING)
+    def test_rang_3_sharing_invalide_lemporte_sur_le_rejet_de_owner(self):
+        current = state(owner="un_proprietaire", sharing="app", read=(), write=())
+        result = merge(current, make_event(sharing="galactique", owner=""))
         self.assertEqual(result.rejection.error, "invalid_sharing:galactique")
 
-    def test_rang_4_sharing_user_sur_owner_nobody(self):
+    def test_rang_4_owner_vide_lemporte_sur_le_rang_5(self):
+        """Un `owner` vide est rejete avant que la regle `user`/`nobody` s'applique."""
         current = state(owner="nobody", sharing="app", read=(), write=())
-        result = merge(current, make_event(sharing="user"), SHARING)
-        self.assertEqual(result.rejection.status, "rejected")
-        self.assertEqual(
-            result.rejection.error, "sharing_user_requires_named_owner"
-        )
+        result = merge(current, make_event(sharing="user", owner=""))
+        self.assertEqual(result.rejection.error, "owner_empty_not_allowed")
 
-    def test_rang_4_ne_se_declenche_pas_sur_un_proprietaire_nomme(self):
+    def test_rang_5_sharing_user_sur_owner_nobody(self):
+        current = state(owner="nobody", sharing="app", read=(), write=())
+        result = merge(current, make_event(sharing="user"))
+        self.assertEqual(result.rejection.status, "rejected")
+        self.assertEqual(result.rejection.error, "sharing_user_requires_named_owner")
+
+    def test_rang_5_ne_se_declenche_pas_sur_un_proprietaire_nomme(self):
         current = state(owner="un_proprietaire", sharing="app", read=(), write=())
-        result = merge(current, make_event(sharing="user"), SHARING)
+        result = merge(current, make_event(sharing="user"))
         self.assertIsNone(result.rejection)
         self.assertEqual(result.after.sharing, "user")
+
+    def test_rang_5_porte_sur_le_proprietaire_CIBLE_pas_sur_celui_du_get(self):
+        """Depuis D-22, `new_owner` peut sortir l'objet de `nobody` dans le meme POST.
+
+        Refuser sur la valeur lue plutot que sur la valeur cible interdirait la seule
+        sequence qui rend un objet privatisable en un geste : nommer un proprietaire et
+        passer en `sharing=user`.
+        """
+        current = state(owner="nobody", sharing="app", read=(), write=())
+        result = merge(
+            current, make_event(sharing="user", owner="un_proprietaire")
+        )
+        self.assertIsNone(result.rejection)
+        self.assertEqual(result.after.owner, "un_proprietaire")
+        self.assertEqual(result.payload["owner"], "un_proprietaire")
 
     def test_skipped_immutable_calcule_quand_meme_letat_cible(self):
         """Le journal doit porter `before_*`/`after_*` pour ce statut (§8.2)."""
@@ -95,7 +85,7 @@ class ControlOrderTest(unittest.TestCase):
             write=("ancien_role",),
             can_change_perms=False,
         )
-        result = merge(current, make_event(write="nouveau_role_admin"), READ_WRITE)
+        result = merge(current, make_event(write="nouveau_role_admin"))
         self.assertEqual(result.rejection.status, "skipped_immutable")
         self.assertEqual(result.after.perms_write, ("nouveau_role_admin",))
 
@@ -105,18 +95,22 @@ class IdempotenceTest(unittest.TestCase):
     def test_permutation_dordre_des_roles_est_un_noop(self):
         """La comparaison porte sur les collections triees, pas sur les chaines."""
         current = state(sharing="app", read=("role_a", "role_b"), write=("w",))
-        result = merge(
-            current,
-            make_event(read="role_b,role_a", write="w"),
-            READ_WRITE,
-        )
+        result = merge(current, make_event(read="role_b,role_a", write="w"))
         self.assertTrue(is_noop(result.before, result.after))
 
-    def test_vidage_dun_attribut_liste_dans_fields_nest_pas_un_noop(self):
+    def test_colonne_presente_vide_nest_pas_un_noop(self):
         current = state(sharing="app", read=("role_a",), write=("w",))
-        result = merge(current, make_event(read="role_a"), READ_WRITE)
+        result = merge(current, make_event(read="role_a", write=""))
         self.assertEqual(result.after.perms_write, ())
         self.assertFalse(is_noop(result.before, result.after))
+
+    def test_colonne_absente_sur_tous_les_attributs_est_un_noop(self):
+        """Le cas nominal d'une seconde passe : rien a changer, aucun POST."""
+        current = state(
+            owner="un_proprietaire", sharing="app", read=("role_a",), write=("w",)
+        )
+        result = merge(current, make_event())
+        self.assertTrue(is_noop(result.before, result.after))
 
     def test_objet_a_permission_vide_relue_en_liste_dune_chaine_vide(self):
         """Le piege d'idempotence de la mesure 4, fige (D-8)."""
@@ -129,18 +123,29 @@ class IdempotenceTest(unittest.TestCase):
                 "perms": {"read": [""], "write": ["admin"]},
             }
         )
-        result = merge(
-            current, make_event(read=None, write="admin"), READ_WRITE
-        )
+        result = merge(current, make_event(read="", write="admin"))
         self.assertTrue(
             is_noop(result.before, result.after),
             "un objet a permission vide doit ressortir en noop a la seconde passe",
         )
 
-    def test_owner_nentre_pas_dans_la_comparaison(self):
+    def test_owner_entre_dans_la_comparaison(self):
+        """D-22 : `owner` est desormais une valeur cible.
+
+        L'exclure de la comparaison — ce que faisait la v1, au motif qu'il n'etait
+        jamais modifie — rendrait `new_owner` inoperant : un lot ne changeant que le
+        proprietaire ressortirait integralement en `noop`, sans un seul POST.
+        """
         gauche = state(owner="a", sharing="app", read=("r",), write=())
         droite = state(owner="b", sharing="app", read=("r",), write=())
-        self.assertTrue(is_noop(gauche, droite))
+        self.assertFalse(is_noop(gauche, droite))
+
+    def test_meme_proprietaire_reste_un_noop(self):
+        """Corollaire : un pipeline bati sur la macro d'inventaire porte le proprietaire
+        courant sur chaque ligne, ce qui doit produire un `noop`, pas une ecriture."""
+        current = state(owner="un_proprietaire", sharing="app", read=("r",), write=())
+        result = merge(current, make_event(read="r", owner="un_proprietaire"))
+        self.assertTrue(is_noop(result.before, result.after))
 
     def test_changement_de_sharing_nest_pas_un_noop(self):
         gauche = state(sharing="app")
