@@ -49,13 +49,17 @@ flowchart LR
     direction TB
     PRE["Preflight (une fois)<br/>parametres, capability,<br/>temps reel, roles, table"]
     RES["Resolution d'endpoint<br/>id, sinon eai:type"]
-    GET["GET etat courant"]
+    GET["GET etat courant<br/>ou memoire d'execution 10.8"]
+    R0{"Rang 0<br/>derive d'un eventtype ?"}
+    SKD(["skipped_derived<br/>aucun POST"])
     MER["Fusion<br/>fields decide QUOI,<br/>l'evenement decide LA VALEUR"]
-    CTL["Controles ordonnes 5.4<br/>+ idempotence"]
+    CTL["Controles ordonnes 1 a 7<br/>+ idempotence"]
     WAL["Journal : ligne intent<br/>write + flush + fsync"]
     POST["POST /acl"]
     OUT["Journal : ligne outcome<br/>+ evenement de sortie"]
-    PRE --> RES --> GET --> MER --> CTL --> WAL --> POST --> OUT
+    PRE --> RES --> GET --> R0
+    R0 -->|"oui"| SKD --> OUT
+    R0 -->|"non"| MER --> CTL --> WAL --> POST --> OUT
   end
 
   GET -. "lecture" .-> SPLUNKD[("splunkd<br/>API REST")]
@@ -76,6 +80,10 @@ Points structurants du schéma, tous vérifiés par la suite de tests :
   listés dans `fields`.
 - **Aucune parallélisation.** Les appels REST sont sérialisés, l'ordre de sortie suit
   l'ordre d'entrée.
+- **Le rang 0 est en amont de la fusion**, et il s'applique quelle que soit l'origine de
+  l'état lu — GET réel ou mémoire d'exécution. Un objet dérivé d'un `eventtype` ressort
+  donc en `skipped_derived` sans jamais atteindre la fusion ni le journal `intent`
+  (voir [Objets dérivés](#objets-dérivés--lécriture-sabstient)).
 
 ---
 
