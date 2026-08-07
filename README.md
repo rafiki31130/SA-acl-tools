@@ -210,6 +210,34 @@ porteur de la capability la voit remonter.
 | `journal` | booléen | `true` | Consignation dans le journal indexé. |
 | `max_objects` | entier | `500` | Nombre maximal d'objets **écrits** par exécution. |
 
+Cette syntaxe est également servie par l'**assistant de recherche** de l'interface :
+`default/searchbnf.conf` décrit la commande, ses cinq options et trois exemples
+d'usage, ce qui donne aussi la coloration syntaxique du nom de commande dans la barre
+de recherche. Deux conditions sont nécessaires, et il faut les deux — le fichier, et
+sa **visibilité hors de l'app** (`[searchbnf] export = system` dans
+`metadata/default.meta`) : l'assistant lit `configs/conf-searchbnf` dans le contexte
+applicatif de la **page**, c'est-à-dire l'app depuis laquelle l'opérateur saisit sa
+recherche, pas `SA-acl-tools`. Un `searchbnf.conf` confiné à son app est chargé,
+exposé, et sans le moindre effet visible — sans qu'aucune erreur ne soit levée. Un
+redémarrage de `splunkd` est nécessaire à sa prise en compte.
+
+### La simulation se signale d'elle-même
+
+`dryrun` vaut `true` par défaut. Une exécution en simulation rend une table de
+résultats **pleine**, exactement comme une exécution qui a tout écrit ; seule la
+colonne `acl_status` les distingue. La commande émet donc, en tête d'exécution, un
+avertissement au niveau de la recherche :
+
+```
+MSG[WARN] simulation active (dryrun=true, valeur par defaut) : AUCUNE modification ne
+          sera ecrite. Les objets ressortent en acl_status=dryrun. Pour appliquer
+          reellement les changements, relancer la meme recherche avec dryrun=false.
+```
+
+Il est émis **une fois par exécution**, jamais par événement : sur plusieurs centaines
+d'objets, un avertissement répété est du bruit, et le bruit se filtre mentalement.
+C'est un `MSG[WARN]` — il ne change ni le statut du job, ni le nombre de résultats.
+
 ### `max_objects` est un compteur d'écritures, pas une pré-condition sur le lot
 
 Une commande *streaming* reçoit ses événements par lots successifs et ne connaît à
