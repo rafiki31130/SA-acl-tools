@@ -258,8 +258,53 @@ class SavedsearchesTest(unittest.TestCase):
     def test_aucune_recherche_n_est_planifiee(self):
         # L'inventaire est une macro invocable en ligne ; la planification est un usage
         # recommande, jamais la modalite d'acces (§6.7 contrainte 1).
-        for nom in self.NOMS:
+        for nom in self.NOMS + (self.AUDIT,):
             self.assertEqual(self.conf[nom]["enableSched"], "0")
+
+    # -- §12.7, livrable bloquant ------------------------------------------- #
+
+    AUDIT = "ACL — divergences eventtype / objets dérivés"
+
+    def test_la_recherche_d_audit_des_divergences_est_livree(self):
+        """Livrable **bloquant** du §12.
+
+        Elle couvre exactement l'angle mort de D-18 : un derive divergent dont le
+        porteur n'entre dans aucun lot n'est atteint par aucune cascade, et la commande
+        ne l'ecrira jamais. Sans cette recherche, le volume concerne n'est pas mesurable
+        sur le socle cible.
+        """
+        self.assertIn(self.AUDIT, self.conf)
+
+    def test_l_audit_est_bati_sur_la_macro_d_inventaire(self):
+        recherche = self.conf[self.AUDIT]["search"]
+        self.assertIn("`acl_inventory(eventtypes,fvtags)`", recherche)
+        self.assertNotIn("admin/directory", recherche)
+
+    def test_l_audit_compare_le_derive_a_son_porteur(self):
+        recherche = self.conf[self.AUDIT]["search"]
+        # Les deux cotes sont apparies, puis leurs empreintes d'ACL comparees.
+        self.assertIn("acl_acl_porteur", recherche)
+        self.assertIn("acl_acl_derive", recherche)
+        self.assertIn("acl_acl_porteur != acl_acl_derive", recherche)
+
+    def test_l_audit_signale_les_roles_references_par_le_derive_seul(self):
+        """Le second volet du §12.7, distinct de la simple divergence d'ACL."""
+        recherche = self.conf[self.AUDIT]["search"]
+        self.assertIn("lookup acl_decommissioned_roles", recherche)
+        self.assertIn("acl_role_non_couvert", recherche)
+
+    def test_l_audit_apparie_par_decomposition_jamais_par_concatenation(self):
+        """Meme discipline que le rang 0 du §5.4 (§3.4, propriete 3).
+
+        L'appariement part de la cle composite de l'objet derive et la **decompose** ;
+        il ne recompose jamais un nom d'objet derive a partir du nom d'un porteur. Un
+        `eventtype=` suivi d'une concatenation signalerait la faute.
+        """
+        recherche = self.conf[self.AUDIT]["search"]
+        self.assertIn("acl_pair_field", recherche)
+        self.assertIn("acl_pair_value", recherche)
+        self.assertNotIn('"eventtype=" .', recherche)
+        self.assertNotIn('. "eventtype="', recherche)
 
 
 class LookupsEtMetadataTest(unittest.TestCase):

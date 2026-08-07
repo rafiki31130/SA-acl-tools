@@ -23,6 +23,7 @@ Cas d'usage moteur : le décommissionnement d'un jeu de rôles hérités, par
 - [Syntaxe](#syntaxe)
 - [Contrat d'entrée](#contrat-dentrée)
 - [Ce que `fields` décide — et ce qu'il ne décide pas](#ce-que-fields-décide--et-ce-quil-ne-décide-pas)
+- [Objets dérivés — l'écriture s'abstient](#objets-dérivés--lécriture-sabstient)
 - [Sortie](#sortie)
 - [Machine à états](#machine-à-états)
 - [Journal](#journal)
@@ -392,6 +393,26 @@ comparaison porte sur les collections triées : une permutation d'ordre des rôl
 > liste contenant une chaîne vide. Sans ce filtrage, la détection d'idempotence
 > échouerait sur **tout** objet à permission vide, et une seconde passe réécrirait.
 
+#### Portée réelle de ce contrôle
+
+**Un lot vert en seconde passe n'établit pas que son jeu de restauration est juste.**
+
+L'idempotence ne détecte qu'**un des deux modes de défaillance connus**. Elle signale le
+cas où l'**état** est faux — la seconde passe ne converge pas, des objets ressortent
+`updated` alors qu'ils devraient tous être `noop`. Elle reste **totalement silencieuse**
+sur le cas où c'est le **jeu de restauration** qui est faux : ce cas ressort à cent pour
+cent `noop`, exactement comme un lot sain.
+
+La raison est mécanique : l'idempotence compare l'état cible à l'état lu **maintenant**.
+Elle ne compare jamais l'état journalisé comme antérieur à l'état qui était réellement
+antérieur. Un `before_*` capté après qu'un autre objet du même lot a déjà muté celui-ci
+est un `before_*` faux, et rien dans une seconde passe ne le révèle.
+
+Cette limite **dépasse le cas des objets dérivés**. Elle vaut pour toute situation où
+l'état d'un objet peut changer entre son préflight et la fin du lot. Vérifier un retour
+arrière suppose de le **rejouer** et de comparer champ à champ, pas de constater un taux
+de `noop`.
+
 ### `validate_roles` ne porte que sur les rôles ajoutés
 
 Un rôle inconnu **déjà présent** sur l'objet et non modifié par l'opération ne bloque
@@ -408,6 +429,104 @@ liste de rôles.
 
 ---
 
+## Objets dérivés — l'écriture s'abstient
+
+Certains objets de connaissance ne sont pas autonomes : ils sont la **matérialisation
+interne** d'une fonction portée par un autre objet. C'est le cas de l'objet `fvtags`
+engendré par la pose d'un tag sur un `eventtype`.
+
+Écrire l'ACL de l'`eventtype` **propage** cette ACL au dérivé — sans POST, sans réponse
+HTTP, donc sans que la commande puisse l'observer. La commande **refuse donc de modifier
+un objet identifié comme dérivé d'un `eventtype`** :
+
+```
+acl_status = "skipped_derived"
+acl_error  = "derived_object:<nom du porteur>"
+```
+
+Aucun POST n'est émis, `max_objects` n'est pas décompté, et une ligne de journal
+`phase=outcome` est écrite comme pour tout autre statut. Le contrôle est au **rang 0** :
+il précède tous les autres.
+
+### Pourquoi s'abstenir plutôt que traiter
+
+Écrire le dérivé conduit, selon l'ordre du pipeline, soit à un **état final faux** — la
+cascade du porteur écrase la valeur qu'on vient d'écrire — soit à un **jeu de
+restauration faux** — le préflight du dérivé lit un état déjà cascadé et journalise une
+valeur antérieure qui n'a jamais existé. **Aucun ordre ne donne les deux corrects.**
+L'abstention élimine les deux modes.
+
+**Effet favorable** : quand le porteur est écrit, la cascade **aligne** le dérivé sur
+lui. L'outil fait donc converger le parc vers l'état cohérent au fil des lots, sans
+jamais écrire l'objet dérivé lui-même.
+
+### La relation de dérivation est découverte, pas construite
+
+La commande ne recompose **jamais** un nom d'objet dérivé par concaténation à partir du
+nom d'un porteur. Un lien deviné produirait un jour un homonyme, avec les mêmes
+conséquences qu'un endpoint deviné. Le sens de parcours est **inverse**, et chacune de
+ses trois étapes s'appuie sur une donnée fournie par splunkd :
+
+1. **la famille** vient du chemin de handler résolu, lui-même issu du champ `id` émis
+   par l'endpoint natif ou de la table de correspondance validée par GET réel ;
+2. **l'identité de l'objet** est celle que splunkd renvoie dans la réponse du GET
+   (`entry[0].name`), jamais le champ `title` de l'événement d'entrée — qu'un `eval` en
+   amont peut avoir forgé. C'est la clé composite de la famille, dont la grammaire
+   `<champ>=<valeur>` est celle de la plateforme : c'est sous cette forme que splunkd
+   nomme l'objet, l'adresse, le crée et l'écrit dans `tags.conf` ;
+3. **l'existence du porteur est confirmée par un GET réel** sur `saved/eventtypes` dans
+   le même namespace. C'est l'étape qui fait de la relation une observation.
+
+Conséquence directe et vérifiable : un `fvtags` **orphelin** — dont le porteur désigné
+n'existe pas — reste **modifiable**. Aucune cascade ne peut l'atteindre, il n'y a donc
+aucune raison de s'en abstenir. Une heuristique de nommage, elle, l'écarterait à tort.
+
+Si le GET de confirmation ne peut ni établir ni infirmer l'existence du porteur — `403`,
+`5xx`, échec de transport — l'abstention est prononcée quand même, et tracée par
+`acl_warning = "carrier_probe_inconclusive:<code>"`. C'est délibérément conservateur :
+écrire un dérivé dont le porteur pourrait exister fausse le jeu de restauration **en
+silence**, tandis qu'une abstention de trop est visible et sans effet sur l'état du parc.
+
+### L'inventaire, lui, reste exhaustif
+
+`acl_inventory` continue de lister les objets dérivés. **Aucun filtrage à l'inventaire :
+c'est la modification qui s'abstient, pas la vue.** Un opérateur doit pouvoir constater
+l'existence de ce que l'outil ne traite pas.
+
+### L'angle mort, et son traitement
+
+Un objet dérivé divergent **dont le porteur n'entre pas dans le lot** n'est atteint par
+aucune cascade. S'il porte une référence à un rôle décommissionné que son porteur ne
+porte pas, le lot filtré sur ce rôle ne remonte pas le porteur, rien ne se déclenche, et
+**cette référence survit**. C'est le seul endroit où l'objectif de disparition effective
+des références n'est pas tenu par la commande seule.
+
+Cette divergence relève de la **configuration amont** — typiquement un `eventtype` poussé
+par un deployer avec une stanza de métadonnée qui lui est propre, sans que la mécanique
+de matérialisation du dérivé ait tourné. Elle **se traite en amont, côté deployer**,
+avant la reprise des configurations locales : c'est là que la stanza manquante doit être
+ajoutée, ou la stanza du seul porteur retirée pour laisser la cascade faire son travail.
+
+La recherche livrée **`ACL — divergences eventtype / objets dérivés`** rend ce volume
+mesurable sur le socle cible : elle liste les couples dont l'ACL diverge et signale
+nommément les rôles suivis qu'un dérivé référence sans que son porteur les référence.
+La lancer **avant** une campagne de décommissionnement dit exactement ce que la campagne
+ne pourra pas atteindre.
+
+### Portée
+
+La règle est bornée aux dérivés d'un `eventtype`. Le motif « écrire l'ACL de A modifie
+l'ACL de B » a été cherché sur 11 des 27 familles et ne se retrouve nulle part hors de la
+grappe des tags ; les 16 familles restantes sont **inférées** exemptes, non observées.
+
+Elle ne s'étend pas non plus à la famille `tags` (`admin/tags`), bien que ses objets
+soient eux aussi dérivés d'un `eventtype`. Un objet `admin/tags` acquiert une stanza de
+métadonnée propre dès sa première écriture d'ACL et cesse alors d'être exposé à la
+cascade : s'en abstenir définitivement le soustrairait au décommissionnement **sans
+qu'aucune cascade ne vienne l'aligner en contrepartie**.
+
+---
+
 ## Sortie
 
 Chaque événement d'entrée produit **exactement un** événement de sortie, conservant
@@ -415,7 +534,7 @@ l'intégralité de ses champs, augmenté de :
 
 | Champ | Contenu |
 |---|---|
-| `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `error` |
+| `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `skipped_derived`, `error` |
 | `acl_endpoint` | Chemin de l'objet ciblé, **sans** schéma, hôte, port ni suffixe `/acl` |
 | `acl_http_code` | Code HTTP du POST, ou du GET en cas d'échec amont. **Sentinelle `0`** en l'absence de tout échange HTTP |
 | `acl_error` | Message d'erreur, tronqué à 512 caractères |
@@ -427,7 +546,12 @@ l'intégralité de ses champs, augmenté de :
 
 Avertissements possibles : `sharing_change`, `app_disabled`,
 `stale_role_preserved:<liste>`, `journal_outcome_failed`,
-`duplicate_post_suppressed`.
+`duplicate_post_suppressed`, `runtime_divergence_possible`,
+`carrier_probe_inconclusive:<code>`.
+
+`runtime_divergence_possible` est émis sur **tout** POST répondant en `5xx`, pas sur le
+seul `500` : la divergence tient à ce que le handler a muté son état en mémoire avant
+d'échouer à le persister, ce qu'un `502`, un `503` ou un `507` produisent aussi bien.
 
 ### Déduplication : un objet n'est soumis qu'une fois au même état cible
 
@@ -467,6 +591,7 @@ stateDiagram-v2
   Lecture --> forbidden : GET 403
   Lecture --> error : GET 5xx apres une reprise, ou transport
 
+  Lecture --> skipped_derived : rang 0 derive d un eventtype
   Fusion --> skipped_immutable : rang 1 can_change_perms = 0
   Fusion --> rejected : rang 2 sharing vide
   Fusion --> rejected : rang 3 sharing hors user app global
@@ -488,9 +613,12 @@ stateDiagram-v2
   Fatal --> [*] : erreur fatale, recherche interrompue
 ```
 
-**L'ordre des rangs 1 à 7 est normatif** : il détermine quel statut l'emporte quand
-plusieurs conditions sont réunies. Deux conséquences à connaître :
+**L'ordre des rangs 0 à 7 est normatif** : il détermine quel statut l'emporte quand
+plusieurs conditions sont réunies. Trois conséquences à connaître :
 
+- le rang 0 précède tous les autres : un objet dérivé d'un `eventtype` ressort en
+  `skipped_derived` même s'il est immuable, même en simulation, même s'il est déjà
+  conforme (voir [Objets dérivés](#objets-dérivés--lécriture-sabstient)) ;
 - `can_change_perms` est lu **dans la réponse du GET**, jamais dans l'événement
   d'entrée — s'en remettre à l'événement rendrait le garde-fou contournable par un
   `eval` en amont ;
@@ -869,7 +997,7 @@ sous-ensemble.
 
 ## Recherches livrées
 
-Trois recherches sauvegardées, **bâties sur la macro d'inventaire** et non sur
+Quatre recherches sauvegardées, **bâties sur la macro d'inventaire** et non sur
 `admin/directory`. Aucune n'est planifiée : l'inventaire est une macro invocable en
 ligne, la planification est un usage recommandé sur les gros périmètres, jamais la
 modalité d'accès. Pour en planifier une, activer `enableSched` dans
@@ -879,6 +1007,7 @@ modalité d'accès. Pour en planifier une, activer `enableSched` dans
 |---|---|
 | `ACL — inventaire par rôle` | Ventilation lecture/écriture par rôle, application et type d'objet. Point de départ d'un audit d'habilitation. |
 | `ACL — références aux rôles décommissionnés` | Objets dont l'ACL référence encore un rôle listé par le lookup `acl_decommissioned_roles`. Sa sortie porte le contrat d'entrée de `editacl` et **alimente directement le pipeline de modification**. |
+| `ACL — divergences eventtype / objets dérivés` | Couples porteur/dérivé dont l'ACL diverge, et **rôles suivis qu'un dérivé référence sans que son porteur les référence**. C'est exactement le périmètre que `editacl` n'atteint jamais : voir [Objets dérivés](#objets-dérivés--lécriture-sabstient). À lancer **avant** une campagne de décommissionnement. |
 | `ACL — journal des modifications` | Historique indexé par `sid`, statut, application et type. La colonne `restauration` porte la commande de retour arrière de l'exécution concernée. |
 
 Le lookup `acl_decommissioned_roles` livré ne contient que des **identifiants
@@ -1054,7 +1183,10 @@ son ajout ou sa disparition restent détectés.
 | **Aucune atomicité de lot** | Un arrêt en cours laisse un état partiel | Le journal caractérise intégralement l'état partiel |
 | **Sortie de recherche perdue sur erreur fatale** | À l'atteinte de `max_objects` comme sur toute erreur fatale, `resultCount = 0` : les événements déjà émis disparaissent. Non modifiable depuis une commande de recherche | Le journal reste complet et reste la voie de reprise et d'annulation ; `editacl.log` date l'interruption. Le job est marqué `isFailed = true`, ce qu'un ordonnanceur détecte |
 | **Aucune reprise sur le POST** | Un échec de transport après émission laisse une `intent` sans `outcome` | Contrôle croisé avec `splunkd_access.log` pour déterminer si l'écriture a eu lieu. Une reprise ne distinguerait pas « le POST n'est pas parti » de « le POST a abouti et la réponse s'est perdue » |
-| **`HTTP 500` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
+| **`HTTP 5xx` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` sur **toute** la classe `5xx` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
+| **`admin/ntags` refuse toute écriture d'ACL** | Mesuré : `HTTP 500`, « ACL modification not supported by this handler ». Les objets de cette famille ressortent systématiquement en `acl_status = "error"`, avec `runtime_divergence_possible` puisque le code est un `5xx` | **Aucun contournement** : c'est une limite du handler, pas de la commande. Exclure la famille du lot — `acl_inventory(...)` sans `ntags`, ou `\| search 'eai:type'!="ntags"`. Les tags restent adressables par les familles `tags` et `fvtags` |
+| **Un lot vert en seconde passe ne prouve pas que sa restauration est juste** | Le contrôle d'idempotence ne couvre **qu'un des deux modes de défaillance connus** | Voir [Portée réelle du contrôle d'idempotence](#portée-réelle-de-ce-contrôle) — la vérification d'un retour arrière passe par un rejeu de `editacl_rollback` et une comparaison champ à champ, jamais par un taux de `noop` |
+| **Angle mort sur les objets dérivés** | Un dérivé divergent dont le porteur n'entre dans aucun lot n'est atteint par aucune cascade : s'il référence un rôle décommissionné que son porteur ne référence pas, cette référence **survit** | La recherche livrée *ACL — divergences eventtype / objets dérivés* en mesure le volume. Le traitement est **en amont, côté deployer** — voir [Objets dérivés](#objets-dérivés--lécriture-sabstient) |
 | **Réplication en cluster de search heads** | Chaque écriture déclenche une réplication d'objet de connaissance | Lots bornés par `max_objects`, déroulement hors fenêtre de forte activité. La commande sérialise ses appels et n'implémente **aucune** temporisation automatique |
 | **Restauration postérieure à l'indexation** | Le journal n'est interrogeable qu'après ingestion | Le fichier de l'exécution est auto-contenu et exploitable immédiatement |
 | **`app_disabled` coûte un appel REST par app distincte** | Latence marginale sur un lot multi-apps | Mémoïsé par app |
