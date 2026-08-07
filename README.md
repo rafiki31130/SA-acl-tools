@@ -18,6 +18,7 @@ Cas d'usage moteur : le décommissionnement d'un jeu de rôles hérités, par
 ## Sommaire
 
 - [Ce que fait la commande](#ce-que-fait-la-commande)
+- [Fabrication de l'archive déployable](#fabrication-de-larchive-déployable)
 - [Installation](#installation)
 - [Habilitation](#habilitation)
 - [Syntaxe](#syntaxe)
@@ -78,6 +79,31 @@ Points structurants du schéma, tous vérifiés par la suite de tests :
 
 ---
 
+## Fabrication de l'archive déployable
+
+L'archive se fabrique depuis le dépôt, à partir d'une **référence git**, jamais depuis
+le répertoire de travail — ce qui rend le contenu livré traçable à un commit et
+reproductible par quiconque :
+
+```sh
+git archive --format=tar.gz --prefix=SA-acl-tools/ \
+    -o SA-acl-tools-$(git rev-parse --short HEAD).tar.gz HEAD
+```
+
+Le périmètre est porté par les attributs `export-ignore` de `.gitattributes`, pas par
+la mémoire de l'opérateur : `tests/` et `tools/` en sont **écartés** — ils vivent dans
+le dépôt, jamais dans l'app installée — de même que les fichiers de service du dépôt.
+`bin/lib/` y est en revanche **inclus** : l'archive doit être déployable sans réseau.
+Le fichier d'override de la table n'y figure jamais non plus, n'étant pas versionné.
+
+Contrôle du contenu avant déploiement :
+
+```sh
+tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/(tests|tools)/'   # vide
+```
+
+---
+
 ## Installation
 
 1. Déposer le répertoire `SA-acl-tools/` sous `$SPLUNK_HOME/etc/apps/` du **search
@@ -89,6 +115,12 @@ Points structurants du schéma, tous vérifiés par la suite de tests :
    ```sh
    sh tools/verify_vendor.sh $SPLUNK_HOME/bin/python3
    ```
+
+   `tools/` **n'est pas dans l'archive** — il vit dans le dépôt (voir
+   [Fabrication de l'archive](#fabrication-de-larchive-déployable)). Récupérer le
+   répertoire depuis le dépôt et le déposer dans
+   `$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/`, où les deux scripts de cette procédure
+   d'installation trouveront l'app **réellement installée**.
 
 4. Attribuer la capability `edit_acl_bulk` (voir [Habilitation](#habilitation)).
 5. **Exécuter la procédure de re-validation de la table** sur le socle cible — c'est un

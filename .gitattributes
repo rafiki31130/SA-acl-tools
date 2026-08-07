@@ -3,3 +3,11 @@
 # Dependances vendorisees : stockees octet pour octet, jamais converties.
 # Toute conversion de fin de ligne invaliderait bin/lib/MANIFEST.sha256 au clone.
 bin/lib/** -text
+
+# Perimetre de l archive deployable (§12.1) : tests/ et tools/ vivent dans le depot,
+# jamais dans l app installee. `git archive` les ecarte donc, ainsi que les fichiers
+# de service du depot. Voir README, section Tests.
+tests/         export-ignore
+tools/         export-ignore
+.gitattributes export-ignore
+.gitignore     export-ignore
