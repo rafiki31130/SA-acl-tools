@@ -202,6 +202,23 @@ class MacrosTest(unittest.TestCase):
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
         self.assertIn("max_objects=", definition)
 
+    def test_le_rollback_materialise_les_colonnes_de_permissions(self):
+        # §8.6 : la restauration d'une permission VIDE doit vider l'attribut. A
+        # l'indexation, un champ JSON de valeur vide n'est pas materialise, et le `stats`
+        # ne produit alors aucune colonne — or une colonne absente PRESERVE (§3.2). Le
+        # `coalesce` la materialise inconditionnellement, ce qui rend la promesse du
+        # §8.6 vraie par construction et non par coincidence.
+        definition = self.conf["editacl_rollback(1)"]["definition"]
+        for champ in ("eai:acl.perms.read", "eai:acl.perms.write"):
+            self.assertIn("coalesce('%s'" % champ, definition)
+
+    def test_le_rollback_ne_materialise_ni_sharing_ni_owner(self):
+        # Leur valeur vide n'existe pas cote plateforme : materialiser une colonne vide
+        # n'y transformerait qu'une preservation correcte en rejet.
+        definition = self.conf["editacl_rollback(1)"]["definition"]
+        for champ in ("eai:acl.sharing", "eai:acl.owner"):
+            self.assertNotIn("coalesce('%s'" % champ, definition)
+
     def test_le_rollback_reemet_le_proprietaire_anterieur(self):
         # §8.6, D-22 + D-27 : la macro emet `eai:acl.owner` portant le proprietaire
         # ANTERIEUR, que le defaut de `new_owner` reprend sans parametre explicite.

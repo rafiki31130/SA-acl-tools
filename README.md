@@ -23,7 +23,7 @@ Cas d'usage moteur : le décommissionnement d'un jeu de rôles hérités, par
 - [Habilitation](#habilitation)
 - [Syntaxe](#syntaxe)
 - [Contrat d'entrée](#contrat-dentrée)
-- [Ce que `fields` décide — et ce qu'il ne décide pas](#ce-que-fields-décide--et-ce-quil-ne-décide-pas)
+- [Fusion et normalisation](#fusion-et-normalisation)
 - [Objets dérivés — l'écriture s'abstient](#objets-dérivés--lécriture-sabstient)
 - [Sortie](#sortie)
 - [Machine à états](#machine-à-états)
@@ -48,16 +48,20 @@ flowchart LR
   subgraph CMD["editacl (search head, local)"]
     direction TB
     PRE["Preflight (une fois)<br/>parametres, capability,<br/>temps reel, roles, table"]
-    RES["Resolution d'endpoint<br/>id, sinon eai:type"]
+    RES["Resolution d'endpoint<br/>id, sinon eai:type<br/>contexte FIXE nobody"]
+    RM1{"Rang -1<br/>portee courante = user ?"}
+    SKP(["skipped_private<br/>ni GET ni POST"])
     GET["GET etat courant<br/>ou memoire d'execution 10.8"]
     R0{"Rang 0<br/>derive d'un eventtype ?"}
     SKD(["skipped_derived<br/>aucun POST"])
-    MER["Fusion<br/>fields decide QUOI,<br/>l'evenement decide LA VALEUR"]
-    CTL["Controles ordonnes 1 a 7<br/>+ idempotence"]
+    MER["Fusion<br/>la PRESENCE de la colonne decide QUOI,<br/>la cellule decide LA VALEUR"]
+    CTL["Controles ordonnes 1 a 8<br/>+ idempotence"]
     WAL["Journal : ligne intent<br/>write + flush + fsync"]
     POST["POST /acl"]
     OUT["Journal : ligne outcome<br/>+ evenement de sortie"]
-    PRE --> RES --> GET --> R0
+    PRE --> RES --> RM1
+    RM1 -->|"oui"| SKP --> OUT
+    RM1 -->|"non"| GET --> R0
     R0 -->|"oui"| SKD --> OUT
     R0 -->|"non"| MER --> CTL --> WAL --> POST --> OUT
   end
@@ -77,7 +81,10 @@ Points structurants du schéma, tous vérifiés par la suite de tests :
   le POST est annulé. C'est ce qui rend l'opération réversible.
 - **Le GET fait autorité** : les valeurs ACL portées par l'événement d'entrée sont
   considérées comme potentiellement périmées et ne servent qu'à alimenter les attributs
-  listés dans `fields`.
+  dont la colonne est présente dans le jeu de résultats.
+- **L'adressage se fait par un contexte fixe**, jamais par le propriétaire de l'objet.
+  Aucune fonction du code ne prend de propriétaire d'adressage : la garantie est
+  structurelle (voir [Contrat d'entrée](#contrat-dentrée)).
 - **Aucune parallélisation.** Les appels REST sont sérialisés, l'ordre de sortie suit
   l'ordre d'entrée.
 - **Le rang 0 est en amont de la fusion**, et il s'applique quelle que soit l'origine de
@@ -178,15 +185,26 @@ Deux habilitations distinctes, qui ne se remplacent pas.
 | `edit_acl_bulk` | Autorise l'usage de `editacl` | **Erreur fatale**, la recherche s'interrompt |
 | `admin_all_objects` | Permet à l'inventaire de remonter les objets privés d'autrui, et à splunkd d'accepter l'écriture sur un objet non possédé | **Aucune erreur** : le périmètre est silencieusement tronqué |
 
-`edit_acl_bulk` est déclarée par `default/authorize.conf`. Splunk n'offre **pas** de
-gating natif des commandes de recherche par capability : le contrôle est implémenté
-dans le code, en tête d'exécution, et constitue une erreur fatale. Un contournement par
-appel direct au script est sans effet — sans `admin_all_objects` ou possession de
-l'objet, splunkd rejettera les écritures.
+`edit_acl_bulk` est déclarée **et attribuée au rôle `admin`** par
+`default/authorize.conf` :
 
-La capability s'attribue **hors de cette app**, par la chaîne de gestion des rôles.
-L'héritage `imported_roles` est résolu côté serveur : un rôle qui importe un rôle
-porteur de la capability la voit remonter.
+```ini
+[capability::edit_acl_bulk]
+
+[role_admin]
+edit_acl_bulk = enabled
+```
+
+L'outil est donc utilisable **dès le déploiement** par les comptes qui portent déjà
+`admin_all_objects` — lequel est de toute façon requis pour l'essentiel des écritures.
+Un redémarrage de `splunkd` reste nécessaire pour que la capability apparaisse dans
+`current-context`. Toute attribution à **d'autres** rôles relève de la chaîne de gestion
+des rôles, hors de l'app ; l'héritage `imported_roles` y est résolu côté serveur.
+
+Splunk n'offre **pas** de gating natif des commandes de recherche par capability : le
+contrôle est implémenté dans le code, en tête d'exécution, et constitue une erreur
+fatale. Un contournement par appel direct au script est sans effet — sans
+`admin_all_objects` ou possession de l'objet, splunkd rejettera les écritures.
 
 > **La troncature par capability est la première des deux troncatures d'inventaire.**
 > Sans `admin_all_objects`, l'opérateur traite un sous-ensemble **sans le moindre
@@ -198,20 +216,52 @@ porteur de la capability la voit remonter.
 ## Syntaxe
 
 ```
-| editacl [fields=<liste>] [dryrun=<bool>] [validate_roles=<bool>]
-          [journal=<bool>] [max_objects=<entier>]
+| editacl [title=<champ>] [app=<champ>] [id=<champ>] [type=<champ>] [sharing=<champ>]
+          [new_perms_read=<champ>] [new_perms_write=<champ>]
+          [new_sharing=<champ>] [new_owner=<champ>]
+          [dryrun=<bool>] [validate_roles=<bool>] [journal=<bool>]
+          [max_objects=<entier>]
 ```
+
+**Chaque paramètre nomme le champ SPL où lire une information**, et prend pour défaut la
+nomenclature native. Un pipeline bâti sur `acl_inventory` n'a donc besoin **d'aucun
+paramètre** : `| editacl` suffit, et `| editacl dryrun=f` écrit.
+
+Champs de **référence** — ils désignent l'objet :
+
+| Paramètre | Défaut | Rôle |
+|---|---|---|
+| `title` | `title` | Nom de l'objet, dernier segment du chemin REST. Requis en valeur. |
+| `app` | `eai:acl.app` | Application du namespace. Requise en valeur. |
+| `id` | `id` | URI complète, voie de résolution primaire |
+| `type` | `eai:type` | Type d'objet, voie de résolution par la table |
+| `sharing` | `eai:acl.sharing` | Portée **courante**, qui sert à écarter les objets privés. Facultative. |
+
+**Valeurs cibles** — elles décrivent l'état voulu :
+
+| Paramètre | Défaut | Attribut ACL |
+|---|---|---|
+| `new_perms_read` | `eai:acl.perms.read` | `perms.read` |
+| `new_perms_write` | `eai:acl.perms.write` | `perms.write` |
+| `new_sharing` | `eai:acl.sharing` | `sharing` |
+| `new_owner` | `eai:acl.owner` | `owner` |
+
+Paramètres fonctionnels :
 
 | Paramètre | Type | Défaut | Description |
 |---|---|---|---|
-| `fields` | liste | `perms.read,perms.write` | Attributs ACL à prendre depuis l'événement. Valeurs admises : `perms.read`, `perms.write`, `sharing`. Toute autre valeur — **y compris `owner`** — est une erreur fatale de paramètre. |
 | `dryrun` | booléen | `true` | Aucune écriture. Le GET est effectué, la fusion calculée, le résultat émis et journalisé. |
 | `validate_roles` | booléen | `true` | Contrôle de l'existence des rôles **ajoutés** avant écriture. |
 | `journal` | booléen | `true` | Consignation dans le journal indexé. |
-| `max_objects` | entier | `500` | Nombre maximal d'objets **écrits** par exécution. |
+| `max_objects` | entier | `10` | Nombre maximal d'objets **écrits** par exécution. Sans effet en simulation. |
+
+> **Il n'y a pas de paramètre désignant un propriétaire d'adressage.** L'adressage se
+> fait par un contexte fixe, et la valeur transmise au POST est celle lue par le GET
+> tant que `new_owner` n'est pas fourni. `new_owner` est une **valeur cible**, jamais
+> une adresse.
 
 Cette syntaxe est également servie par l'**assistant de recherche** de l'interface :
-`default/searchbnf.conf` décrit la commande, ses cinq options et trois exemples
+`default/searchbnf.conf` décrit la commande, ses treize options et quatre exemples
 d'usage, ce qui donne aussi la coloration syntaxique du nom de commande dans la barre
 de recherche. Deux conditions sont nécessaires, et il faut les deux — le fichier, et
 sa **visibilité hors de l'app** (`[searchbnf] export = system` dans
@@ -245,24 +295,65 @@ aucun moment la cardinalité totale de son entrée. Conséquences, toutes voulue
 
 - le compteur est incrémenté à chaque POST **émis**, qu'il aboutisse ou échoue ; les
   statuts sans POST ne comptent pas ;
-- à l'atteinte du plafond, la recherche s'interrompt par erreur fatale, et le nombre
-  d'objets écrits vaut **exactement** `max_objects` ;
-- un lot comportant **exactement** `max_objects` objets à écrire se termine **sans**
-  erreur ;
+- **la simulation n'entre jamais dans le compteur.** `dryrun` n'émet aucun POST : un
+  `dryrun` porte donc sur **l'intégralité** du lot, quel qu'en soit le volume. C'est ce
+  qui rend tenable un défaut aussi bas que dix — la friction porte sur l'écriture
+  réelle, jamais sur l'examen ;
+- un lot comportant **exactement** `max_objects` objets à écrire n'écarte rien ;
 - **les objets écrits avant le plafond ne sont pas annulés.** Il n'y a aucune atomicité
   de lot, et il n'y en aura pas : sur plusieurs centaines d'objets, un abandon global
-  sur échec unitaire produirait un état partiel non caractérisé. Le journal caractérise
-  intégralement l'état partiel, et reste le moyen de le reprendre ou de l'annuler.
+  sur échec unitaire produirait un état partiel non caractérisé.
 
-#### À l'atteinte du plafond, la sortie de recherche est intégralement perdue
+#### Pourquoi dix, et pas cinq cents
 
-Ce n'est pas une troncature : `resultCount = 0`. Les événements déjà émis — y compris
-les `updated` — disparaissent avec les autres. Le comportement vient de la plateforme,
-et il n'est pas modifiable depuis une commande de recherche.
+Une correction ponctuelle — quelques objets identifiés, vérifiés en simulation — passe
+sans que l'opérateur ait à s'occuper du plafond. Au-delà, il doit l'écrire, donc
+**énoncer le volume qu'il s'apprête à muter**. Un plafond de cinq cents laissait passer
+sans un mot des opérations de plusieurs centaines d'objets sur une plateforme de
+production, ce qui revenait à ne rien garder du garde-fou dans la plupart des cas réels.
 
-**Le journal reste la seule trace exploitable de ce qui a été écrit**, et il est
-complet : deux lignes par objet, `before` et `after` inclus. La reprise et l'annulation
-passent par lui, exactement comme dans le cas nominal :
+#### À l'atteinte du plafond, la commande cesse d'écrire — sans interrompre la recherche
+
+La sortie de recherche reste **complète** : un événement de sortie par événement
+d'entrée, comme toujours. Les objets écartés ressortent en `acl_status =
+"skipped_ceiling"`, **sans GET ni POST**, avec leur ligne de journal. Le job n'est
+**pas** marqué en échec, et un avertissement unique dit ce qui s'est passé :
+
+```
+MSG[WARN] plafond max_objects=10 atteint : 30 objet(s) ecarte(s) sans GET ni POST, en
+          acl_status=skipped_ceiling. Les objets deja ecrits ne sont pas annules et la
+          sortie de cette recherche est complete. Pour traiter le reste, relancer avec
+          un max_objects superieur.
+```
+
+Il est émis **une fois par exécution**, en fin de lot — seul moment où le nombre
+d'objets écartés est connu d'une commande qui reçoit son entrée par chunks.
+
+> **Ce que ce comportement remplace.** Dans sa forme antérieure, l'atteinte du plafond
+> levait une erreur fatale : la recherche s'interrompait, la sortie était
+> **intégralement perdue** (`resultCount = 0`), et l'opérateur se retrouvait avec une
+> mutation partielle **et** l'aveuglement sur ce qui venait de se passer. Le garde-fou
+> produisait donc, à l'instant précis où il se déclenchait, le pire des deux mondes.
+>
+> Sa valeur réelle est ailleurs, étroite mais légitime : il borne le rayon d'action de
+> l'opérateur qui lance une écriture réelle **sans avoir simulé**. Cette fonction est
+> intégralement conservée par l'arrêt des écritures. Ce qui disparaît, c'est la cécité.
+> **Un garde-fou doit informer, pas aveugler.**
+
+#### Reprendre un lot interrompu par le plafond
+
+Il suffit de **relancer la même recherche** avec un plafond explicite. Les objets déjà
+écrits ressortent `noop` par idempotence, seuls les écartés sont traités, et il n'y a
+aucun risque de double écriture :
+
+```
+| `acl_inventory(savedsearch)` | search ... | eval ...
+| editacl dryrun=f                          ← 10 updated, 30 skipped_ceiling
+| editacl dryrun=f max_objects=100          ← 10 noop,    30 updated
+```
+
+Le journal caractérise par ailleurs intégralement l'état partiel, et reste le moyen de
+l'annuler :
 
 ```
 | `editacl_rollback(<sid>)`          ← prévisualiser ce qui serait rétabli
@@ -270,68 +361,76 @@ passent par lui, exactement comme dans le cas nominal :
 ```
 
 Le `sid` s'obtient par l'inspecteur de recherche ou par le nom du fichier de journal.
-`editacl.log` porte de son côté la ligne `CRITICAL … erreur fatale : max_objects
-atteint (<n>)`, qui date l'interruption.
 
-**Le job est marqué en échec** — `dispatchState = FAILED`, `isFailed = true`. Ce n'était
-pas le cas auparavant : le job ressortait `DONE` à zéro résultat, indiscernable d'un lot
-vide pour une recherche planifiée ou une alerte, et le `MSG[ERROR]` n'était visible que
-pour qui inspectait le job. Le marquage tient à un seul fait, mesuré sur Splunk 9.4.6 :
-la commande n'émet **pas** de chunk final `finished: true` avant de quitter en code non
-nul. Conséquence à connaître, la liste des messages du job porte alors deux entrées —
-celle de la commande, explicite, et celle de splunkd, générique :
+#### Le job reste marqué en échec sur une erreur fatale
+
+Le plafond n'en est plus une, mais la liste du §*Erreurs fatales* subsiste — capability
+absente, paramètre invalide, temps réel, journal non ouvrable. Sur celles-là, le job
+ressort `dispatchState = FAILED`, `isFailed = true`. Le marquage tient à un seul fait,
+mesuré sur Splunk 9.4.6 : la commande n'émet **pas** de chunk final `finished: true`
+avant de quitter en code non nul. Conséquence à connaître, la liste des messages du job
+porte alors deux entrées — celle de la commande, explicite, et celle de splunkd,
+générique (« External search command exited unexpectedly with non-zero error code 1 »).
+La seconde est exacte et attendue.
+
+### Le paramètre `fields` n'existe plus
+
+La v1 exposait un paramètre `fields` énumérant les attributs à modifier. Il a disparu,
+et avec lui sa classe d'erreur la plus grave : une liste non quotée était **tronquée
+par SPL à sa première valeur**, sans erreur ni avertissement, si bien qu'une
+restauration rétablissait `perms.read`, laissait `perms.write` et `sharing` mutés, et
+rapportait un succès.
+
+Chaque paramètre ne porte désormais qu'un **nom de champ unique**, sans virgule : la
+troncature silencieuse n'a plus d'objet. Le défaut est éliminé **par construction**
+plutôt que par une consigne de vigilance. Une virgule dans un paramètre de nommage est
+d'ailleurs refusée explicitement, pour attraper l'opérateur qui raisonne encore en v1.
+
+### Ce que la présence de la colonne implique pour votre pipeline
+
+> **La présence est une propriété du *jeu de résultats*, pas de l'événement.**
+>
+> Sur un lot hétérogène, un objet qui ne porte pas le champ reçoit la **chaîne vide**
+> dès lors qu'un autre objet du lot le porte — la colonne existe pour tout le monde.
+>
+> **Un pipeline qui ne valorise un champ que pour une partie de ses lignes viderait donc
+> l'attribut sur les autres.**
+
+Le pipeline décrit **l'état cible de chaque ligne qu'il émet**. Un pipeline bâti sur la
+macro d'inventaire satisfait cette exigence par construction : chaque ligne porte la
+valeur courante de son objet, et l'opérateur ne surcharge que ce qu'il veut changer.
+
+Le contre-exemple à ne pas écrire :
 
 ```
-MSG[ERROR] max_objects atteint (2) : la recherche est interrompue, les objets deja
-           ecrits ne sont pas annules.
-MSG[ERROR] Error in 'editacl' command: External search command exited unexpectedly
-           with non-zero error code 1.
+| `acl_inventory(savedsearch)`
+| eval "eai:acl.perms.write" = if('eai:type'="savedsearch", "nouveau_role_admin", null())
+| editacl dryrun=f max_objects=1000
 ```
 
-La seconde est exacte et attendue. Le même mécanisme s'applique à **toutes** les
-erreurs fatales de la liste ci-dessous, pas seulement au plafond.
-
-### Une liste de valeurs passée à `fields` doit être entre guillemets
-
-La seule forme correcte, dès que `fields` porte plus d'une valeur :
+Les lignes qui ne satisfont pas la condition sortent avec `eai:acl.perms.write` **nul**,
+mais la colonne existe — et leur `perms.write` sera **vidé**. La forme correcte conserve
+la valeur courante sur la branche `else` :
 
 ```
-| editacl fields="perms.read,perms.write" dryrun=f
+| eval "eai:acl.perms.write" = if('eai:type'="savedsearch", "nouveau_role_admin",
+                                  'eai:acl.perms.write')
 ```
 
-**La même ligne privée de ses guillemets ne fait pas ce qu'on croit.** Le parseur SPL
-traite la virgule comme un **séparateur d'arguments de commande** : tout ce qui suit la
-première virgule est consommé comme un argument distinct et perdu.
+Ou, plus simplement, ne touche pas la colonne du tout et laisse le filtre en amont :
 
-| Forme de l'argument | Ce que la commande reçoit |
-|---|---|
-| liste **entre guillemets** | les attributs listés, tous |
-| liste **sans guillemets** | la **première valeur seulement** — le reste est ignoré |
-
-Aucune erreur n'est émise, aucun avertissement : l'objet est écrit avec un seul attribut
-modifié et `acl_status` vaut `updated`. Aucune parade n'est possible côté code —
-`fields="perms.read"` légitime et une liste tronquée arrivent identiques à la commande.
-
-Là où cette faute coûte le plus cher, c'est en **restauration** : une liste non quotée
-rétablit `perms.read`, laisse `perms.write` et `sharing` dans leur état muté, et
-rapporte un succès. C'est pourquoi la macro `editacl_rollback_apply(<sid>)` porte
-l'invocation complète et correctement quotée — elle supprime la classe d'erreur au lieu
-de la documenter.
-
-Ce dépôt ne contient **aucune** occurrence de la forme non quotée à plus d'une valeur,
-y compris en commentaire ou en contre-exemple, afin qu'aucune ligne ne puisse être
-copiée telle quelle. Contrôle :
-
-```sh
-grep -rnE 'fields=[A-Za-z._]+(,[A-Za-z._]+)+' --exclude-dir=.git --exclude-dir=__pycache__ .
+```
+| `acl_inventory(savedsearch)` | search "eai:type"="savedsearch"
+| eval "eai:acl.perms.write" = "nouveau_role_admin"
 ```
 
-Un `fields` **omis** vaut le défaut `perms.read,perms.write` et n'est pas concerné : la
-valeur par défaut est portée par le code, elle ne traverse pas le parseur SPL.
+Simuler avant d'écrire suffit à voir le problème : les colonnes `acl_before_*` et
+`acl_after_*` de la sortie montrent exactement ce qui serait appliqué.
 
 ### Exemples
 
-Substitution d'un rôle obsolète, **en simulation**, sur l'inventaire complet :
+Substitution d'un rôle obsolète, **en simulation**, sur l'inventaire complet. Aucun
+paramètre : la macro émet la nomenclature native, que les défauts reprennent.
 
 ```
 | `acl_inventory`
@@ -342,12 +441,12 @@ Substitution d'un rôle obsolète, **en simulation**, sur l'inventaire complet :
 | eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
         if('eai:acl.perms.write'="ancien_role", "nouveau_role_admin",
            'eai:acl.perms.write'))
-| editacl fields="perms.read,perms.write" dryrun=t
+| editacl
 | stats count by acl_status "eai:type" "eai:acl.app"
 ```
 
 Dépréciation par préfixage, **en écriture réelle**, restreinte aux recherches
-sauvegardées et aux vues :
+sauvegardées et aux vues. Le plafond est explicité parce que le lot dépasse dix objets :
 
 ```
 | `acl_inventory(savedsearch,views)`
@@ -355,35 +454,160 @@ sauvegardées et aux vues :
 | eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
         if('eai:acl.perms.write' IN ("role_a","role_b"),
            "deprecated_" . 'eai:acl.perms.write', 'eai:acl.perms.write'))
-| editacl fields=perms.write dryrun=f max_objects=2000
+| editacl dryrun=f max_objects=2000
 | where acl_status!="noop"
 ```
 
-La forme paramétrée est le levier de coût pour un usage interactif : on n'énumère que
-les familles visées. Voir [Inventaire](#inventaire-des-objets-à-traiter).
+**Vider `perms.write`** — le pipeline nominal du décommissionnement. Le `mvmap` qui
+retire la dernière valeur laisse la colonne en place avec une cellule nulle, et
+l'attribut est vidé :
+
+```
+| `acl_inventory(savedsearch)`
+| search "eai:acl.perms.write"="ancien_role"
+| eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
+        if('eai:acl.perms.write'="ancien_role", null(), 'eai:acl.perms.write'))
+| editacl dryrun=f max_objects=1000
+```
+
+**Préserver un attribut** — il suffit de retirer sa colonne du jeu de résultats :
+
+```
+| `acl_inventory(savedsearch)`
+| fields - "eai:acl.perms.read"
+| eval "eai:acl.perms.write" = "nouveau_role_admin"
+| editacl dryrun=f max_objects=1000
+```
+
+**Champs renommés par le pipeline amont**, et changement de propriétaire :
+
+```
+| `acl_inventory(savedsearch)`
+| rename "eai:acl.perms.write" AS write, "eai:type" AS object_type
+| eval nouveau_proprietaire = "nobody"
+| editacl type=object_type new_perms_write=write new_owner=nouveau_proprietaire
+```
+
+**Restauration** d'une exécution, une fois le journal indexé :
+
+```
+| `editacl_rollback(1754483000.1)`
+| `editacl_rollback_apply(1754483000.1)`
+```
+
+La première prévisualise le jeu de restauration, la seconde l'applique.
+
+La forme paramétrée de l'inventaire est le levier de coût pour un usage interactif : on
+n'énumère que les familles visées. Voir [Inventaire](#inventaire-des-objets-à-traiter).
 
 ---
 
 ## Contrat d'entrée
 
-Chaque événement d'entrée désigne **un** objet.
+Chaque événement d'entrée désigne **un** objet, et chaque information est lue dans le
+champ que le paramètre correspondant nomme (voir [Syntaxe](#syntaxe)).
 
-| Champ | Obligatoire | Rôle |
+`title` et `app` sont requis : le champ désigné doit exister et porter une valeur. Au
+moins l'une des deux voies de résolution, `id` ou `type`, doit être exploitable.
+
+### La sémantique de présence — ce qui décide de modifier ou de préserver
+
+**C'est le cœur du contrat.** La décision « modifier ou préserver un attribut » repose
+sur la **présence de la colonne** dans le jeu de résultats, et sur rien d'autre.
+
+| Situation | Effet |
+|---|---|
+| Colonne **absente** du jeu de résultats | Attribut **préservé**, tel que lu par le GET |
+| Colonne **présente**, cellule **vide** | Attribut **vidé** |
+| Colonne **présente**, cellule **valuée** | Valeur appliquée |
+
+**Le discriminant est la présence de la clé, jamais le type ni la valeur.** Mesuré sur
+9.4.6 : la commande reçoit soit une clé absente de l'enregistrement, soit une clé
+présente valant la chaîne vide. Jamais `None`, jamais une liste vide. Et un champ
+multivalué **réduit à une seule valeur arrive en chaîne**, pas en liste d'un élément —
+s'y fier conduirait à des conclusions fausses.
+
+> La v1 supposait cette distinction impossible, au motif qu'un `mvmap` vidant un
+> multivalué produit un null indiscernable d'un champ jamais mentionné. La mesure
+> infirme la conclusion sans infirmer la prémisse : un `mvmap` vidé **est** bien nul au
+> sens SPL, mais **un champ nul n'est pas retiré du jeu de résultats**. La colonne
+> subsiste, y compris lorsque le champ est vide sur la totalité des lignes.
+>
+> Règle positive : la colonne n'est perdue que si le champ n'a porté de valeur **nulle
+> part, à aucun moment** du pipeline. « `eval X=null()` supprime le champ » est faux en
+> général — il ne le supprime que s'il n'avait jamais été valorisé.
+
+La clause d'usage qui en découle est décrite plus haut :
+[Ce que la présence de la colonne implique pour votre pipeline](#ce-que-la-présence-de-la-colonne-implique-pour-votre-pipeline).
+
+**Deux attributs ne se vident pas**, parce que leur valeur vide n'existe pas côté
+plateforme :
+
+| Attribut | Cellule vide sur la colonne désignée | `acl_error` |
 |---|---|---|
-| `title` | oui | Nom de l'objet, dernier segment du chemin REST |
-| `eai:acl.app` | oui | Contexte applicatif du namespace |
-| `eai:acl.owner` | oui | Propriétaire courant, second composant du namespace — **adressage uniquement** |
-| `id` | l'un des deux | URI complète de l'objet, exploitable si elle provient d'un endpoint natif |
-| `eai:type` | l'un des deux | Type d'objet, résolu par la table de correspondance |
-| `eai:acl.perms.read` | non | Valeur cible, lue **seulement** si `perms.read` figure dans `fields` |
-| `eai:acl.perms.write` | non | idem |
-| `eai:acl.sharing` | non | idem |
+| `sharing` | événement **rejeté**, aucun POST | `sharing_empty_not_allowed` |
+| `owner` | événement **rejeté**, aucun POST | `owner_empty_not_allowed` |
 
-**`eai:acl.owner` n'est jamais une valeur cible.** Le champ sert exclusivement à
-construire le namespace d'adressage ; il ne peut pas simultanément désigner l'adresse
-courante de l'objet et une valeur cible — un changement de propriétaire adresserait un
-objet inexistant. La reprise de propriété est **hors périmètre**, et l'est jusque dans
-le type de données : aucune structure du code ne peut porter un propriétaire cible.
+Une portée hors de `{user, app, global}` est rejetée de même
+(`invalid_sharing:<valeur>`). Ces refus sont bruyants et c'est voulu : ils sont visibles
+et non destructifs, l'inverse ne l'est pas.
+
+### La reprise de propriété
+
+`new_owner` est une **valeur cible**, et la sémantique de présence s'y applique comme aux
+autres. Un pipeline bâti sur la macro d'inventaire porte le propriétaire courant sur
+chaque ligne, ce qui produit un `noop` sur cet attribut tant que l'opérateur ne le
+surcharge pas.
+
+Deux conditions de plateforme, mesurées : la reprise requiert `admin_all_objects` — un
+compte porteur du seul droit sur ses propres objets reçoit un refus **même sur son
+propre objet** — et le propriétaire cible doit **exister**, faute de quoi la plateforme
+refuse sans muter.
+
+Sont **hors périmètre** : le déplacement d'application et le renommage. Le premier
+existe mais un paramètre mal choisi rend l'objet **inatteignable en écriture**,
+suppression comprise — inacceptable sur un outil dont la réversibilité est l'unique
+justification. Le second n'existe pas : vingt-sept handlers exposent dix-huit actions,
+aucune de renommage.
+
+### L'adressage se fait par un contexte fixe
+
+```
+<endpoint_objet> = <splunkd_uri>/servicesNS/nobody/<enc(app)>/<handler_path>/<enc(title)>
+```
+
+Mesuré : un objet partagé appartenant à un tiers est atteignable par ce contexte, **en
+lecture comme en écriture**, aux deux portées de partage, et la réponse du GET porte
+**toujours le propriétaire réel** — jamais le contexte d'adressage.
+
+> **Ce que l'adressage fixe corrige.** La v1 adressait par `eai:acl.owner`. Or **un
+> objet privé masque un objet partagé homonyme dans le namespace de son détenteur** : si
+> le propriétaire d'un objet partagé possédait aussi un objet privé de même nom dans la
+> même application, la commande atteignait **l'objet privé** et écrivait son ACL — `200`
+> au GET, fusion calculée, POST abouti, ligne rapportée `updated`. Une écriture
+> silencieuse sur la mauvaise cible.
+
+Le contexte joker `-` n'est **jamais** employé : il refuse l'écriture, et sur deux objets
+homonymes il renvoie deux entrées sur un chemin mono-objet, où un client lisant la
+première choisirait à l'aveugle.
+
+### Les objets privés sortent du périmètre
+
+Un objet en `sharing=user` n'est visible que de son propriétaire et des administrateurs.
+Les permissions qu'il porterait n'accordent donc rien à personne : elles sont **inertes**
+— mesuré, les objets privés n'en portent aucune.
+
+Détectés par la portée **courante** (paramètre `sharing`), ils ressortent en
+`acl_status = "skipped_private"`, **sans GET ni POST**, compteur non incrémenté, avec
+leur ligne de journal comme tout autre statut.
+
+Si la colonne de portée est absente du jeu de résultats, la commande ne peut pas les
+écarter en amont : le GET par contexte fixe répond `404` et l'objet ressort en
+`not_found`. C'est honnête, mais moins informatif — **bâtissez le pipeline sur la macro
+d'inventaire**, qui émet toujours la portée.
+
+L'inventaire, lui, continue de les lister : la règle porte sur l'écriture, pas sur la
+vue.
 
 ### Résolution de l'endpoint
 
@@ -415,46 +639,70 @@ seule et casse espace, accent et pourcent.
 
 ---
 
-## Ce que `fields` décide — et ce qu'il ne décide pas
+## Fusion et normalisation
 
-**Le paramètre `fields` décide seul de ce qui est modifié ; le contenu de l'événement
-décide seulement de la valeur.** La présence ou l'absence d'un champ dans l'événement
-n'a **aucun** pouvoir de préservation.
+La fusion applique la [sémantique de présence](#la-sémantique-de-présence--ce-qui-décide-de-modifier-ou-de-préserver),
+attribut par attribut : colonne absente, valeur du GET ; colonne présente et vide,
+attribut vidé ; colonne présente et valuée, valeur appliquée.
 
-| Attribut dans `fields` | Champ dans l'événement | Effet |
-|---|---|---|
-| non | quel qu'il soit | Valeur du GET préservée — le contenu de l'événement est **ignoré** |
-| oui | renseigné | Valeur de l'événement appliquée |
-| oui | absent, nul ou vide | Attribut **vidé** (`perms.read=` dans le POST) |
-
-Côté permissions, « champ absent », « champ nul » et « champ vide » sont donc **le même
-cas**. C'est délibéré : cette convention élimine l'ambiguïté d'un champ multivalué
-qu'un `eval` réduit à null lorsque toutes ses valeurs sont supprimées — situation
-nominale du décommissionnement, où un objet dont l'unique rôle en écriture était le
-rôle obsolète doit se retrouver avec `perms.write` vide.
+Les champs de permissions sont acceptés en multivalué ou en chaîne séparée par virgules.
+Normalisation systématique : découpage sur virgule, `trim`, **suppression des éléments
+vides**, déduplication, tri lexicographique, réassemblage en chaîne séparée par virgules
+pour la requête POST.
 
 Un attribut vide n'est **jamais** matérialisé en `*`, ni en aucune autre valeur par
 défaut.
-
-**Exception `sharing`.** `sharing=` n'est pas une portée valide. Si `sharing` figure
-dans `fields` et que le champ est absent, nul ou vide, l'événement est **rejeté**
-(`acl_error = "sharing_empty_not_allowed"`), sans POST et sans incrément du compteur.
-Conséquence pratique : un pipeline qui liste `sharing` dans `fields` mais ne porte pas
-`eai:acl.sharing` sur toutes ses lignes verra ces lignes rejetées en bloc. C'est
-bruyant et c'est voulu — le rejet est visible et non destructif, l'inverse ne l'est pas.
 
 ### Les quatre attributs sont toujours transmis
 
 L'endpoint `/acl` opère en **remplacement intégral** : toute omission équivaut à un
 effacement. Le corps du POST porte donc toujours `owner`, `sharing`, `perms.read` et
-`perms.write`, `owner` valant invariablement celui lu par le GET.
+`perms.write`, y compris ceux qui ne sont pas modifiés. Une valeur vide est sérialisée
+`perms.read=` — clé présente, valeur vide, jamais l'omission de la clé.
+
+**Le propriétaire est transmis dans tous les cas** — l'omettre du corps produit un refus
+de la plateforme — mais il vient du GET tant que la colonne de `new_owner` est absente.
+
+### Ordre des contrôles
+
+L'ordre est normatif : il détermine quel statut l'emporte quand plusieurs conditions
+sont réunies.
+
+| Rang | Contrôle | Statut | POST |
+|---|---|---|---|
+| −1 | La portée courante vaut `user` | `skipped_private` | non |
+| 0 | L'objet est un dérivé d'un `eventtype` | `skipped_derived` | non |
+| 1 | `can_change_perms = 0` dans la réponse du GET | `skipped_immutable` | non |
+| 2 | Colonne de `new_sharing` présente, cellule vide | `rejected` / `sharing_empty_not_allowed` | non |
+| 3 | Portée cible hors `{user, app, global}` | `rejected` / `invalid_sharing:<valeur>` | non |
+| 4 | Colonne de `new_owner` présente, cellule vide | `rejected` / `owner_empty_not_allowed` | non |
+| 5 | Portée cible = `user` et propriétaire cible = `nobody` | `rejected` / `sharing_user_requires_named_owner` | non |
+| 6 | `validate_roles=true` et rôle **ajouté** absent du référentiel | `invalid_role` | non |
+| 7 | État fusionné == état lu, après normalisation | `noop` | non |
+| 8 | `dryrun=true` | `dryrun` | non |
+
+Le plafond `max_objects` précède l'ensemble : une fois atteint, l'objet ressort en
+`skipped_ceiling` sans même un GET.
+
+**Le rang 7 précède le rang 8** : un objet déjà conforme est un `noop` **même en
+simulation**. C'est l'information utile, et c'est ce qui permet de mesurer la
+convergence d'un lot sans écrire.
+
+Une modification effective de `sharing` est signalée par `acl_warning =
+"sharing_change"`, une reprise de propriété par `acl_warning = "owner_change"` : dans
+les deux cas, ce qui change dépasse les permissions.
 
 ### Idempotence
 
 L'état fusionné est comparé à l'état lu après normalisation identique des deux côtés —
 découpage, `trim`, **suppression des éléments vides**, déduplication, tri. La
-comparaison porte sur les collections triées : une permutation d'ordre des rôles est un
-`noop`.
+comparaison porte sur `owner`, `sharing`, `perms.read` et `perms.write`, sur les
+collections triées : une permutation d'ordre des rôles est un `noop`.
+
+`owner` y entre depuis que la reprise de propriété est au périmètre. L'en exclure — ce
+que faisait la v1, au motif qu'il n'était jamais modifié — rendrait `new_owner`
+inopérant : un lot ne changeant que le propriétaire ressortirait intégralement en
+`noop`, sans un seul POST.
 
 > La suppression des éléments vides n'est pas cosmétique. Après un POST portant
 > `perms.read=` vide, le GET suivant ne renvoie ni `[]` ni `null` mais **`[""]`** — une
@@ -604,17 +852,17 @@ l'intégralité de ses champs, augmenté de :
 
 | Champ | Contenu |
 |---|---|
-| `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `skipped_derived`, `error` |
+| `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `skipped_derived`, `skipped_private`, `skipped_ceiling`, `error` |
 | `acl_endpoint` | Chemin de l'objet ciblé, **sans** schéma, hôte, port ni suffixe `/acl` |
 | `acl_http_code` | Code HTTP du POST, ou du GET en cas d'échec amont. **Sentinelle `0`** en l'absence de tout échange HTTP |
 | `acl_error` | Message d'erreur, tronqué à 512 caractères |
 | `acl_warning` | Avertissements non bloquants, **concaténés par `;`** dans un ordre stable |
-| `acl_owner` | Propriétaire de l'objet, lu et retransmis inchangé |
+| `acl_before_owner`, `acl_after_owner` | Propriétaire avant et après. Identiques tant que `new_owner` n'est pas employé |
 | `acl_before_perms_read`, `acl_before_perms_write`, `acl_before_sharing` | État antérieur, normalisé |
 | `acl_after_perms_read`, `acl_after_perms_write`, `acl_after_sharing` | État transmis |
 | `acl_journaled` | Ligne `intent` écrite **et synchronisée sur disque** |
 
-Avertissements possibles : `sharing_change`, `app_disabled`,
+Avertissements possibles : `sharing_change`, `owner_change`, `app_disabled`,
 `stale_role_preserved:<liste>`, `journal_outcome_failed`,
 `duplicate_post_suppressed`, `runtime_divergence_possible`,
 `carrier_probe_inconclusive:<code>`.
@@ -641,19 +889,24 @@ POST et sans consommer une unité de `max_objects`. Un doublon demandant un éta
 
 ## Machine à états
 
-Les états terminaux en minuscules sont les neuf `acl_status`. Chacun produit
-**exactement une** ligne `outcome` puis **un** événement de sortie. L'état fatal ne
-produit ni ligne `intent`, ni ligne `outcome`, ni événement de sortie.
+Les états terminaux en minuscules sont les douze `acl_status`. Chacun produit
+**exactement une** ligne `outcome` puis **un** événement de sortie — plafond compris.
+Seule une erreur fatale interrompt la recherche, et elle ne produit alors ni ligne
+`intent`, ni ligne `outcome`, ni événement de sortie.
 
 ```mermaid
 stateDiagram-v2
   direction TB
   [*] --> Recu
-  Recu --> Resolution : champs obligatoires presents
-  Recu --> rejected : champ obligatoire absent, ou app = system
+  Recu --> skipped_ceiling : compteur d ecritures deja a max_objects
+  Recu --> Resolution : title et app presents
+  Recu --> rejected : title ou app absent, ou app = system
 
-  Resolution --> Lecture : endpoint resolu
+  Resolution --> Prive : endpoint resolu, contexte fixe nobody
   Resolution --> rejected : unresolved_endpoint
+
+  Prive --> skipped_private : rang -1 portee courante = user
+  Prive --> Lecture : portee courante non privee
 
   Lecture --> Fusion : GET 2xx
   Lecture --> Fusion : objet deja ecrit dans cette execution
@@ -665,14 +918,12 @@ stateDiagram-v2
   Fusion --> skipped_immutable : rang 1 can_change_perms = 0
   Fusion --> rejected : rang 2 sharing vide
   Fusion --> rejected : rang 3 sharing hors user app global
-  Fusion --> rejected : rang 4 sharing user sur owner nobody
-  Fusion --> invalid_role : rang 5 role AJOUTE inconnu
-  Fusion --> noop : rang 6 etat cible egal a etat lu
-  Fusion --> dryrun : rang 7 dryrun = true
-  Fusion --> Plafond : ecriture requise
-
-  Plafond --> Fatal : compteur egal a max_objects
-  Plafond --> Intention : compteur inferieur a max_objects
+  Fusion --> rejected : rang 4 owner vide
+  Fusion --> rejected : rang 5 sharing user sur owner cible nobody
+  Fusion --> invalid_role : rang 6 role AJOUTE inconnu
+  Fusion --> noop : rang 7 etat cible egal a etat lu
+  Fusion --> dryrun : rang 8 dryrun = true
+  Fusion --> Intention : ecriture requise
 
   Intention --> error : echec write + flush + fsync, POST ANNULE
   Intention --> Ecriture : ligne intent persistee
@@ -683,16 +934,20 @@ stateDiagram-v2
   Fatal --> [*] : erreur fatale, recherche interrompue
 ```
 
-**L'ordre des rangs 0 à 7 est normatif** : il détermine quel statut l'emporte quand
-plusieurs conditions sont réunies. Trois conséquences à connaître :
+**L'ordre des rangs −1 à 8 est normatif** : il détermine quel statut l'emporte quand
+plusieurs conditions sont réunies. Quatre conséquences à connaître :
 
-- le rang 0 précède tous les autres : un objet dérivé d'un `eventtype` ressort en
-  `skipped_derived` même s'il est immuable, même en simulation, même s'il est déjà
-  conforme (voir [Objets dérivés](#objets-dérivés--lécriture-sabstient)) ;
+- le plafond précède tout, y compris le GET : une fois atteint, chaque objet suivant
+  ressort en `skipped_ceiling` sans le moindre échange HTTP, et **la recherche
+  continue** ;
+- le rang −1 écarte les objets privés avant toute lecture, et le rang 0 précède tous les
+  contrôles suivants : un objet dérivé d'un `eventtype` ressort en `skipped_derived`
+  même s'il est immuable, même en simulation, même s'il est déjà conforme (voir
+  [Objets dérivés](#objets-dérivés--lécriture-sabstient)) ;
 - `can_change_perms` est lu **dans la réponse du GET**, jamais dans l'événement
   d'entrée — s'en remettre à l'événement rendrait le garde-fou contournable par un
   `eval` en amont ;
-- le rang 6 précède le rang 7 : **un objet déjà conforme est un `noop` même en
+- le rang 7 précède le rang 8 : **un objet déjà conforme est un `noop` même en
   simulation.** C'est l'information utile, et c'est ce qui permet de mesurer la
   convergence d'un lot sans écrire.
 
@@ -702,13 +957,15 @@ Liste **limitative**. Toute autre erreur portant sur un objet donné est une err
 événement, et le pipeline se poursuit.
 
 - capability `edit_acl_bulk` absente ;
-- paramètre invalide : `fields` contenant une valeur non admise — dont `owner` — ou
-  `max_objects` non entier positif ;
+- paramètre invalide : un paramètre de nommage désignant un identifiant de champ vide
+  ou portant une virgule, ou `max_objects` non entier positif ;
 - exécution en recherche temps réel détectée ;
 - `splunkd_uri` ou `session_key` indisponibles ;
 - table de correspondance illisible ;
-- atteinte de `max_objects` ;
 - fichier de journal non ouvrable alors que `journal=true` **et** `dryrun=false`.
+
+**L'atteinte de `max_objects` n'y figure plus** : elle produit un statut par événement,
+`skipped_ceiling`, et la recherche se termine normalement.
 
 ### Refus d'exécution en recherche temps réel
 
@@ -759,17 +1016,20 @@ concurrentes :
 
 ```
 2026-08-06T16:29:53.030+00:00 INFO sid=1786033792.6 demarrage editacl version=1.0.0 user=... splunkd=...
-2026-08-06T16:29:53.031+00:00 INFO sid=1786033792.6 parametres fields=perms.write dryrun=false validate_roles=true journal=true max_objects=5
+2026-08-06T16:29:53.031+00:00 INFO sid=1786033792.6 parametres dryrun=false validate_roles=true journal=true max_objects=10
+2026-08-06T16:29:53.032+00:00 INFO sid=1786033792.6 nommage title=title app=eai:acl.app id=id type=eai:type sharing=eai:acl.sharing new_perms_read=eai:acl.perms.read new_perms_write=eai:acl.perms.write new_sharing=eai:acl.sharing new_owner=eai:acl.owner
 2026-08-06T16:29:53.190+00:00 INFO sid=1786033792.6 controle d'habilitation : capability accordee
 2026-08-06T16:29:53.240+00:00 INFO sid=1786033792.6 controle temps reel : batch
 2026-08-06T16:29:53.310+00:00 INFO sid=1786033792.6 table de correspondance : 28 entrees (28 livrees, 0 d'override, 0 surchargees, 0 ecartees)
 2026-08-06T16:29:53.350+00:00 INFO sid=1786033792.6 journal de restauration ouvert : .../editacl_journal_1786033792.6.log
-2026-08-06T16:29:54.020+00:00 CRITICAL sid=1786033792.6 erreur fatale : max_objects atteint (5) : ...
+2026-08-06T16:29:54.020+00:00 WARNING sid=1786033792.6 plafond max_objects=10 atteint : 30 objet(s) ecarte(s) ...
 ```
 
 Il porte ce qu'énumère le cahier des charges : **démarrage** (version de l'app,
 utilisateur, membre, `splunkd_uri`, état de la vérification TLS), **paramètres** validés
-et leurs avertissements, **contrôle d'habilitation**, contrôle du mode temps réel,
+et leurs avertissements, **les neuf paramètres de nommage** — sans eux, une exécution
+dont un nom de champ a été redirigé serait illisible a posteriori —, **contrôle
+d'habilitation**, contrôle du mode temps réel,
 **résolution de la table de correspondance** — décompte et entrées écartées, override
 compris —, ouverture du journal de restauration, et **erreurs fatales**.
 
@@ -863,7 +1123,7 @@ Deux macros, deux gestes distincts.
 | Macro | Ce qu'elle fait | Écrit ? |
 |---|---|---|
 | `editacl_rollback(<sid>)` | **prévisualise** le jeu de restauration — les objets à rétablir et leur état antérieur | non |
-| `editacl_rollback_apply(<sid>)` | le même jeu, **suivi de l'invocation `\| editacl` complète et correctement quotée** | **oui** |
+| `editacl_rollback_apply(<sid>)` | le même jeu, **suivi de l'invocation `\| editacl` complète** | **oui** |
 
 `editacl_rollback(<sid>)` est la porte d'entrée par défaut : on regarde avant d'écrire.
 
@@ -876,23 +1136,25 @@ seconde est préférable :
 
 ```
 | `editacl_rollback(1754483000.1)`
-| editacl fields="perms.read,perms.write,sharing" dryrun=f
+| editacl dryrun=f max_objects=100000
 ```
 
 ```
 | `editacl_rollback_apply(1754483000.1)`
 ```
 
-**Pourquoi préférer la seconde.** La première dépend de guillemets saisis à la main, au
-moment précis où l'opérateur restaure après un incident. Une liste non quotée rétablit
-`perms.read`, laisse `perms.write` et `sharing` mutés, et rapporte un succès (voir
-[Une liste de valeurs passée à `fields` doit être entre guillemets](#une-liste-de-valeurs-passée-à-fields-doit-être-entre-guillemets)).
-`editacl_rollback_apply` porte l'invocation dans la macro : la classe d'erreur
-disparaît au lieu d'être documentée.
+**Pourquoi préférer la seconde.** Elle porte l'invocation dans la macro, plafond
+compris : le défaut valant dix, une restauration saisie à la main s'interromprait
+d'écrire dès le onzième objet. Le volume a déjà été décidé par l'opérateur au moment de
+l'aller, et le `sid` délimite le jeu.
 
-`editacl_rollback(<sid>)` émet sept champs — `title`, `eai:acl.app`, `eai:acl.owner`, `eai:acl.perms.read`,
-`eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` — soit exactement le contrat
-d'entrée de la commande.
+`editacl_rollback(<sid>)` émet sept champs — `title`, `eai:acl.app`, `eai:acl.owner`,
+`eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` — soit
+exactement la nomenclature native que les défauts de la commande reprennent. **Aucun
+paramètre n'est donc à écrire**, `new_owner` compris : `eai:acl.owner` porte le
+propriétaire **antérieur**, et le défaut de `new_owner` l'applique. C'est ce que le
+modèle de paramètres rend exprimable et que la v1 ne pouvait pas faire — le propriétaire
+y était une adresse, jamais une valeur cible.
 
 Elle ne restaure que les objets dont une ligne `outcome` atteste que l'écriture a **bien
 abouti** : un objet dont le POST a échoué n'a pas été modifié et ne doit pas être
@@ -905,11 +1167,28 @@ abouti** : un objet dont le POST a échoué n'a pas été modifié et ne doit pa
 Le `sid` s'obtient par `| eval sid=$sid$`, par l'inspecteur de recherche, ou par le nom
 du fichier de journal de l'exécution (`editacl_journal_<sid>.log`).
 
-**La restauration d'une permission vide est correcte par construction.** Si
-`before_perms_read` vaut la chaîne vide, l'extraction JSON à l'indexation ne matérialise
-pas le champ ; la sortie de la macro ne porte donc pas `eai:acl.perms.read`. À la
-réinjection, `perms.read` figure dans `fields` mais le champ est absent de l'événement
-— et « absent » et « vide » sont traités identiquement, donc l'attribut est vidé.
+**La restauration d'une permission vide est correcte par construction**, et la
+construction en question mérite d'être nommée.
+
+Une permission vide est journalisée `before_perms_read = ""`. À l'indexation,
+l'extraction JSON **ne matérialise pas** un champ de valeur vide : le `stats` de la
+macro ne produit alors aucune colonne `eai:acl.perms.read` lorsque tous les objets du
+lot sont dans ce cas. Or une colonne absente **préserve** l'attribut — elle ne le vide
+pas. Sans précaution, une restauration devant vider `perms.read` le laisserait donc
+intact, en rapportant un succès.
+
+La macro matérialise donc les deux colonnes de permissions inconditionnellement :
+
+```
+| eval "eai:acl.perms.read"  = coalesce('eai:acl.perms.read',  ""),
+       "eai:acl.perms.write" = coalesce('eai:acl.perms.write', "")
+```
+
+La colonne existe toujours, vide quand l'état antérieur l'était, et l'attribut est bien
+vidé. `eai:acl.sharing` et `eai:acl.owner` ne sont délibérément **pas** traités de même :
+leur valeur vide n'existe pas côté plateforme, un objet restaurable en porte toujours
+une, et matérialiser une colonne vide n'y transformerait qu'une préservation correcte en
+rejet. Un test unitaire fige l'ensemble.
 
 ### Limites du retour arrière
 
@@ -1242,11 +1521,18 @@ python -m unittest discover -s tests -t . -v
 
 Elle couvre notamment :
 
-- **les dix-huit lignes de la matrice de fusion**, une par test nommé, sans
-  regroupement ;
+- **les douze lignes de la matrice de présence** — quatre attributs cibles × trois
+  états de la colonne — une par test nommé, sans regroupement ni test paramétré ;
+- la **discrimination par présence de la clé et non par type** : un multivalué réduit à
+  une valeur, arrivant en chaîne, est traité comme une valeur et non comme une absence ;
+- l'**adressage sans propriétaire** : l'URI construite porte toujours le contexte fixe,
+  et la signature de `build_object_path` n'expose aucun paramètre de propriétaire ;
+- le **plafond non fatal** : sortie complète, `skipped_ceiling` sur les objets écartés,
+  compteur d'écartés tenu, aucun déclenchement en simulation, reprise sans double
+  écriture ;
 - la normalisation des listes de rôles, y compris le cas `[""]` ;
 - la reconstruction d'URI sur les quatre classes de caractères ;
-- l'ordre normatif des sept contrôles préalables à l'écriture ;
+- l'ordre normatif des contrôles préalables à l'écriture, rangs −1 à 8 ;
 - `validate_roles` sur rôle ajouté contre rôle conservé ;
 - les trois invariants du journal, et le contrat de champs de la macro de restauration ;
 - l'**étanchéité des couches** : aucun module du noyau n'importe le réseau hors du
@@ -1321,7 +1607,7 @@ son ajout ou sa disparition restent détectés.
 | **Table établie sur 9.4.6** | Une nomenclature différente sur un autre socle produit des rejets, voire un endpoint valide mais faux | Re-validation sur le socle cible, **prérequis à tout usage réel** ; fichier d'override |
 | **Double troncature d'inventaire** | L'opérateur traite un sous-ensemble sans le moindre message | `admin_all_objects` + inventaire par endpoints natifs |
 | **Aucune atomicité de lot** | Un arrêt en cours laisse un état partiel | Le journal caractérise intégralement l'état partiel |
-| **Sortie de recherche perdue sur erreur fatale** | À l'atteinte de `max_objects` comme sur toute erreur fatale, `resultCount = 0` : les événements déjà émis disparaissent. Non modifiable depuis une commande de recherche | Le journal reste complet et reste la voie de reprise et d'annulation ; `editacl.log` date l'interruption. Le job est marqué `isFailed = true`, ce qu'un ordonnanceur détecte |
+| **Sortie de recherche perdue sur erreur fatale** | Sur une erreur fatale — capability, paramètre, temps réel, journal — `resultCount = 0` : les événements déjà émis disparaissent. Non modifiable depuis une commande de recherche. **L'atteinte de `max_objects` n'en fait plus partie** : elle produit `skipped_ceiling` et la sortie reste complète | Le journal reste complet et reste la voie de reprise et d'annulation ; `editacl.log` date l'interruption. Le job est marqué `isFailed = true`, ce qu'un ordonnanceur détecte |
 | **Aucune reprise sur le POST** | Un échec de transport après émission laisse une `intent` sans `outcome` | Contrôle croisé avec `splunkd_access.log` pour déterminer si l'écriture a eu lieu. Une reprise ne distinguerait pas « le POST n'est pas parti » de « le POST a abouti et la réponse s'est perdue » |
 | **`HTTP 5xx` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` sur **toute** la classe `5xx` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
 | **`admin/ntags` refuse toute écriture d'ACL** | Mesuré : `HTTP 500`, « ACL modification not supported by this handler ». Les objets de cette famille ressortent systématiquement en `acl_status = "error"`, avec `runtime_divergence_possible` puisque le code est un `5xx` | **Aucun contournement** : c'est une limite du handler, pas de la commande. Exclure la famille du lot — `acl_inventory(...)` sans `ntags`, ou `\| search 'eai:type'!="ntags"`. Les tags restent adressables par les familles `tags` et `fvtags` |
@@ -1330,8 +1616,9 @@ son ajout ou sa disparition restent détectés.
 | **Réplication en cluster de search heads** | Chaque écriture déclenche une réplication d'objet de connaissance | Lots bornés par `max_objects`, déroulement hors fenêtre de forte activité. La commande sérialise ses appels et n'implémente **aucune** temporisation automatique |
 | **Restauration postérieure à l'indexation** | Le journal n'est interrogeable qu'après ingestion | Le fichier de l'exécution est auto-contenu et exploitable immédiatement |
 | **`app_disabled` coûte un appel REST par app distincte** | Latence marginale sur un lot multi-apps | Mémoïsé par app |
-| **Reprise de propriété hors périmètre** | `owner` ne peut pas être modifié | Hors périmètre par construction — `owner` est l'adresse de l'objet, pas une valeur cible |
-| **`fields` non quoté est tronqué par SPL** | Seule la première valeur est appliquée, **sans erreur** | Quoter systématiquement : `fields="perms.read,perms.write"` |
+| **Reprise de propriété : deux conditions de plateforme** | `admin_all_objects` est requis — un compte porteur du seul droit sur ses propres objets reçoit un refus **même sur son propre objet** — et le propriétaire cible doit exister, faute de quoi la plateforme refuse sans muter | Vérifier les deux avant une campagne portant `new_owner`. Le refus est visible : `acl_status = "error"` avec le code de la plateforme |
+| **Déplacement d'application et renommage hors périmètre** | Le premier existe mais un paramètre mal choisi rend l'objet **inatteignable en écriture**, suppression comprise ; le second n'existe pas — vingt-sept handlers, dix-huit actions, aucune de renommage | Hors périmètre assumé. Le déplacement mérite son propre outil, avec son propre filet |
+| **Un pipeline hétérogène peut vider un attribut** | La présence est une propriété du **jeu de résultats**, pas de l'événement : valoriser un champ sur une partie des lignes seulement vide l'attribut sur les autres | Bâtir le pipeline sur `acl_inventory`, qui porte la valeur courante sur chaque ligne ; simuler et lire `acl_before_*` / `acl_after_*` avant d'écrire. Voir [Ce que la présence de la colonne implique](#ce-que-la-présence-de-la-colonne-implique-pour-votre-pipeline) |
 | **Coût de l'inventaire complet** | Un appel REST par famille, une trentaine au total | Forme paramétrée en usage interactif ; planification sur les gros périmètres |
 | **Familles d'inventaire figées par un lookup** | Une famille absente de `acl_object_families` n'est pas inventoriée | `tools/revalidate_mapping.py` compare le lookup à la table et signale toute divergence |
 

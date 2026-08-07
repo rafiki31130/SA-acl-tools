@@ -17,7 +17,7 @@ from acltools.journal import (
 from acltools.merge import merge
 from acltools.model import EventResult
 
-from .helpers import FakeClock, make_ctx, make_event, state
+from .helpers import ABSENT, FakeClock, make_ctx, make_event, state
 
 #: Champs consommes par `editacl_rollback` (§8.6). La liste est **portee en dur** :
 #: toute evolution du schema du journal ou de la macro casse ce test, ce qui est le but.
@@ -205,7 +205,8 @@ class RollbackContractTest(unittest.TestCase):
         self.assertEqual(intent["before_perms_read"], "")
 
         # Simulation de l'indexation : un champ JSON de valeur vide n'est pas
-        # materialise, la sortie de la macro ne porte donc pas `eai:acl.perms.read`.
+        # materialise, le `stats` de la macro ne produit donc AUCUNE colonne
+        # `eai:acl.perms.read` quand tous les objets du lot sont dans ce cas.
         sortie_macro = {
             "title": intent["title"],
             "eai:acl.app": intent["app"],
@@ -219,6 +220,31 @@ class RollbackContractTest(unittest.TestCase):
         if intent["before_sharing"]:
             sortie_macro["eai:acl.sharing"] = intent["before_sharing"]
         self.assertNotIn("eai:acl.perms.read", sortie_macro)
+
+        # Colonne absente = attribut PRESERVE (§3.2). Sans precaution, la restauration
+        # laisserait donc `perms.read` intact en rapportant un succes — la classe de
+        # defaut que la refonte corrige ailleurs, reintroduite par la porte de service.
+        sans_coalesce = merge(
+            state(sharing="global", read=("role_ajoute",),
+                  write=("nouveau_role_admin",)),
+            make_event(
+                read=sortie_macro.get("eai:acl.perms.read", ABSENT),
+                write=sortie_macro.get("eai:acl.perms.write", ABSENT),
+                sharing=sortie_macro.get("eai:acl.sharing", ABSENT),
+                owner=sortie_macro.get("eai:acl.owner", ABSENT),
+            ),
+        )
+        self.assertEqual(
+            sans_coalesce.payload["perms.read"], "role_ajoute",
+            "sans le coalesce de la macro, la colonne est absente et l'attribut est "
+            "preserve : la restauration ne viderait rien",
+        )
+
+        # Le `coalesce(..., "")` de `editacl_rollback(1)` materialise la colonne
+        # inconditionnellement : elle existe, vide, et l'attribut est bien vide.
+        sortie_macro.setdefault("eai:acl.perms.read", "")
+        sortie_macro.setdefault("eai:acl.perms.write", "")
+        self.assertIn("eai:acl.perms.read", sortie_macro)
 
         # Reinjection : `| editacl fields="perms.read,perms.write,sharing"`
         etat_courant = state(sharing="global", read=("role_ajoute",),
