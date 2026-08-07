@@ -25,6 +25,30 @@ WILDCARD_ROLE = "*"
 
 DEFAULT_MAX_OBJECTS = 500
 
+#: Rappel emis en tete d'execution quand la simulation est active (§4.1).
+#:
+#: `dryrun` vaut `true` par defaut : sans ce rappel, une execution qui n'ecrit rien est
+#: indiscernable d'une execution qui a tout ecrit — les deux rendent une table de
+#: resultats pleine, et seule la colonne `acl_status` les distingue. C'est le parametre
+#: le plus consequent de la commande, et son etat par defaut etait le seul a n'etre
+#: signale nulle part.
+#:
+#: Le message porte les deux informations que l'operateur doit avoir : ce qui ne se
+#: produira pas, et le geste exact qui le produirait.
+#:
+#: Il est porte par `Params.warnings`, donc emis **une seule fois par execution** par
+#: l'adaptateur (§5.1) — jamais par evenement. Un lot de plusieurs centaines d'objets
+#: le repeterait autant de fois, et un avertissement repete se filtre mentalement :
+#: il cesserait d'etre lu exactement la ou il compte.
+#:
+#: C'est un avertissement (`MSG[WARN]`), jamais une erreur : il ne change ni le statut
+#: du job, ni le nombre de resultats, ni le code de sortie de la commande.
+DRYRUN_WARNING = (
+    "simulation active (dryrun=true, valeur par defaut) : AUCUNE modification ne "
+    "sera ecrite. Les objets ressortent en acl_status=dryrun. Pour appliquer "
+    "reellement les changements, relancer la meme recherche avec dryrun=false."
+)
+
 
 def _decode(response):
     """Decode un corps de reponse JSON. Renvoie `None` si indecodable."""
@@ -86,6 +110,8 @@ def validate_params(
         )
 
     warnings = []
+    if dryrun:
+        warnings.append(DRYRUN_WARNING)
     if not dryrun and not max_objects_explicit:
         warnings.append(
             "dryrun=false sans max_objects explicite : plafond par defaut applique "

@@ -5,6 +5,7 @@ import unittest
 
 from acltools.errors import FatalCapabilityError, FatalConfigError
 from acltools.preflight import (
+    DRYRUN_WARNING,
     AppStateCache,
     check_capability,
     check_realtime,
@@ -68,9 +69,66 @@ class ValidateParamsTest(unittest.TestCase):
         params = validate_params(dryrun=False, max_objects=10, max_objects_explicit=True)
         self.assertEqual(params.warnings, ())
 
-    def test_pas_davertissement_en_simulation(self):
+    def test_le_plafond_par_defaut_nest_pas_signale_en_simulation(self):
+        """La simulation n'ecrit pas : le rappel du plafond n'a pas d'objet.
+
+        Ce test disait auparavant qu'une execution en simulation n'emettait AUCUN
+        avertissement. C'etait exact, et c'etait le defaut : le parametre le plus
+        consequent de la commande etait le seul dont l'etat par defaut ne se signalait
+        nulle part. Ce qui reste vrai, et que ce test continue de tenir, c'est que le
+        rappel du plafond ne se declenche pas la ou aucune ecriture n'est prevue.
+        """
         params = validate_params(dryrun=True, max_objects_explicit=False)
-        self.assertEqual(params.warnings, ())
+        self.assertEqual(
+            [w for w in params.warnings if "max_objects" in w], []
+        )
+
+
+class AvertissementDeSimulationTest(unittest.TestCase):
+    """La simulation est l'etat par defaut, et elle etait muette.
+
+    Une execution en simulation rend une table de resultats pleine, exactement comme
+    une execution qui a tout ecrit ; seule la colonne `acl_status` les distingue. Sans
+    rappel en tete d'execution, l'operateur qui croit avoir applique ses modifications
+    n'a aucun signal contraire.
+
+    L'avertissement est porte par `Params.warnings`, donc emis **une fois par
+    execution** par l'adaptateur, jamais par evenement — cf.
+    `tests/test_editacl_adapter.py`.
+    """
+
+    def test_la_simulation_est_signalee(self):
+        params = validate_params(dryrun=True)
+        self.assertIn(DRYRUN_WARNING, params.warnings)
+
+    def test_la_simulation_par_defaut_est_signalee(self):
+        """Le cas reel : l'operateur n'a pas ecrit `dryrun` du tout."""
+        params = validate_params()
+        self.assertIn(DRYRUN_WARNING, params.warnings)
+
+    def test_le_message_dit_quaucune_ecriture_naura_lieu(self):
+        self.assertIn("AUCUNE", DRYRUN_WARNING)
+        self.assertIn("ecrite", DRYRUN_WARNING)
+
+    def test_le_message_dit_comment_pousser_reellement(self):
+        self.assertIn("dryrun=false", DRYRUN_WARNING)
+
+    def test_le_message_est_en_tete_des_avertissements(self):
+        """Il precede les autres : c'est le cadre de lecture de tout ce qui suit."""
+        params = validate_params(dryrun=True)
+        self.assertEqual(params.warnings[0], DRYRUN_WARNING)
+
+    def test_aucun_avertissement_de_simulation_en_ecriture_reelle(self):
+        for explicite in (True, False):
+            with self.subTest(max_objects_explicit=explicite):
+                params = validate_params(
+                    dryrun=False, max_objects=10, max_objects_explicit=explicite
+                )
+                self.assertNotIn(DRYRUN_WARNING, params.warnings)
+
+    def test_le_message_napparait_quune_fois_dans_le_jeu(self):
+        params = validate_params(dryrun=True)
+        self.assertEqual(list(params.warnings).count(DRYRUN_WARNING), 1)
 
     def test_option_non_renseignee_retombe_sur_le_defaut(self):
         """Le SDK expose une option absente de la ligne de commande comme `None`, pas

@@ -565,5 +565,105 @@ class AvertissementDivergenceRuntimeTest(unittest.TestCase):
         self.assertEqual(self.commande.warnings, [])
 
 
+class AvertissementDeSimulationTest(unittest.TestCase):
+    """Le rappel de simulation est emis **une fois par execution**, pas par evenement.
+
+    `dryrun` vaut `true` par defaut et n'etait signale nulle part : une execution qui
+    n'ecrit rien rend la meme table pleine qu'une execution qui a tout ecrit.
+
+    La justesse tient a deux proprietes, et les deux sont eprouvees ici sur un lot de
+    plusieurs objets **et sur plusieurs chunks** — le SDK appelle `stream()` une fois
+    par chunk, un compteur porte par la boucle ne tiendrait pas :
+
+    1. un seul message pour tout le lot — un avertissement repete sur plusieurs
+       centaines d'objets est du bruit, et le bruit se filtre mentalement ;
+    2. c'est un avertissement, jamais une erreur : aucun `write_error`, aucun chunk
+       d'abandon, aucun appel a la sortie de processus. Le statut du job est intact.
+
+    Le montage substitue les collaborateurs reseau de `_setup()` — il n'y a ni socket
+    ni instance Splunk dans cette suite (§11.1) — mais laisse le chemin d'emission
+    reel : `validate_params`, puis la boucle sur `params.warnings`.
+    """
+
+    def setUp(self):
+        from acltools.model import EventResult
+        from acltools.preflight import DRYRUN_WARNING
+
+        self.attendu = DRYRUN_WARNING
+        self.module = _charger_editacl()
+        _intercepter_labandon(self.module)
+
+        class _ProcesseurNominal(object):
+            def process(self, event):
+                return EventResult(status="dryrun", title="un_objet", http_code=0)
+
+        self.module.RestClient = lambda *a, **k: object()
+        self.module.check_capability = lambda rest: None
+        self.module.check_realtime = lambda rest, sid: "batch"
+        self.module.load_roles_catalog = lambda rest: frozenset()
+        self.module.resolve_server_name = lambda rest: "sh01"
+        self.module.AppStateCache = lambda rest: types.SimpleNamespace(
+            is_app_disabled=lambda app: False
+        )
+        self.module.EventProcessor = lambda **kwargs: _ProcesseurNominal()
+
+    def _commande(self, dryrun):
+        commande = self.module.EditAclCommand()
+        commande.fields = "perms.read,perms.write"
+        commande.dryrun = dryrun
+        commande.validate_roles = False
+        commande.journal = False              # aucun fichier ecrit par ce test
+        commande.max_objects = 500
+        commande._metadata = types.SimpleNamespace(
+            searchinfo=types.SimpleNamespace(
+                sid="1700000000.1",
+                username="un_operateur",
+                splunkd_uri="https://127.0.0.1:8089",
+                session_key="clef-de-session-factice",
+            )
+        )
+        return commande
+
+    def _executer(self, commande, objets, chunks=1):
+        """Deroule le lot en `chunks` appels successifs a `stream()`, comme le SDK."""
+        sorties = []
+        par_chunk = max(1, objets // chunks)
+        restants = objets
+        while restants > 0:
+            taille = min(par_chunk, restants)
+            sorties.extend(
+                commande.stream([{"title": "objet_%d" % i} for i in range(taille)])
+            )
+            restants -= taille
+        return sorties
+
+    def test_le_rappel_est_emis_sur_un_lot_de_plusieurs_objets(self):
+        commande = self._commande(dryrun=True)
+        sorties = self._executer(commande, 250)
+        self.assertEqual(len(sorties), 250)
+        self.assertIn(self.attendu, commande.warnings)
+
+    def test_le_rappel_nest_emis_quune_fois_pour_tout_le_lot(self):
+        commande = self._commande(dryrun=True)
+        self._executer(commande, 250)
+        self.assertEqual(commande.warnings.count(self.attendu), 1)
+
+    def test_un_seul_rappel_meme_reparti_sur_plusieurs_chunks(self):
+        commande = self._commande(dryrun=True)
+        self._executer(commande, 250, chunks=5)
+        self.assertEqual(commande.warnings.count(self.attendu), 1)
+
+    def test_le_rappel_nest_pas_une_erreur(self):
+        commande = self._commande(dryrun=True)
+        self._executer(commande, 10)
+        self.assertEqual(commande.errors, [])
+        self.assertEqual(commande._record_writer.chunks, [])
+
+    def test_aucun_rappel_en_ecriture_reelle(self):
+        commande = self._commande(dryrun=False)
+        self._executer(commande, 10)
+        self.assertNotIn(self.attendu, commande.warnings)
+
+
 if __name__ == "__main__":
     unittest.main()
