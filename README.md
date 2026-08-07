@@ -458,7 +458,9 @@ L'abstention élimine les deux modes.
 
 **Effet favorable** : quand le porteur est écrit, la cascade **aligne** le dérivé sur
 lui. L'outil fait donc converger le parc vers l'état cohérent au fil des lots, sans
-jamais écrire l'objet dérivé lui-même.
+jamais écrire l'objet dérivé lui-même. Cet alignement a une contrepartie quand le
+dérivé était divergent : il n'est pas réversible, voir
+[Limites du retour arrière](#limites-du-retour-arrière).
 
 ### La relation de dérivation est découverte, pas construite
 
@@ -853,6 +855,31 @@ réinjection, `perms.read` figure dans `fields` mais le champ est absent de l'é
 - Il **ne couvre pas** un objet refusé en `HTTP 500` de persistance, dont l'état
   observable a pourtant pu changer — voir ci-dessous. L'exclusion est correcte, la
   remise en état passe par une autre voie.
+- Il **n'est pas réversible pour un objet dérivé qui était divergent** et que la
+  cascade a aligné — voir ci-dessous.
+
+### Un objet dérivé aligné par cascade n'est pas restaurable
+
+Écrire un `eventtype` dont l'objet dérivé était **divergent** aligne ce dérivé par
+cascade : la plateforme lui applique la valeur écrite sur le porteur, sans POST de la
+commande et donc **sans ligne de journal**. Restaurer le porteur lui réécrit la valeur
+antérieure **du porteur**, qui n'est pas celle que le dérivé portait. **L'opération
+n'est pas réversible pour cet objet.**
+
+Le comportement est voulu — c'est l'« effet favorable » décrit à
+[Objets dérivés — l'écriture s'abstient](#objets-dérivés--lécriture-sabstient), qui
+fait converger le parc vers l'état cohérent. Il n'en constitue pas moins une limite du
+retour arrière, et c'est à ce titre qu'il figure ici.
+
+**Ce à quoi la limite ne s'applique pas.** Sur un couple **aligné** — porteur et dérivé
+portant déjà la même ACL, qui est le cas nominal — l'aller-retour est correct : la
+cascade réécrit au dérivé la valeur du porteur à l'aller, la restauration du porteur la
+lui réécrit au retour, et le dérivé retrouve exactement son état antérieur.
+
+La parade est en amont, pas en aval : la
+[recherche d'audit des divergences](#recherches-livrées) énumère les couples divergents.
+La passer **avant** un lot d'écriture, et traiter les divergences relevées, ramène le
+parc au cas nominal — donc au cas où la restauration est fidèle.
 
 ### Un `HTTP 500` de persistance ne veut pas dire « rien n'a changé »
 
@@ -1014,6 +1041,28 @@ Le lookup `acl_decommissioned_roles` livré ne contient que des **identifiants
 génériques d'exemple** (`ancien_role`, `role_a`, `role_b`). Le remplacer par la liste
 réelle — de préférence dans `lookups/` de l'app locale, qu'une mise à jour de l'app ne
 peut pas écraser.
+
+### Limite de la recherche de divergences : l'appariement est cadré par application
+
+Le rapprochement porteur/dérivé s'appuie sur un `stats … BY "eai:acl.app",
+acl_carrier` : **deux objets ne sont appariés que s'ils sont rattachés à la même
+application.** Un `eventtype` partagé en `global` depuis une autre application que celle
+où réside son objet dérivé ne serait donc pas apparié, et la divergence correspondante
+ne serait pas remontée.
+
+Ce cas n'a **pas été observé** sur le socle de référence. Avant de tenir le décompte
+pour exhaustif sur le socle cible, le vérifier — par exemple en comparant le nombre de
+couples appariés au nombre de dérivés inventoriés :
+
+```
+| `acl_inventory(eventtypes,fvtags)`
+| rex field=title "^(?<acl_pair_field>[^=]+)=(?<acl_pair_value>.*)$"
+| where 'eai:type'=="fvtags" AND acl_pair_field=="eventtype"
+| stats dc(title) AS derives_inventories
+```
+
+Un écart avec le nombre de couples que la recherche de divergences apparie signale des
+dérivés dont le porteur réside dans une autre application.
 
 ---
 

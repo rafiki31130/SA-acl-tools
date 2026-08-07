@@ -187,6 +187,17 @@ class EventProcessor(object):
         self._written = {}
         #: endpoint -> `_FailedPost` d'un POST **emis et refuse**.
         self._failed = {}
+        #: endpoint -> identite renvoyee par splunkd au premier GET reussi (§5.3).
+        #:
+        #: Cette memoire n'existe que pour le court-circuit de deduplication du §10.8 :
+        #: le rang 0 du §5.4 lit `work.platform_name`, or le court-circuit rend la main
+        #: sans emettre de GET. Sans elle, la deduplication et l'identification des
+        #: derives seraient couplees par une propriete **externe** — un derive n'emet
+        #: pas de POST, il n'entre donc pas dans `_written` / `_failed` — au lieu de
+        #: l'etre par une garantie locale. La propriete est vraie, mais elle appartient
+        #: a un autre mecanisme et se romprait sans bruit a la premiere evolution de la
+        #: deduplication.
+        self._platform_names = {}
 
     # -- point d'entree unique --------------------------------------------- #
 
@@ -364,6 +375,13 @@ class EventProcessor(object):
 
         La deduplication ne modifie jamais le nombre d'evenements de sortie ni le
         nombre de lignes `outcome`.
+
+        **Le court-circuit restitue l'identite de plateforme** memorisee au premier GET.
+        Le rang 0 du §5.4 la lit juste apres cet appel : la laisser a `None` rendrait le
+        controle de derivation inoperant sur une seconde occurrence du meme endpoint.
+        La sortie de cette methode porte donc le meme `platform_name` par les deux
+        chemins — c'est une garantie **locale**, qui ne suppose rien du mecanisme qui
+        alimente `_written` / `_failed`.
         """
         cached = self._written.get(work.endpoint)
         if cached is None:
@@ -371,6 +389,7 @@ class EventProcessor(object):
             cached = failed.before if failed is not None else None
         if cached is not None:
             work.http_code = 200
+            work.platform_name = self._platform_names.get(work.endpoint)
             return cached
 
         response = self._rest.get_object_acl(work.endpoint)
@@ -399,6 +418,7 @@ class EventProcessor(object):
             raise EventRejected(
                 "error", _truncate("get_parse_failed:%s" % (exc,))
             )
+        self._platform_names[work.endpoint] = work.platform_name
         return parse_acl_state(acl_block)
 
     def _emit(self, result):

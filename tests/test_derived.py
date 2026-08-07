@@ -15,7 +15,7 @@ from acltools.derived import (
     designated_carrier,
     split_composite_key,
 )
-from acltools.pipeline import EventProcessor
+from acltools.pipeline import EventProcessor, _Work
 from acltools.rest import RestResponse
 
 from .helpers import (
@@ -273,6 +273,64 @@ class TestRang0(unittest.TestCase):
         rest = derive_rest()
         run(rest, make_event(eai_type="savedsearch", write="nouveau_role_admin"))
         self.assertEqual(rest.count("JSON"), 0)
+
+
+class RangZeroEtDeduplicationTest(unittest.TestCase):
+    """A-11 — le rang 0 ne doit pas dependre d'une propriete du §10.8.
+
+    Le court-circuit de deduplication rend la main sans emettre de GET. Il doit donc
+    restituer lui-meme l'identite de plateforme, faute de quoi `designated_carrier`
+    recevrait `None` et le rang 0 serait inoperant sur une seconde occurrence du meme
+    endpoint.
+
+    Le chemin **n'est pas atteignable** dans l'etat livre : un derive est ecarte au
+    rang 0, il n'emet pas de POST, il n'entre donc ni dans `_written` ni dans
+    `_failed`. La coherence tient, mais elle tient par une propriete d'un **autre**
+    mecanisme. Ces deux tests atteignent le chemin deliberement, en injectant la
+    memoire d'execution qu'une evolution de la deduplication produirait, et figent la
+    garantie **locale** qui la remplace.
+    """
+
+    def _processeur(self, rest):
+        return EventProcessor(
+            make_params(), make_ctx(), rest, mapping=FIXTURE_MAPPING
+        )
+
+    def test_le_court_circuit_restitue_lidentite_renvoyee_par_splunkd(self):
+        """Invariant de `_read_state` : meme `platform_name` par les deux chemins."""
+        rest = derive_rest()
+        processeur = self._processeur(rest)
+
+        premier = _Work(derive_event())
+        premier.endpoint = DERIVE_PATH
+        etat = processeur._read_state(premier)
+        self.assertEqual(premier.platform_name, "eventtype=mon_eventtype")
+
+        # Memoire que laisserait un POST abouti sur cet endpoint.
+        processeur._written[DERIVE_PATH] = etat
+
+        second = _Work(derive_event())
+        second.endpoint = DERIVE_PATH
+        processeur._read_state(second)
+        self.assertEqual(len(rest.gets()), 1)                # le court-circuit a joue
+        self.assertEqual(second.platform_name, premier.platform_name)
+
+    def test_un_derive_deja_memorise_reste_ecarte_au_rang_0(self):
+        """La consequence : l'abstention survit a la deduplication.
+
+        Sans la restitution, ce second passage ressortirait `updated` avec un POST.
+        """
+        rest = derive_rest()
+        processeur = self._processeur(rest)
+
+        amorce = _Work(derive_event())
+        amorce.endpoint = DERIVE_PATH
+        processeur._written[DERIVE_PATH] = processeur._read_state(amorce)
+
+        resultat = processeur.process(derive_event(write="encore_un_autre_role"))
+        self.assertEqual(resultat.status, "skipped_derived")
+        self.assertEqual(resultat.error, "derived_object:mon_eventtype")
+        self.assertEqual(len(rest.posts()), 0)
 
 
 if __name__ == "__main__":                                   # pragma: no cover
