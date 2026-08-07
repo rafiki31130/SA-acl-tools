@@ -961,8 +961,31 @@ indépendantes se cumulent.
 
 ### 1. Troncature par capability
 
-Sans `admin_all_objects`, l'inventaire ne remonte pas les objets privés d'autrui.
+Sans `admin_all_objects`, l'inventaire ne remonte pas les objets privés d'autrui —
+ceux dont l'ACL porte `sharing = user` et un `owner` différent de l'opérateur.
 **Aucune erreur n'est émise.**
+
+**Aucun chiffre de référence n'est donné ici, et c'est délibéré.** Contrairement à la
+troncature suivante, qui est une propriété **structurelle** de `admin/directory` et se
+mesure donc une fois pour toutes, celle-ci est une propriété de la **population**
+d'objets du socle : elle vaut zéro sur une instance sans objets privés et peut valoir
+l'essentiel du parc sur un search head à forte activité utilisateur. Un chiffre relevé
+sur une instance de référence ne s'y transposerait pas — il rassurerait à tort.
+
+Elle se mesure sur le socle cible, depuis un compte qui **détient**
+`admin_all_objects` :
+
+```
+| `acl_inventory`
+| stats count AS total,
+        count(eval('eai:acl.sharing'=="user")) AS prives,
+        dc(eval(if('eai:acl.sharing'=="user", 'eai:acl.owner', null()))) AS proprietaires
+| eval part_invisible_pct = round(100 * prives / total, 1)
+```
+
+`prives` est le majorant de ce qu'un opérateur **sans** la capability ne verrait pas —
+majorant, puisque ses propres objets privés lui restent visibles. Un `prives` non nul
+signifie qu'il faut la capability, pas qu'il faut se contenter du reste.
 
 ### 2. Troncature structurelle de `admin/directory`
 
