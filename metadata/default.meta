@@ -19,6 +19,21 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
+# L'assistant de recherche suit la commande. Il lit `configs/conf-searchbnf` dans le
+# namespace de la PAGE, c'est-a-dire l'app depuis laquelle l'operateur saisit sa
+# recherche — `search`, pas `SA-acl-tools`. Confine au contexte de l'app, le
+# `searchbnf.conf` est charge, parse, expose sur `/servicesNS/nobody/SA-acl-tools/...`
+# et rigoureusement sans effet la ou l'operateur tape : ni coloration du nom de
+# commande, ni syntaxe, ni exemple. Aucune erreur n'est levee — c'est un manque
+# silencieux, et c'est la raison d'etre de cette stanza.
+#
+# Elle accompagne necessairement `[commands] export = system` : une commande invocable
+# partout dont l'aide n'est visible nulle part est une incoherence.
+
+[searchbnf]
+access = read : [ * ], write : [ admin ]
+export = system
+
 # Les macros sont exportees au systeme pour la meme raison que la commande :
 # `acl_inventory` doit etre invocable en ligne depuis n'importe quelle recherche
 # ad hoc (§6.7 contrainte 1). Confinee au contexte de l'app, elle ne le serait pas.

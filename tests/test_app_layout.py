@@ -4,8 +4,10 @@ Ces fichiers sont des livrables normatifs autant que le code : une cle absente d
 `commands.conf` ou une stanza de monitor sans glob se voit a l'execution, jamais avant.
 """
 
+import ast
 import configparser
 import os
+import re
 import unittest
 
 from . import BIN_DIR, REPO_ROOT
@@ -27,6 +29,7 @@ class LayoutTest(unittest.TestCase):
         ("README.md",),
         ("default", "app.conf"),
         ("default", "commands.conf"),
+        ("default", "searchbnf.conf"),
         ("default", "authorize.conf"),
         ("default", "inputs.conf"),
         ("default", "props.conf"),
@@ -92,6 +95,170 @@ class CommandsConfTest(unittest.TestCase):
         self.assertEqual(
             sorted(self.conf.options("editacl")), sorted(self.ATTENDU)
         )
+
+
+class SearchBnfConfTest(unittest.TestCase):
+    """`searchbnf.conf` — coloration syntaxique, aide a la saisie, exemple d'usage.
+
+    Sans ce fichier, `editacl` s'execute mais l'interface de recherche l'ignore
+    entierement. Le manque ne produit aucune erreur : c'est ce qui l'a fait traverser
+    deux audits. Les tests ci-dessous figent ce qui, autrement, ne se constate qu'en
+    ouvrant un navigateur sur une instance.
+
+    Le mode de defaillance suivant est le plus vicieux : un fichier valide, charge, et
+    **sans effet** parce qu'il n'est visible que dans le contexte de son app alors que
+    l'assistant lit celui de la page. Il est verrouille par `MetadataTest`.
+    """
+
+    #: Termes primitifs de la grammaire, definis par la plateforme et non par une
+    #: stanza. Toute autre production referencee doit exister dans ce fichier.
+    PRIMITIFS = frozenset({"bool", "int", "string", "field", "field-list"})
+
+    def setUp(self):
+        self.conf = read_conf("default", "searchbnf.conf")
+
+    def _syntaxes(self):
+        return {
+            section: self.conf.get(section, "syntax")
+            for section in self.conf.sections()
+            if self.conf.has_option(section, "syntax")
+        }
+
+    def test_la_stanza_porte_le_nom_de_la_commande_declaree(self):
+        """La convention `[<commande>-command]` est imposee par la plateforme : une
+        stanza mal nommee est chargee sans erreur et ne colore rien."""
+        commandes = read_conf("default", "commands.conf").sections()
+        self.assertEqual(commandes, ["editacl"])
+        self.assertIn("editacl-command", self.conf.sections())
+
+    def test_usage_public(self):
+        """`usage` est requis, et l'assistant de recherche n'opere que sur `public`."""
+        self.assertEqual(self.conf.get("editacl-command", "usage"), "public")
+
+    def test_la_syntaxe_commence_par_le_nom_de_la_commande(self):
+        self.assertTrue(
+            self.conf.get("editacl-command", "syntax").startswith("editacl"),
+            "la production doit s'ouvrir sur le litteral `editacl`",
+        )
+
+    def test_toute_production_referencee_est_definie(self):
+        """Une production orpheline casse l'analyse de la syntaxe cote assistant, sans
+        que rien ne le signale cote serveur."""
+        definies = set(self.conf.sections()) | self.PRIMITIFS
+        orphelines = set()
+        for syntaxe in self._syntaxes().values():
+            for terme in re.findall(r"<([A-Za-z0-9._-]+)>", syntaxe):
+                if terme.split(":")[0] not in definies:
+                    orphelines.add(terme)
+        self.assertEqual(sorted(orphelines), [])
+
+    def test_les_options_decrites_sont_exactement_celles_du_code(self):
+        """Anti-derive : l'assistant ne doit jamais proposer une option que la commande
+        ne connait pas, ni taire une option qu'elle accepte.
+
+        Les noms sont lus dans le source de `bin/editacl.py`, jamais par import : la
+        suite reste executable sans le SDK.
+        """
+        chemin = os.path.join(BIN_DIR, "editacl.py")
+        with open(chemin, encoding="utf-8") as handle:
+            arbre = ast.parse(handle.read(), filename=chemin)
+        options_du_code = set()
+        for noeud in ast.walk(arbre):
+            if isinstance(noeud, ast.ClassDef) and noeud.name == "EditAclCommand":
+                for element in noeud.body:
+                    if (isinstance(element, ast.Assign)
+                            and isinstance(element.value, ast.Call)
+                            and isinstance(element.value.func, ast.Name)
+                            and element.value.func.id == "Option"):
+                        for cible in element.targets:
+                            if isinstance(cible, ast.Name):
+                                options_du_code.add(cible.id)
+        self.assertTrue(options_du_code, "aucune Option lue dans bin/editacl.py")
+
+        options_decrites = set()
+        for section, syntaxe in self._syntaxes().items():
+            if section == "editacl-command":
+                continue
+            options_decrites.add(syntaxe.split("=", 1)[0].strip())
+        self.assertEqual(options_decrites, options_du_code)
+
+    def test_chaque_option_du_code_figure_dans_la_syntaxe_de_la_commande(self):
+        syntaxe = self.conf.get("editacl-command", "syntax")
+        for section in self._syntaxes():
+            if section == "editacl-command":
+                continue
+            self.assertIn("<%s>" % section, syntaxe)
+
+    def test_description_et_resume_sont_renseignes(self):
+        for cle in ("shortdesc", "description"):
+            with self.subTest(cle=cle):
+                self.assertTrue(self.conf.get("editacl-command", cle).strip())
+
+    def test_au_moins_un_exemple_avec_son_commentaire(self):
+        exemples = [
+            o for o in self.conf.options("editacl-command")
+            if re.fullmatch(r"example\d+", o)
+        ]
+        self.assertTrue(exemples, "l'assistant affiche un exemple : il faut en donner un")
+        for exemple in exemples:
+            with self.subTest(exemple=exemple):
+                self.assertIn(
+                    exemple.replace("example", "comment"),
+                    self.conf.options("editacl-command"),
+                )
+                self.assertIn("editacl", self.conf.get("editacl-command", exemple))
+
+    def test_le_defaut_de_simulation_est_dit_a_loperateur(self):
+        """L'assistant est le premier endroit ou l'operateur lit la syntaxe : le fait
+        que rien ne s'ecrira sans `dryrun=false` s'y trouve."""
+        texte = " ".join(
+            self.conf.get(section, cle)
+            for section in ("editacl-command", "editacl-dryrun")
+            for cle in ("description",)
+        )
+        self.assertIn("dryrun=false", texte)
+
+
+class MetadataTest(unittest.TestCase):
+    """`metadata/default.meta` — la visibilite des objets, dont depend leur effet.
+
+    Un `searchbnf.conf` confine au contexte de son app est charge, expose sur
+    `/servicesNS/nobody/SA-acl-tools/configs/conf-searchbnf`, et rigoureusement sans
+    effet la ou l'operateur saisit sa recherche : l'assistant lit le namespace de la
+    **page**, c'est-a-dire l'app `search`. Mesure sur Splunk 9.4.6 : sans la stanza
+    ci-dessous, `/servicesNS/admin/search/configs/conf-searchbnf?search=editacl` rend
+    `total=0` ; avec elle, les six stanzas. Aucune erreur dans les deux cas.
+    """
+
+    @staticmethod
+    def read_meta():
+        """Lecteur dedie : `configparser` refuse la stanza `[]` d'un `.meta`, qui est
+        la stanza par defaut de Splunk et ne peut pas etre retiree."""
+        stanzas = {}
+        courante = None
+        chemin = os.path.join(REPO_ROOT, "metadata", "default.meta")
+        with open(chemin, encoding="utf-8") as handle:
+            for ligne in handle:
+                ligne = ligne.strip()
+                if not ligne or ligne.startswith("#"):
+                    continue
+                if ligne.startswith("[") and ligne.endswith("]"):
+                    courante = ligne[1:-1]
+                    stanzas.setdefault(courante, {})
+                elif "=" in ligne and courante is not None:
+                    cle, valeur = ligne.split("=", 1)
+                    stanzas[courante][cle.strip()] = valeur.strip()
+        return stanzas
+
+    def setUp(self):
+        self.meta = self.read_meta()
+
+    def test_lassistant_de_recherche_suit_la_commande(self):
+        self.assertIn("searchbnf", self.meta)
+        self.assertEqual(self.meta["searchbnf"].get("export"), "system")
+
+    def test_la_commande_est_exportee(self):
+        self.assertEqual(self.meta["commands"].get("export"), "system")
 
 
 class AuthorizeConfTest(unittest.TestCase):
