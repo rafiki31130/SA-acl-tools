@@ -49,13 +49,13 @@ flowchart LR
     direction TB
     PRE["Preflight (une fois)<br/>parametres, capability,<br/>temps reel, roles, table"]
     RES["Resolution d'endpoint<br/>id, sinon eai:type<br/>contexte FIXE nobody"]
-    RM1{"Rang -1<br/>portee courante = user ?"}
+    RM1{"Rang -1<br/>portee courante = user,<br/>ou namespace de id nominatif ?"}
     SKP(["skipped_private<br/>ni GET ni POST"])
     GET["GET etat courant<br/>ou memoire d'execution 10.8"]
     R0{"Rang 0<br/>derive d'un eventtype ?"}
     SKD(["skipped_derived<br/>aucun POST"])
     MER["Fusion<br/>la PRESENCE de la colonne decide QUOI,<br/>la cellule decide LA VALEUR"]
-    CTL["Controles ordonnes 1 a 8<br/>+ idempotence"]
+    CTL["Controles ordonnes 1 a 7<br/>+ idempotence"]
     WAL["Journal : ligne intent<br/>write + flush + fsync"]
     POST["POST /acl"]
     OUT["Journal : ligne outcome<br/>+ evenement de sortie"]
@@ -601,10 +601,36 @@ Détectés par la portée **courante** (paramètre `sharing`), ils ressortent en
 `acl_status = "skipped_private"`, **sans GET ni POST**, compteur non incrémenté, avec
 leur ligne de journal comme tout autre statut.
 
-Si la colonne de portée est absente du jeu de résultats, la commande ne peut pas les
-écarter en amont : le GET par contexte fixe répond `404` et l'objet ressort en
-`not_found`. C'est honnête, mais moins informatif — **bâtissez le pipeline sur la macro
-d'inventaire**, qui émet toujours la portée.
+**Seconde voie de détection, et elle est nécessaire.** Lorsque la colonne de portée est
+absente du jeu de résultats — ou présente et vide, ce qui ne renseigne pas davantage —
+la commande s'appuie sur le **namespace porté par `id`**. Splunkd émet
+`/servicesNS/nobody/…` pour un objet partagé et `/servicesNS/<propriétaire>/…` pour un
+objet privé : un namespace nominatif suffit donc à écarter l'objet, sans consulter sa
+portée. L'objet ressort alors en `skipped_private` avec l'avertissement
+`private_detected_by_id_namespace`, qui dit du même coup ce qui manque au pipeline.
+
+> **Pourquoi ce n'est pas un confort.** Le repli annoncé jusqu'ici — « le GET par
+> contexte fixe répond `404` et l'objet ressort en `not_found` » — **est faux dès qu'un
+> homonyme partagé existe** : l'adressage fixe atteint alors le partagé, et la commande
+> lit puis écrirait **un objet autre que celui désigné en entrée**. C'est la même classe
+> de défaut que celui de la v1, que l'adressage fixe est censé avoir clos, réintroduite
+> par le repli.
+>
+> La donnée sur laquelle repose cette seconde voie est **émise par la plateforme**,
+> jamais une convention posée par l'outil : mesuré sur 9.4.6, trois objets homonymes
+> d'une même application listés par `/servicesNS/-/-/…` ressortent avec
+> `ns = nobody` pour le partagé — **alors même que son propriétaire est un compte
+> nommé** — et `ns = <propriétaire>` pour chacun des deux privés. Le segment de
+> namespace n'est pas le propriétaire : c'est la portée, telle que splunkd l'écrit.
+>
+> L'erreur possible est bornée et conservatrice : un objet partagé dont l'`id` aurait été
+> moissonné dans un contexte nominatif ressortirait `skipped_private` à tort.
+> **L'abstention, jamais une écriture fautive** — c'est la même discipline qu'au rang 0.
+
+Si ni la portée ni un `id` exploitable ne sont disponibles, l'objet suit son cours et
+ressort en `not_found` — et cette fois la promesse tient, faute de toute désignation
+permettant de faire mieux. **Bâtissez le pipeline sur la macro d'inventaire**, qui émet
+toujours les deux.
 
 L'inventaire, lui, continue de les lister : la règle porte sur l'écriture, pas sur la
 vue.
@@ -670,7 +696,7 @@ sont réunies.
 
 | Rang | Contrôle | Statut | POST |
 |---|---|---|---|
-| −1 | La portée courante vaut `user` | `skipped_private` | non |
+| −1 | La portée courante vaut `user`, ou — à défaut de portée — le namespace porté par `id` est nominatif | `skipped_private` | non |
 | 0 | L'objet est un dérivé d'un `eventtype` | `skipped_derived` | non |
 | 1 | `can_change_perms = 0` dans la réponse du GET | `skipped_immutable` | non |
 | 2 | Colonne de `new_sharing` présente, cellule vide | `rejected` / `sharing_empty_not_allowed` | non |
@@ -865,7 +891,29 @@ l'intégralité de ses champs, augmenté de :
 Avertissements possibles : `sharing_change`, `owner_change`, `app_disabled`,
 `stale_role_preserved:<liste>`, `journal_outcome_failed`,
 `duplicate_post_suppressed`, `runtime_divergence_possible`,
-`carrier_probe_inconclusive:<code>`.
+`carrier_probe_inconclusive:<code>`, `private_detected_by_id_namespace`.
+
+> **Le jeu de champs de sortie est déclaré, jamais inféré.** Le writer du SDK construit
+> l'en-tête du flux à partir des clés du **premier enregistrement émis**, puis y projette
+> tous les suivants : un champ absent de ce premier enregistrement **disparaît de la
+> sortie entière**, sans erreur ni avertissement. Or les huit champs `acl_before_*` /
+> `acl_after_*` ne sont portés que par les enregistrements dont la fusion a été calculée
+> — un `skipped_private`, un `skipped_derived`, un `skipped_ceiling` ou un rejet amont
+> n'en porte aucun. Un lot dont la première ligne relève d'un de ces statuts privait donc
+> l'opérateur de **tout** ce que la simulation existe pour montrer, et la macro
+> d'inventaire, qui liste les objets privés et dérivés au même titre que les autres,
+> produit couramment de tels lots.
+>
+> La commande **déclare** en conséquence l'intégralité de son jeu de champs au writer,
+> indépendamment du contenu du premier enregistrement. Les quatorze colonnes ci-dessus
+> sont donc présentes quel que soit l'ordre du lot ; celles qu'un statut ne porte pas
+> sont **vides**, jamais absentes. La déclaration ajoute la colonne, elle n'invente pas
+> de contenu.
+>
+> La symétrie mérite d'être vue : toute la sémantique de présence repose, en **entrée**,
+> sur le fait que le jeu de colonnes est celui du jeu de résultats et non de l'événement.
+> La sortie obéit à une contrainte de même nature — figée, mais sur le **premier
+> enregistrement** au lieu du jeu complet.
 
 `runtime_divergence_possible` est émis sur **tout** POST répondant en `5xx`, pas sur le
 seul `500` : la divergence tient à ce que le handler a muté son état en mémoire avant
@@ -906,7 +954,8 @@ stateDiagram-v2
   Resolution --> rejected : unresolved_endpoint
 
   Prive --> skipped_private : rang -1 portee courante = user
-  Prive --> Lecture : portee courante non privee
+  Prive --> skipped_private : rang -1 namespace de id nominatif
+  Prive --> Lecture : portee non privee et namespace nobody
 
   Lecture --> Fusion : GET 2xx
   Lecture --> Fusion : objet deja ecrit dans cette execution
@@ -1167,28 +1216,41 @@ abouti** : un objet dont le POST a échoué n'a pas été modifié et ne doit pa
 Le `sid` s'obtient par `| eval sid=$sid$`, par l'inspecteur de recherche, ou par le nom
 du fichier de journal de l'exécution (`editacl_journal_<sid>.log`).
 
-**La restauration d'une permission vide est correcte par construction**, et la
-construction en question mérite d'être nommée.
+**La restauration d'une permission vide fonctionne, et il faut savoir pourquoi.**
 
-Une permission vide est journalisée `before_perms_read = ""`. À l'indexation,
-l'extraction JSON **ne matérialise pas** un champ de valeur vide : le `stats` de la
-macro ne produit alors aucune colonne `eai:acl.perms.read` lorsque tous les objets du
-lot sont dans ce cas. Or une colonne absente **préserve** l'attribut — elle ne le vide
-pas. Sans précaution, une restauration devant vider `perms.read` le laisserait donc
-intact, en rapportant un succès.
+Le risque était réel dans son principe : depuis la refonte du contrat d'entrée, une
+colonne **absente préserve** l'attribut au lieu de le vider. Si la chaîne de
+journalisation perdait une permission vide en chemin, la restauration ne restaurerait
+rien tout en rapportant un succès.
 
-La macro matérialise donc les deux colonnes de permissions inconditionnellement :
+**Mesuré sur 9.4.6, elle ne la perd pas — et la mesure a été faite deux fois, par deux
+profils distincts.** Une permission sérialisée `""` dans le journal est **extraite** à
+l'indexation — champ présent, valeur chaîne vide, un témoin `isnull()` sur un champ
+inexistant établissant que l'instrument sait bien distinguer « absent » de « présent et
+vide » — **et elle survit à l'agrégation** : le `stats earliest(...) BY endpoint` de la
+macro, exécuté sans le `coalesce` et filtré sur un objet dont les deux permissions sont
+vides sur cent pour cent des lignes agrégées, émet bien les deux colonnes.
+
+La macro conserve néanmoins une matérialisation explicite des deux colonnes de
+permissions, **en défense en profondeur et non en correctif d'un défaut observé** :
 
 ```
 | eval "eai:acl.perms.read"  = coalesce('eai:acl.perms.read',  ""),
        "eai:acl.perms.write" = coalesce('eai:acl.perms.write', "")
 ```
 
-La colonne existe toujours, vide quand l'état antérieur l'était, et l'attribut est bien
-vidé. `eai:acl.sharing` et `eai:acl.owner` ne sont délibérément **pas** traités de même :
-leur valeur vide n'existe pas côté plateforme, un objet restaurable en porte toujours
-une, et matérialiser une colonne vide n'y transformerait qu'une préservation correcte en
-rejet. Un test unitaire fige l'ensemble.
+Elle coûte une ligne et protège d'un comportement que rien n'oblige une autre version de
+la plateforme à conserver — même prudence que la re-validation de la table de
+correspondance sur le socle cible. `eai:acl.sharing` et `eai:acl.owner` ne sont
+délibérément **pas** traités de même : leur valeur vide n'existe pas côté plateforme, un
+objet restaurable en porte toujours une, et matérialiser une colonne vide n'y
+transformerait qu'une préservation correcte en rejet. Un test unitaire fige l'ensemble.
+
+> **Ce que cet épisode enseigne.** Une version antérieure de ce document affirmait que la
+> colonne disparaissait et en tirait une démonstration élégante sur les comportements
+> « justes pour une mauvaise raison ». Cette affirmation n'avait jamais été mesurée. Une
+> exigence fondée sur une supposition reste une supposition, quelle que soit l'élégance
+> du raisonnement qu'on bâtit dessus.
 
 ### Limites du retour arrière
 

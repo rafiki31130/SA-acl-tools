@@ -203,11 +203,12 @@ class MacrosTest(unittest.TestCase):
         self.assertIn("max_objects=", definition)
 
     def test_le_rollback_materialise_les_colonnes_de_permissions(self):
-        # §8.6 : la restauration d'une permission VIDE doit vider l'attribut. A
-        # l'indexation, un champ JSON de valeur vide n'est pas materialise, et le `stats`
-        # ne produit alors aucune colonne — or une colonne absente PRESERVE (§3.2). Le
-        # `coalesce` la materialise inconditionnellement, ce qui rend la promesse du
-        # §8.6 vraie par construction et non par coincidence.
+        # §8.6, D-32 : la restauration d'une permission VIDE doit vider l'attribut.
+        # Mesure sur 9.4.6, la chaine journal -> indexation -> `stats` ne perd PAS une
+        # permission vide : la colonne est extraite et survit a l'agregation. Le
+        # `coalesce` est donc une DEFENSE EN PROFONDEUR — il materialise la colonne
+        # inconditionnellement, ce qui vaut pour une version de la plateforme qui ne
+        # conserverait pas ce comportement — et non le correctif d'un defaut observe.
         definition = self.conf["editacl_rollback(1)"]["definition"]
         for champ in ("eai:acl.perms.read", "eai:acl.perms.write"):
             self.assertIn("coalesce('%s'" % champ, definition)

@@ -191,11 +191,18 @@ class RollbackContractTest(unittest.TestCase):
         self.assertEqual(intent["endpoint"], outcome["endpoint"])
 
     def test_restauration_dune_permission_vide_revide_bien_lattribut(self):
-        """Aller-retour complet en memoire.
+        """Aller-retour complet en memoire, sur le cas que le `coalesce` COUVRE.
 
-        Etat initial `perms.read` vide -> ligne `intent` -> perte du champ vide a
-        l'extraction JSON de l'indexation -> reinjection -> la fusion revide bien
-        `perms.read` (ligne 4 de la matrice).
+        Le scenario simule ici — la colonne de permission vide se perdrait entre le
+        journal et la reinjection — **n'est pas celui de la plateforme** : mesure sur
+        9.4.6, une permission vide est extraite a l'indexation ET survit au `stats` de
+        la macro (D-32). Il est simule parce que c'est exactement le comportement contre
+        lequel le `coalesce` du §8.6 protege EN DEFENSE EN PROFONDEUR, et que rien
+        n'oblige une autre version de la plateforme a conserver celui qui est mesure.
+
+        Etat initial `perms.read` vide -> ligne `intent` -> perte HYPOTHETIQUE du champ
+        vide -> reinjection -> la fusion revide bien `perms.read` (ligne 4 de la
+        matrice).
         """
         before = state(sharing="global", read=(), write=("ancien_role",))
         after = state(sharing="global", read=(), write=("nouveau_role_admin",))
@@ -204,9 +211,10 @@ class RollbackContractTest(unittest.TestCase):
         )
         self.assertEqual(intent["before_perms_read"], "")
 
-        # Simulation de l'indexation : un champ JSON de valeur vide n'est pas
-        # materialise, le `stats` de la macro ne produit donc AUCUNE colonne
-        # `eai:acl.perms.read` quand tous les objets du lot sont dans ce cas.
+        # Simulation du comportement CONTRE LEQUEL on se premunit, pas de celui qui
+        # est mesure : une chaine de journalisation qui ne materialiserait pas un champ
+        # de valeur vide ne produirait aucune colonne `eai:acl.perms.read` quand tous
+        # les objets du lot sont dans ce cas.
         sortie_macro = {
             "title": intent["title"],
             "eai:acl.app": intent["app"],
@@ -221,9 +229,10 @@ class RollbackContractTest(unittest.TestCase):
             sortie_macro["eai:acl.sharing"] = intent["before_sharing"]
         self.assertNotIn("eai:acl.perms.read", sortie_macro)
 
-        # Colonne absente = attribut PRESERVE (§3.2). Sans precaution, la restauration
-        # laisserait donc `perms.read` intact en rapportant un succes — la classe de
-        # defaut que la refonte corrige ailleurs, reintroduite par la porte de service.
+        # Colonne absente = attribut PRESERVE (§3.2). Dans ce cas de figure, et sans
+        # precaution, la restauration laisserait `perms.read` intact en rapportant un
+        # succes — la classe de defaut que la refonte corrige ailleurs, reintroduite par
+        # la porte de service.
         sans_coalesce = merge(
             state(sharing="global", read=("role_ajoute",),
                   write=("nouveau_role_admin",)),
