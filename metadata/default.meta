@@ -1,12 +1,12 @@
-# Visibilite de l'app et de ses objets (§7).
+# Visibility of the app and of its objects (spec section 7).
 #
-# L'app n'est pas exportee : ses objets restent confines a son contexte. La capability
-# `edit_acl_bulk` est attribuee hors de l'app, par la chaine de gestion des roles.
+# The app is not exported: its objects stay confined to its own context. The
+# `edit_acl_bulk` capability is granted outside the app, by the role management chain.
 #
-# La commande `editacl` est en revanche exportee a l'ensemble du systeme : sans cela
-# elle ne serait invocable que depuis le contexte de cette app, ce qui interdirait son
-# usage depuis une recherche ad hoc. Le controle d'acces effectif reste porte par la
-# capability, pas par cette declaration.
+# The `editacl` command, on the other hand, is exported to the whole system: without
+# that it would only be invocable from this app's context, which would rule out its
+# use from an ad hoc search. The effective access control is still carried by the
+# capability, not by this declaration.
 
 []
 access = read : [ * ], write : [ admin ]
@@ -19,27 +19,27 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
-# L'assistant de recherche suit la commande. Il lit `configs/conf-searchbnf` dans le
-# namespace de la PAGE, c'est-a-dire l'app depuis laquelle l'operateur saisit sa
-# recherche — `search`, pas `SA-acl-tools`. Confine au contexte de l'app, le
-# `searchbnf.conf` est charge, parse, expose sur `/servicesNS/nobody/SA-acl-tools/...`
-# et rigoureusement sans effet la ou l'operateur tape : ni coloration du nom de
-# commande, ni syntaxe, ni exemple. Aucune erreur n'est levee — c'est un manque
-# silencieux, et c'est la raison d'etre de cette stanza.
+# The search assistant follows the command. It reads `configs/conf-searchbnf` in the
+# namespace of the PAGE, that is, the app from which the operator types the search:
+# `search`, not `SA-acl-tools`. Confined to the app context, `searchbnf.conf` is
+# loaded, parsed, exposed on `/servicesNS/nobody/SA-acl-tools/...` and strictly
+# without effect where the operator types: no coloring of the command name, no syntax,
+# no example. No error is raised anywhere. The gap is silent, and that is the reason
+# this stanza exists.
 #
-# Elle accompagne necessairement `[commands] export = system` : une commande invocable
-# partout dont l'aide n'est visible nulle part est une incoherence.
+# It necessarily goes with `[commands] export = system`: a command that can be invoked
+# everywhere but whose help is visible nowhere is an inconsistency.
 
 [searchbnf]
 access = read : [ * ], write : [ admin ]
 export = system
 
-# Les macros sont exportees au systeme pour la meme raison que la commande :
-# `acl_inventory` doit etre invocable en ligne depuis n'importe quelle recherche
-# ad hoc (§6.7 contrainte 1). Confinee au contexte de l'app, elle ne le serait pas.
+# The macros are exported to the system for the same reason as the command:
+# `acl_inventory` must be invocable inline from any ad hoc search (section 6.7
+# constraint 1). Confined to the app context, it would not be.
 #
-# La definition de lookup et le fichier de lookup qu'elle designe suivent : une macro
-# exportee qui s'appuie sur un `inputlookup` non exporte echoue hors de son app.
+# The lookup definition and the lookup file it designates follow: an exported macro
+# that relies on a non-exported `inputlookup` fails outside its own app.
 
 [macros]
 access = read : [ * ], write : [ admin ]
@@ -53,8 +53,8 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
-# Les recherches livrees restent dans le contexte de l'app : elles sont un point de
-# depart d'audit, pas une dependance d'autres apps.
+# The shipped searches stay in the app context: they are an audit starting point, not
+# a dependency of other apps.
 [savedsearches]
 access = read : [ * ], write : [ admin ]
 export = none

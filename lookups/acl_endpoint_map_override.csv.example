@@ -1,20 +1,20 @@
 eai_type,handler_path
-# Exemple d'override de la table de correspondance (§6.3).
+# Example override of the mapping table (section 6.3).
 #
-# Pour l'activer : copier ce fichier en `lookups/acl_endpoint_map_override.csv` dans
-# l'app installee, puis y decrire une correspondance par ligne. Le fichier reel n'est
-# JAMAIS livre dans l'archive (D-5) : une mise a jour de l'app ne peut donc pas
-# l'ecraser, puisqu'elle ne le contient pas.
+# To enable it: copy this file to `lookups/acl_endpoint_map_override.csv` in the
+# installed app, then describe one mapping per line. The real file is NEVER shipped in
+# the archive (D-5): an app upgrade therefore cannot overwrite it, since the archive
+# does not contain it.
 #
-# Il est charge APRES `bin/acl_endpoint_map.json` et le surcharge : une cle presente
-# dans les deux prend la valeur de ce fichier.
+# It is loaded AFTER `bin/acl_endpoint_map.json` and overrides it: a key present in
+# both takes the value from this file.
 #
-# `handler_path` doit valider le motif ^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$
-# — une ligne non conforme est ecartee et tracee dans le journal de diagnostic, jamais
-# utilisee. Aucune heuristique de derivation n'est appliquee (§6.2) : un type absent de
-# la table produit `acl_status=rejected`, `acl_error=unresolved_endpoint:<type>`.
+# `handler_path` must match the pattern ^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$
+# - a non-conforming line is discarded and traced in the diagnostic log, never used. No
+# derivation heuristic is applied (section 6.2): a type absent from the table produces
+# `acl_status=rejected`, `acl_error=unresolved_endpoint:<type>`.
 #
-# Les deux lignes ci-dessous sont commentees : ce fichier d'exemple ne doit rien
-# surcharger tel quel.
-#un-type-inconnu,data/ui/quelque-chose
-#un-autre-type,admin/quelque-chose-dautre
+# The two lines below are commented out: this example file must override nothing as it
+# stands.
+#an-unknown-type,data/ui/something
+#another-type,admin/something-else
