@@ -1613,11 +1613,29 @@ Elle couvre notamment :
 - `validate_roles` sur rôle ajouté contre rôle conservé ;
 - les trois invariants du journal, et le contrat de champs de la macro de restauration ;
 - l'**étanchéité des couches** : aucun module du noyau n'importe le réseau hors du
-  client REST, et aucun ne mentionne le SDK.
+  client REST, et aucun ne mentionne le SDK ;
+- l'**énumération des `acl_status`**, dérivée du code et non recopiée — y compris la
+  liste qui figure plus haut dans ce README, le nombre qu'il annonce et sa machine à
+  états, tous trois comparés à `ACL_STATUSES`.
 
-Ce dernier test n'est pas décoratif : sans lui, la règle d'import n'est qu'une intention
-en commentaire, et il suffit d'un import ajouté à la va-vite pour que la matrice de
-fusion cesse d'être éprouvable sur une machine sans instance.
+Ce dernier point mérite sa précision, parce qu'une garantie mal bornée coûte plus qu'elle
+ne rapporte. `tests/test_statuses.py` lit l'arbre syntaxique du noyau et range **toute**
+construction touchant un statut dans l'une de trois catégories : forme canonique (le
+statut est un littéral, il est collecté), propagation reconnue (la valeur est un statut né
+ailleurs), ou **opaque**. Une construction opaque **fait échouer la suite** en nommant le
+module, la ligne et le fragment de source — elle n'est jamais ignorée. C'est ce qui
+distingue ce contrôle de sa première version, qui reconnaissait deux formes d'écriture et
+laissait passer les autres en silence.
+
+Sa portée s'arrête où s'arrête la lecture d'une source : le contrôle ne voit ni les
+modules hors de la liste qu'il balaie, ni un statut fabriqué à l'exécution (`exec`,
+décorateur réécrivant un attribut), ni la valeur réelle derrière une propagation
+`<expr>.status`, dont il ne remonte pas l'origine. Les dérogations sont déclarées une à
+une, justifiées, et une dérogation devenue sans objet fait elle aussi échouer la suite.
+
+L'avant-dernier point n'est pas décoratif non plus : sans lui, la règle d'import n'est
+qu'une intention en commentaire, et il suffit d'un import ajouté à la va-vite pour que la
+matrice de fusion cesse d'être éprouvable sur une machine sans instance.
 
 ### Environnement d'intégration
 
