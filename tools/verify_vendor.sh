@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# Verifie que `bin/lib/` correspond exactement a son manifeste d'empreintes.
-# Sortie non nulle en cas de divergence.
+# Checks that `bin/lib/` matches its checksum manifest exactly.
+# Non-zero exit status on divergence.
 #
-# Usage, depuis la racine du depot :
-#     sh tools/verify_vendor.sh [chemin/vers/python]
+# Usage, from the repository root:
+#     sh tools/verify_vendor.sh [path/to/python]
 
 set -eu
 

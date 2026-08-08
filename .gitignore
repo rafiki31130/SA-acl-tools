@@ -5,11 +5,11 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Override de la table de correspondance : cree par l'exploitant, jamais livre (D-5).
+# Mapping table override: created by the operator, never shipped (D-5).
 lookups/acl_endpoint_map_override.csv
 
-# Configuration locale d'instance (verify_ssl, index de journal, ...).
+# Per-instance local configuration (verify_ssl, journal index, ...).
 local/
 
-# Journaux produits a l'execution.
+# Logs produced at run time.
 *.log

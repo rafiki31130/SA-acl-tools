@@ -1,50 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Re-validation de la table de correspondance sur le socle cible (§6.5).
+"""Re-validation of the mapping table on the target platform (spec section 6.5).
 
-La table livree dans `bin/acl_endpoint_map.json` a ete etablie empiriquement sur une
-seule version de Splunk Enterprise. Elle n'est **pas** presumee valable ailleurs :
-l'execution de cette procedure sur le socle cible est un **prerequis a tout usage
-reel** de `editacl`.
+The table shipped in `bin/acl_endpoint_map.json` was established empirically on a
+single version of Splunk Enterprise. It is **not** presumed valid anywhere else:
+running this procedure on the target platform is a **prerequisite to any real use**
+of `editacl`.
 
-La procedure :
+The procedure:
 
-  1. enumere les `eai:type` distincts effectivement presents sur le socle — reunion de
-     ce qu'emet le handler d'agregation `admin/directory` et de ce qu'emettent les
-     endpoints natifs de la table ;
-  2. les confronte a la table livree (override compris) ;
-  3. produit les trois listes exigees par le cahier des charges :
-       A. correspondances **confirmees par un GET reel** sur un objet temoin,
-       B. correspondances de la table **introuvables sur le socle**,
-       C. types presents sur le socle et **absents de la table**.
+  1. enumerates the distinct `eai:type` values actually present on the platform: the
+     union of what the `admin/directory` aggregation handler emits and of what the
+     native endpoints of the table emit;
+  2. confronts them with the shipped table (override included);
+  3. produces the three lists required by the specification:
+       A. mappings **confirmed by a real GET** on a witness object,
+       B. mappings of the table **not found on the platform**,
+       C. types present on the platform and **absent from the table**.
 
-  4. controle en supplement la coherence entre `bin/acl_endpoint_map.json` (lu par le
-     code Python) et `lookups/acl_object_families.csv` (lu par la macro d'inventaire,
-     SPL ne sachant pas lire de JSON). Les deux fichiers portent la meme information
-     sous deux formes ; une divergence rendrait l'inventaire et la resolution
-     incoherents.
+  4. additionally checks the consistency between `bin/acl_endpoint_map.json` (read by
+     the Python code) and `lookups/acl_object_families.csv` (read by the inventory
+     macro, SPL being unable to read JSON). Both files carry the same information in
+     two forms; a divergence would make the inventory and the resolution
+     inconsistent.
 
-La liste C se traite par le fichier d'override `lookups/acl_endpoint_map_override.csv`,
-sans modification du code. La liste B est informative : une correspondance sans objet
-temoin sur le socle n'est pas fausse, elle est seulement invalidable ici.
+List C is handled through the override file `lookups/acl_endpoint_map_override.csv`,
+without any code change. List B is informative: a mapping with no witness object on
+the platform is not wrong, it simply cannot be validated here.
 
-Pourquoi un script Python et non une recherche SPL : la construction de l'URI d'un
-objet obeit a une regle d'encodage unique et non evidente, implementee une seule fois
-dans `acltools.endpoint`. La reecrire en SPL creerait une seconde implementation qui
-divergerait — exactement le defaut que la regle du point d'injection unique interdit.
-Ce script **reutilise** `acltools.mapping.load_mapping` (donc `Mapping.coverage()`) et
-`acltools.endpoint.build_object_path` ; il ne reimplemente rien.
+Why a Python script and not an SPL search: building the URI of an object obeys a
+single, non-obvious encoding rule, implemented exactly once in `acltools.endpoint`.
+Rewriting it in SPL would create a second implementation that would diverge, which is
+exactly the flaw the single injection point rule forbids. This script **reuses**
+`acltools.mapping.load_mapping` (hence `Mapping.coverage()`) and
+`acltools.endpoint.build_object_path`; it reimplements nothing.
 
-Le mot de passe est lu sur la PREMIERE ligne de stdin : jamais en argv, jamais ecrit
-sur disque, jamais imprime.
+The password is read from the FIRST line of stdin: never in argv, never written to
+disk, never printed.
 
-Usage, depuis la racine du depot ou de l'app installee :
+Usage, from the root of the repository or of the installed app:
 
-    <commande qui fournit le mot de passe> | python3 tools/revalidate_mapping.py \\
+    <command that supplies the password> | python3 tools/revalidate_mapping.py \\
         [--user admin] [--splunkd-uri https://127.0.0.1:8089] [--insecure]
 
-Code de retour : 0 si la liste C est vide, 1 sinon (des types du socle ne sont pas
-resolus par la table : l'override doit etre complete avant tout usage reel).
+Exit code: 0 if list C is empty, 1 otherwise (some types of the platform are not
+resolved by the table: the override must be completed before any real use).
 """
 
 import argparse
@@ -79,7 +79,7 @@ class Rest(object):
         self._ctx = context
 
     def get(self, path):
-        """Renvoie `(code_http, document)`. `document` vaut `{}` sur echec."""
+        """Returns `(http_code, document)`. `document` is `{}` on failure."""
         sep = "&" if "?" in path else "?"
         url = self._base + path + sep + "output_mode=json"
         req = urllib.request.Request(url, method="GET")
@@ -90,7 +90,7 @@ class Rest(object):
             code = resp.status
         except urllib.error.HTTPError as exc:
             return exc.code, {}
-        except Exception:  # noqa: BLE001 — un socle injoignable n'est pas une exception
+        except Exception:  # noqa: BLE001 - an unreachable platform is not an exception
             return 0, {}
         try:
             return code, json.loads(body)
@@ -103,7 +103,7 @@ def entries(doc):
 
 
 def read_families_csv(path):
-    """`lookups/acl_object_families.csv` -> {famille: handler_path}."""
+    """`lookups/acl_object_families.csv` -> {family: handler_path}."""
     out = {}
     if not os.path.exists(path):
         return out
@@ -117,12 +117,12 @@ def read_families_csv(path):
 
 
 def platform_types(rest, mapping):
-    """`eai:type` distincts reellement emis par le socle.
+    """Distinct `eai:type` values really emitted by the platform.
 
-    Deux sources, unionnees : le handler d'agregation, et les endpoints natifs de la
-    table. La seconde est indispensable — la majorite des endpoints natifs n'emet
-    aucun `eai:type`, mais quelques-uns en emettent un que `admin/directory` ne montre
-    pas (les modeles de donnees, par exemple, en sont totalement absents).
+    Two sources, unioned: the aggregation handler, and the native endpoints of the
+    table. The second one is indispensable: most native endpoints emit no `eai:type`
+    at all, but a few emit one that `admin/directory` does not show (data models, for
+    instance, are entirely absent from it).
     """
     found = {}
     code, doc = rest.get("/servicesNS/-/-/%s?count=0" % DIRECTORY)
@@ -144,10 +144,10 @@ def platform_types(rest, mapping):
 
 
 def witness(rest, handler):
-    """Premier objet listable par ce handler, avec son namespace reel.
+    """First object listable by this handler, with its real namespace.
 
-    Le namespace est lu dans le bloc `acl` de l'entree, jamais suppose : un objet
-    `sharing=user` n'est adressable que dans le namespace de SON proprietaire.
+    The namespace is read from the `acl` block of the entry, never assumed: an object
+    with `sharing=user` is only addressable in the namespace of ITS owner.
     """
     code, doc = rest.get("/servicesNS/-/-/%s?count=1" % handler)
     if code != 200:
@@ -165,17 +165,17 @@ def witness(rest, handler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--user", default="admin",
-                        help="compte utilise pour les appels REST (defaut : admin)")
+                        help="account used for the REST calls (default: admin)")
     parser.add_argument("--splunkd-uri", default="https://127.0.0.1:8089",
-                        help="URI de splunkd (defaut : boucle locale)")
+                        help="splunkd URI (default: local loopback)")
     parser.add_argument("--insecure", action="store_true",
-                        help="ne pas verifier le certificat de splunkd "
-                             "(socle a certificat auto-signe)")
+                        help="do not verify the splunkd certificate "
+                             "(platform with a self-signed certificate)")
     args = parser.parse_args()
 
     password = sys.stdin.readline().rstrip("\r\n")
     if not password:
-        sys.stderr.write("mot de passe attendu sur la premiere ligne de stdin\n")
+        sys.stderr.write("password expected on the first line of stdin\n")
         return 2
     auth = "Basic " + base64.b64encode(
         ("%s:%s" % (args.user, password)).encode("utf-8")).decode("ascii")
@@ -186,78 +186,78 @@ def main():
     mapping = load_mapping(JSON_PATH, OVERRIDE_PATH)
     coverage = mapping.coverage()
 
-    print("== table livree ==")
-    print("  entrees effectives     : %d" % coverage["total"])
-    print("  issues du JSON         : %d" % coverage["from_json"])
-    print("  issues de l'override   : %d" % coverage["from_override"])
+    print("== shipped table ==")
+    print("  effective entries      : %d" % coverage["total"])
+    print("  coming from the JSON   : %d" % coverage["from_json"])
+    print("  coming from override   : %d" % coverage["from_override"])
     if coverage["overridden"]:
-        print("  cles surchargees       : %s" % ", ".join(coverage["overridden"]))
+        print("  overridden keys        : %s" % ", ".join(coverage["overridden"]))
     for key, value, source in coverage["rejected"]:
-        print("  ECARTEE (%s) : %r -> %r" % (source, key, value))
+        print("  DISCARDED (%s) : %r -> %r" % (source, key, value))
 
     present = platform_types(rest, mapping)
-    print("\n== socle ==")
-    print("  types distincts emis   : %d" % len(present))
+    print("\n== platform ==")
+    print("  distinct types emitted : %d" % len(present))
 
-    confirmees, introuvables = [], []
+    confirmed, not_found = [], []
     for eai_type in coverage["types"]:
         handler = mapping.resolve(eai_type)
         obj, code = witness(rest, handler)
         if obj is None:
-            introuvables.append((eai_type, handler, "aucun objet listable (HTTP %s)" % code))
+            not_found.append((eai_type, handler, "no listable object (HTTP %s)" % code))
             continue
         path = build_object_path(obj["owner"], obj["app"], handler, obj["title"])
         code_obj, _ = rest.get(path)
         code_acl, _ = rest.get(path + "/acl")
         if code_obj == 200 and code_acl == 200:
-            confirmees.append((eai_type, handler, obj["app"], obj["title"]))
+            confirmed.append((eai_type, handler, obj["app"], obj["title"]))
         else:
-            introuvables.append(
+            not_found.append(
                 (eai_type, handler, "GET=%s GET/acl=%s" % (code_obj, code_acl)))
 
-    absents = sorted(t for t in present if mapping.resolve(t) is None)
+    absent = sorted(t for t in present if mapping.resolve(t) is None)
 
-    print("\n== A. correspondances confirmees par un GET reel (%d) ==" % len(confirmees))
-    for eai_type, handler, app, title in confirmees:
-        print("  %-22s -> %-32s  temoin : %s / %s" % (eai_type, handler, app, title))
+    print("\n== A. mappings confirmed by a real GET (%d) ==" % len(confirmed))
+    for eai_type, handler, app, title in confirmed:
+        print("  %-22s -> %-32s  witness: %s / %s" % (eai_type, handler, app, title))
 
-    print("\n== B. correspondances de la table introuvables sur le socle (%d) =="
-          % len(introuvables))
-    for eai_type, handler, why in introuvables:
+    print("\n== B. mappings of the table not found on the platform (%d) =="
+          % len(not_found))
+    for eai_type, handler, why in not_found:
         print("  %-22s -> %-32s  %s" % (eai_type, handler, why))
-    if introuvables:
-        print("  (informatif : une correspondance sans objet temoin n'est pas fausse,")
-        print("   elle est seulement invalidable sur ce socle)")
+    if not_found:
+        print("  (informational: a mapping with no witness object is not wrong,")
+        print("   it simply cannot be validated on this platform)")
 
-    print("\n== C. types presents sur le socle et absents de la table (%d) =="
-          % len(absents))
-    for eai_type in absents:
-        print("  %-22s  emis par : %s" % (eai_type, ", ".join(sorted(present[eai_type]))))
-    if absents:
-        print("  -> a declarer dans lookups/acl_endpoint_map_override.csv AVANT tout")
-        print("     usage reel : un type absent de la table produit acl_status=rejected.")
+    print("\n== C. types present on the platform and absent from the table (%d) =="
+          % len(absent))
+    for eai_type in absent:
+        print("  %-22s  emitted by: %s" % (eai_type, ", ".join(sorted(present[eai_type]))))
+    if absent:
+        print("  -> to be declared in lookups/acl_endpoint_map_override.csv BEFORE any")
+        print("     real use: a type absent from the table yields acl_status=rejected.")
 
     families = read_families_csv(FAMILIES_PATH)
     handlers_json = {mapping.resolve(t) for t in coverage["types"]}
     handlers_csv = set(families.values())
-    manquants = sorted(handlers_json - handlers_csv)
-    surnumeraires = sorted(handlers_csv - handlers_json)
-    mal_cles = sorted(f for f, h in families.items() if mapping.resolve(f) != h)
+    missing = sorted(handlers_json - handlers_csv)
+    extra = sorted(handlers_csv - handlers_json)
+    mismatched = sorted(f for f, h in families.items() if mapping.resolve(f) != h)
 
-    print("\n== D. coherence table JSON <-> lookup des familles ==")
-    print("  handlers de la table   : %d" % len(handlers_json))
-    print("  handlers du lookup     : %d" % len(handlers_csv))
-    for handler in manquants:
-        print("  ABSENT DU LOOKUP  : %s (l'inventaire ne verra pas cette famille)" % handler)
-    for handler in surnumeraires:
-        print("  ABSENT DE LA TABLE: %s (inventorie mais non resolvable)" % handler)
-    for family in mal_cles:
-        print("  INCOHERENT        : famille %r -> %r cote lookup, %r cote table"
+    print("\n== D. consistency of the JSON table <-> the families lookup ==")
+    print("  handlers in the table  : %d" % len(handlers_json))
+    print("  handlers in the lookup : %d" % len(handlers_csv))
+    for handler in missing:
+        print("  ABSENT FROM LOOKUP: %s (the inventory will not see this family)" % handler)
+    for handler in extra:
+        print("  ABSENT FROM TABLE : %s (inventoried but not resolvable)" % handler)
+    for family in mismatched:
+        print("  INCONSISTENT      : family %r -> %r in the lookup, %r in the table"
               % (family, families[family], mapping.resolve(family)))
-    if not (manquants or surnumeraires or mal_cles):
-        print("  coherents")
+    if not (missing or extra or mismatched):
+        print("  consistent")
 
-    return 1 if absents else 0
+    return 1 if absent else 0
 
 
 if __name__ == "__main__":

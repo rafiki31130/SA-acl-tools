@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Manifeste d'empreintes SHA-256 de `bin/lib/`.
+"""SHA-256 checksum manifest of `bin/lib/`.
 
-`write` (re)genere `bin/lib/MANIFEST.sha256`, `check` recalcule et compare. Sortie non
-nulle en cas de divergence : c'est ce qui rend detectable toute modification de
-`bin/lib/` hors `tools/vendor.sh`.
+`write` (re)generates `bin/lib/MANIFEST.sha256`, `check` recomputes and compares.
+Non-zero exit status on divergence: this is what makes any modification of `bin/lib/`
+outside `tools/vendor.sh` detectable.
 
-Ecrit en Python plutot qu'en shell pour rester utilisable sur les postes de
-developpement sans `sha256sum` (Windows, macOS ancien) — la reproductibilite de la
-verification compte autant que celle de l'installation.
+Written in Python rather than in shell so that it stays usable on development
+machines without `sha256sum` (Windows, older macOS): the reproducibility of the
+verification matters as much as that of the installation.
 """
 
 import hashlib
@@ -18,27 +18,27 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "bin", "lib")
 MANIFEST = os.path.join(LIB, "MANIFEST.sha256")
 
-#: Fichiers non vendorises, exclus du manifeste : ils sont ecrits a la main et
-#: versionnes, pas produits par pip.
+#: Files that are not vendored, excluded from the manifest: they are hand-written and
+#: versioned, not produced by pip.
 EXCLUDED = {"MANIFEST.sha256", "VENDOR.md"}
 
-#: Repertoires d'artefacts de compilation, exclus du parcours.
+#: Build artifact directories, excluded from the walk.
 EXCLUDED_DIRS = {"__pycache__"}
 
-#: Suffixes d'artefacts de compilation, exclus du parcours.
+#: Build artifact suffixes, excluded from the walk.
 EXCLUDED_SUFFIXES = (".pyc", ".pyo")
 
 
 def _is_build_artifact(relative):
-    """Vrai pour un artefact produit par l'interprete, jamais par `pip`.
+    """True for an artifact produced by the interpreter, never by `pip`.
 
-    Le manifeste decrit ce que `tools/vendor.sh` installe ; l'elagage y retire deja
-    `__pycache__` et `*.pyc`. Le parcours de verification doit appliquer la meme
-    exclusion, faute de quoi **le simple fait d'importer le SDK vendorise met le
-    verificateur en echec** — un import cree les `.pyc` sous `bin/lib/`, que le
-    parcours compte alors comme des fichiers non declares. Un controle d'integrite mis
-    en echec par l'usage de ce qu'il controle n'est pas exploitable, et il oriente vers
-    une reconstruction complete pour un faux positif.
+    The manifest describes what `tools/vendor.sh` installs; its pruning step already
+    removes `__pycache__` and `*.pyc`. The verification walk must apply the same
+    exclusion, failing which **merely importing the vendored SDK makes the verifier
+    fail**: an import creates the `.pyc` files under `bin/lib/`, which the walk then
+    counts as undeclared files. An integrity check that is broken by the very use of
+    what it checks is not workable, and it directs the reader toward a full rebuild
+    for a false positive.
     """
     segments = relative.split("/")
     if any(segment in EXCLUDED_DIRS for segment in segments[:-1]):
@@ -66,47 +66,47 @@ def _entries():
 
 
 def write():
-    lignes = ["%s  %s" % (digest, relative) for relative, digest in _entries()]
+    lines = ["%s  %s" % (digest, relative) for relative, digest in _entries()]
     with open(MANIFEST, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(lignes) + ("\n" if lignes else ""))
-    print("%d fichiers empreintes dans %s" % (len(lignes), MANIFEST))
+        handle.write("\n".join(lines) + ("\n" if lines else ""))
+    print("%d files hashed into %s" % (len(lines), MANIFEST))
     return 0
 
 
 def check():
     if not os.path.exists(MANIFEST):
-        print("ECHEC : %s absent" % MANIFEST, file=sys.stderr)
+        print("FAILED: %s is missing" % MANIFEST, file=sys.stderr)
         return 2
-    attendu = {}
+    expected = {}
     with open(MANIFEST, encoding="utf-8") as handle:
-        for ligne in handle:
-            ligne = ligne.strip()
-            if not ligne:
+        for line in handle:
+            line = line.strip()
+            if not line:
                 continue
-            digest, _, relative = ligne.partition("  ")
-            attendu[relative] = digest
-    observe = dict(_entries())
+            digest, _, relative = line.partition("  ")
+            expected[relative] = digest
+    observed = dict(_entries())
 
-    manquants = sorted(set(attendu) - set(observe))
-    ajoutes = sorted(set(observe) - set(attendu))
-    modifies = sorted(
-        f for f in set(attendu) & set(observe) if attendu[f] != observe[f]
+    missing = sorted(set(expected) - set(observed))
+    added = sorted(set(observed) - set(expected))
+    modified = sorted(
+        f for f in set(expected) & set(observed) if expected[f] != observed[f]
     )
 
-    for famille, fichiers in (
-        ("manquant", manquants), ("non declare", ajoutes), ("modifie", modifies)
+    for kind, files in (
+        ("missing", missing), ("undeclared", added), ("modified", modified)
     ):
-        for fichier in fichiers:
-            print("ECHEC [%s] %s" % (famille, fichier), file=sys.stderr)
+        for name in files:
+            print("FAILED [%s] %s" % (kind, name), file=sys.stderr)
 
-    if manquants or ajoutes or modifies:
+    if missing or added or modified:
         print(
-            "ECHEC : bin/lib/ diverge du manifeste. Reconstruire avec "
-            "tools/vendor.sh, ne jamais editer bin/lib/ a la main.",
+            "FAILED: bin/lib/ diverges from the manifest. Rebuild with "
+            "tools/vendor.sh, never edit bin/lib/ by hand.",
             file=sys.stderr,
         )
         return 1
-    print("OK : %d fichiers conformes au manifeste" % len(attendu))
+    print("OK: %d files match the manifest" % len(expected))
     return 0
 
 

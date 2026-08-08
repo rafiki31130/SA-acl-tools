@@ -1,12 +1,12 @@
 * text=auto eol=lf
 
-# Dependances vendorisees : stockees octet pour octet, jamais converties.
-# Toute conversion de fin de ligne invaliderait bin/lib/MANIFEST.sha256 au clone.
+# Vendored dependencies: stored byte for byte, never converted. Any line-ending
+# conversion would invalidate bin/lib/MANIFEST.sha256 at clone time.
 bin/lib/** -text
 
-# Perimetre de l archive deployable (§12.1) : tests/ et tools/ vivent dans le depot,
-# jamais dans l app installee. `git archive` les ecarte donc, ainsi que les fichiers
-# de service du depot. Voir README, section Tests.
+# Scope of the deployable archive (spec section 12.1): tests/ and tools/ live in the
+# repository, never in the installed app. `git archive` therefore leaves them out,
+# along with the repository's own service files. See README, Tests section.
 tests/         export-ignore
 tools/         export-ignore
 .gitattributes export-ignore

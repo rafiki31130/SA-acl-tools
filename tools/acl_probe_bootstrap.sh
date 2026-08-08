@@ -1,21 +1,22 @@
 #!/bin/bash
 # =============================================================================
-# acl_probe_bootstrap.sh — amorcage de l'app jetable `acl_probe`
+# acl_probe_bootstrap.sh - bootstrap of the throwaway `acl_probe` app
 # -----------------------------------------------------------------------------
-# Cree, sur une instance Splunk Enterprise standalone, une app de test portant
-# un objet de chaque grande famille d'objets de connaissance, dans les trois
-# portees de partage (user / app / global), avec et sans permissions explicites.
+# Creates, on a standalone Splunk Enterprise instance, a test app carrying one
+# object of each major knowledge object family, in the three sharing scopes
+# (user / app / global), with and without explicit permissions.
 #
-# Volet 1 (ce script) : objets declares par fichiers de configuration.
-# Volet 2 (acl_probe_bootstrap_rest.py) : objets prives (sharing=user) et objets
-#          a nom special (barre oblique, espace, accent, pourcent), crees par
-#          l'API REST car leur namespace ou leur nom ne se declare pas en .conf.
+# Part 1 (this script): objects declared through configuration files.
+# Part 2 (acl_probe_bootstrap_rest.py): private objects (sharing=user) and
+#        objects with a special name (slash, space, accent, percent), created
+#        through the REST API because neither their namespace nor their name can
+#        be declared in a .conf file.
 #
-# Idempotent : re-executable sans effet de bord (ecriture par template, jamais
-# d'append). Ne contient AUCUN secret. Identifiants volontairement generiques.
+# Idempotent: re-runnable with no side effect (written from a template, never
+# appended to). Contains NO secret. Identifiers deliberately generic.
 #
-# Usage (en root, sur l'instance) :  bash acl_probe_bootstrap.sh
-# Suppression :                      bash acl_probe_bootstrap.sh --remove
+# Usage (as root, on the instance):  bash acl_probe_bootstrap.sh
+# Removal:                           bash acl_probe_bootstrap.sh --remove
 # =============================================================================
 set -euo pipefail
 
@@ -26,7 +27,7 @@ APPDIR="$SPLUNK_HOME/etc/apps/$APP"
 if [ "${1:-}" = "--remove" ]; then
   rm -rf "$APPDIR"
   rm -rf "$SPLUNK_HOME"/etc/users/*/"$APP"
-  echo "removed $APPDIR (+ namespaces utilisateurs) ; redemarrer splunkd pour finaliser"
+  echo "removed $APPDIR (+ user namespaces); restart splunkd to finalize"
   exit 0
 fi
 
@@ -51,13 +52,13 @@ id = acl_probe
 
 [launcher]
 author = acl-probe
-description = App jetable de test des ACL (objets de connaissance temoins)
+description = Throwaway ACL test app (witness knowledge objects)
 version = 1.0.0
 EOF
 
 cat > "$APPDIR/default/authorize.conf" <<'EOF'
-# Capability declaree par l'app : sert a mesurer sa remontee dans
-# GET /services/authentication/current-context une fois attribuee a un role.
+# Capability declared by the app: used to measure how it surfaces in
+# GET /services/authentication/current-context once granted to a role.
 [capability::probe_capability]
 EOF
 
@@ -211,8 +212,8 @@ alpha,1
 beta,2
 EOF
 
-# metadata : pas de stanza [] portant `access`, afin que la majorite des objets
-# reste SANS permissions explicites (cas de test du §10.1 du cahier des charges).
+# metadata: no [] stanza carrying `access`, so that most of the objects stay
+# WITHOUT explicit permissions (test case from section 10.1 of the specification).
 cat > "$APPDIR/metadata/default.meta" <<'EOF'
 []
 export = none
@@ -232,4 +233,4 @@ access = read : [ * ], write : [ admin ]
 EOF
 
 chown -R splunk:splunk "$APPDIR"
-echo "OK: $APPDIR ecrit"
+echo "OK: $APPDIR written"

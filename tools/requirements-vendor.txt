@@ -1,17 +1,18 @@
-# Dependance vendorisee sous `bin/lib/` — une seule, version figee au patch.
+# Vendored dependency under `bin/lib/` - exactly one, pinned down to the patch level.
 #
-# Le noyau `acltools` n'a AUCUNE dependance tierce : les appels REST sont ecrits en
-# HTTP brut sur `urllib` + `ssl` de la bibliotheque standard, et les tests reposent sur
-# `unittest`. Cette ligne est donc la totalite de la surface de licence, d'audit et de
-# CVE que l'app traine.
+# The `acltools` core has NO third-party dependency: the REST calls are written as raw
+# HTTP on top of `urllib` + `ssl` from the standard library, and the tests rely on
+# `unittest`. This single line is therefore the whole license, audit and CVE surface
+# the app carries.
 #
-# Toute dependance supplementaire est un arbitrage a remonter : dans un depot public,
-# chaque paquet vendorise est une surface que l'app porte sans mecanisme de mise a jour.
+# Any additional dependency is a trade-off that must be escalated: in a public
+# repository, every vendored package is a surface the app carries with no update
+# mechanism.
 #
-# La version 3.x du SDK exige Python >= 3.13 et n'est donc pas installable sur
-# l'interpreteur livre par Splunk Enterprise 9.x. La 2.1.1 est la derniere serie
-# compatible.
+# Version 3.x of the SDK requires Python >= 3.13 and is therefore not installable on
+# the interpreter shipped with Splunk Enterprise 9.x. The 2.1.1 series is the last
+# compatible one.
 #
-# Licence amont : Apache-2.0 (identique a celle de cette app).
+# Upstream license: Apache-2.0 (the same as this app's).
 
 splunk-sdk==2.1.1 --hash=sha256:46300d52f09e0aed7e5962ce2ba08ef54421ffb3a538c6af6164dcbf9f075faa

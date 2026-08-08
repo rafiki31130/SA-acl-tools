@@ -1,17 +1,16 @@
 #!/usr/bin/env sh
-# Reconstruit `bin/lib/` a l'identique depuis `tools/requirements-vendor.txt`.
+# Rebuilds `bin/lib/` identically from `tools/requirements-vendor.txt`.
 #
-# Un repertoire `bin/lib/` que personne ne sait reconstruire a l'identique est un
-# binaire non auditable au milieu d'un depot public. Ce script, le manifeste
-# d'empreintes et `tools/verify_vendor.sh` sont ce qui rend la vendorisation
-# reproductible ET verifiable.
+# A `bin/lib/` directory that nobody knows how to rebuild identically is an
+# unauditable binary in the middle of a public repository. This script, the checksum
+# manifest and `tools/verify_vendor.sh` are what makes the vendoring reproducible AND
+# verifiable.
 #
-# Toute montee de version passe par la modification de `requirements-vendor.txt` puis
-# la reexecution de ce script et de `verify_vendor.sh`. JAMAIS par une edition directe
-# dans `bin/lib/`.
+# Every version bump goes through editing `requirements-vendor.txt`, then re-running
+# this script and `verify_vendor.sh`. NEVER through a direct edit inside `bin/lib/`.
 #
-# Usage, depuis la racine du depot :
-#     sh tools/vendor.sh [chemin/vers/python]
+# Usage, from the repository root:
+#     sh tools/vendor.sh [path/to/python]
 
 set -eu
 
@@ -20,15 +19,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/bin/lib"
 REQ="$ROOT/tools/requirements-vendor.txt"
 
-echo "== reconstruction de $LIB"
+echo "== rebuilding $LIB"
 rm -rf "$LIB"
 mkdir -p "$LIB"
 
-# `--require-hashes` : le contenu installe est exactement celui dont l'empreinte est
-# figee dans le fichier de requirements. `--no-deps` : aucune dependance transitive
-# n'entre sans decision explicite. `--no-compile` : des .pyc compiles par un
-# interpreteur different de celui de la plateforme cible sont au mieux du bruit de
-# diff, au pire une source de comportement divergent.
+# `--require-hashes`: the installed content is exactly the one whose checksum is
+# frozen in the requirements file. `--no-deps`: no transitive dependency gets in
+# without an explicit decision. `--no-compile`: .pyc files compiled by an interpreter
+# other than the target platform's are at best diff noise, at worst a source of
+# divergent behavior.
 "$PYTHON" -m pip install \
     --no-deps \
     --no-compile \
@@ -36,7 +35,7 @@ mkdir -p "$LIB"
     --target "$LIB" \
     -r "$REQ"
 
-echo "== elagage"
+echo "== pruning"
 find "$LIB" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$LIB" -name '*.pyc' -delete 2>/dev/null || true
 find "$LIB" -name '*.pyo' -delete 2>/dev/null || true
@@ -44,7 +43,7 @@ find "$LIB" -name 'RECORD' -path '*.dist-info*' -delete 2>/dev/null || true
 rm -rf "$LIB"/splunklib/tests "$LIB"/splunklib/examples 2>/dev/null || true
 rm -rf "$LIB"/bin "$LIB"/tests "$LIB"/examples 2>/dev/null || true
 
-echo "== manifeste d'empreintes"
+echo "== checksum manifest"
 "$PYTHON" "$ROOT/tools/hash_manifest.py" write
 
-echo "== termine. Verifier avec : sh tools/verify_vendor.sh"
+echo "== done. Verify with: sh tools/verify_vendor.sh"
