@@ -1,19 +1,19 @@
-"""Journal write-ahead (§8).
+"""Write-ahead journal (section 8).
 
-Le journal porte **deux besoins distincts** qu'une ligne unique ne peut satisfaire :
-la persistance de l'etat anterieur **avant** la mutation (jeu de restauration) et la
-trace du resultat **apres** la mutation (controle d'execution). Un champ `phase` les
-discrimine.
+The journal serves **two distinct needs** that a single line cannot satisfy: the
+persistence of the prior state **before** the mutation (the rollback set) and the
+trace of the outcome **after** the mutation (execution control). A `phase` field
+discriminates between them.
 
-La **construction** des enregistrements est pure et separee de l'**ecriture** : c'est
-ce qui permet d'eprouver la conformite au §8.2 et l'alimentation de la macro §8.6 sans
-toucher au disque.
+**Building** the records is pure and separated from **writing** them: that is what
+allows compliance with section 8.2 and the feeding of the section 8.6 macro to be
+exercised without touching the disk.
 
-**Un fichier par `sid`, sans rotation par taille** (D-3). Un handler rotatif partage
-n'est pas sur entre processus : deux executions concurrentes sur le meme membre
-peuvent perdre des lignes au moment d'une rotation. Le journal etant le seul filet de
-securite d'une operation irreversible, une fenetre connue de perte de lignes n'est pas
-acceptable quand le correctif coute un nom de fichier.
+**One file per `sid`, with no size-based rotation** (D-3). A shared rotating handler
+is not safe across processes: two concurrent runs on the same member can lose lines at
+the moment of a rotation. Since the journal is the only safety net of an irreversible
+operation, a known window of line loss is not acceptable when the fix costs a file
+name.
 """
 
 import json
@@ -23,15 +23,15 @@ import re
 from .errors import FatalJournalError
 from .normalize import serialize_roles
 
-#: Nom de fichier du journal. La stanza de monitor du §8.3 est un glob correspondant.
+#: File name of the journal. The monitor stanza of section 8.3 is a matching glob.
 JOURNAL_BASENAME = "editacl_journal_%s.log"
 
-#: Caracteres admis dans un `sid` utilise comme composant de nom de fichier.
+#: Characters allowed in a `sid` used as a file name component.
 _SAFE_SID = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def journal_filename(sid):
-    """Nom de fichier du journal d'une execution, `sid` assaini."""
+    """File name of a run's journal, with a sanitized `sid`."""
     token = _SAFE_SID.sub("_", str(sid or "unknown"))
     return JOURNAL_BASENAME % (token or "unknown")
 
@@ -41,12 +41,12 @@ def journal_path(log_dir, sid):
 
 
 def _state_fields(prefix, state):
-    """Les **quatre** attributs d'un etat, prefixes `before_` ou `after_` (§8.2).
+    """The **four** attributes of a state, prefixed `before_` or `after_` (8.2).
 
-    `owner` y figure depuis D-22 : c'est desormais une valeur cible, et la macro de
-    restauration du §8.6 lit `before_owner` pour reemettre `eai:acl.owner`. Le porter
-    dans le bloc d'etat plutot qu'en champ commun est ce qui donne au journal un
-    `before_owner` **et** un `after_owner` distincts quand la propriete change.
+    `owner` is among them since D-22: it is now a target value, and the rollback macro
+    of section 8.6 reads `before_owner` to re-emit `eai:acl.owner`. Carrying it in the
+    state block rather than as a common field is what gives the journal a distinct
+    `before_owner` **and** `after_owner` when ownership changes.
     """
     return {
         prefix + "_owner": state.owner or "",
@@ -57,14 +57,14 @@ def _state_fields(prefix, state):
 
 
 def _common_record(ctx, result, phase):
-    """Champs communs aux deux phases (§8.2).
+    """Fields common to both phases (section 8.2).
 
-    Contraintes de format appliquees sans exception : pas de deux-points dans un nom de
-    champ, valeur vide serialisee en chaine vide et jamais `null` (`null` est reserve a
+    Format constraints applied without exception: no colon in a field name, an empty
+    value serialized as the empty string and never as `null` (`null` is reserved for
     `error`).
     """
     return {
-        "ts": "",  # renseigne par le constructeur appelant
+        "ts": "",  # filled in by the calling builder
         "phase": phase,
         "sid": str(ctx.sid or ""),
         "user": str(ctx.user or ""),
@@ -78,10 +78,10 @@ def _common_record(ctx, result, phase):
 
 
 def build_intent_record(ctx, result, ts):
-    """Ligne `phase=intent` : etat anterieur complet et charge utile prevue.
+    """`phase=intent` line: full prior state and intended payload.
 
-    Le champ `title` est journalise **non encode** : la restauration le reinjecte tel
-    quel, et un titre deja encode serait re-encode.
+    The `title` field is journaled **unencoded**: the rollback re-injects it as is, and
+    an already encoded title would be encoded twice.
     """
     record = _common_record(ctx, result, "intent")
     record["ts"] = ts
@@ -91,11 +91,11 @@ def build_intent_record(ctx, result, ts):
 
 
 def build_outcome_record(ctx, result, ts):
-    """Ligne `phase=outcome` : statut, code HTTP, erreur.
+    """`phase=outcome` line: status, HTTP code, error.
 
-    Elle porte les six champs `before_*` / `after_*` **si et seulement si** la fusion a
-    ete calculee **et** qu'aucune ligne `intent` ne les porte deja (§8.2). Les statuts
-    issus d'un rejet amont ne les portent pas : ils n'ont pas ete calcules.
+    It carries the six `before_*` / `after_*` fields **if and only if** the merge was
+    computed **and** no `intent` line already carries them (section 8.2). Statuses
+    coming from an upstream rejection do not carry them: they were never computed.
     """
     record = _common_record(ctx, result, "outcome")
     record["ts"] = ts
@@ -111,20 +111,20 @@ def build_outcome_record(ctx, result, ts):
 
 
 def dumps(record):
-    """Une ligne JSON compacte, sans retour a la ligne dans une valeur."""
+    """One compact JSON line, with no newline inside a value."""
     return json.dumps(record, separators=(",", ":"), ensure_ascii=False)
 
 
 class JournalWriter(object):
-    """Implementation du port `JournalPort` sur un fichier local.
+    """Implementation of the `JournalPort` port over a local file.
 
-    `write_intent` garantit la **durabilite** (write + flush + fsync) : c'est la
-    precondition a l'ecriture du §8.4. `write_outcome` se contente d'un flush — le POST
-    a deja eu lieu, il n'y a plus rien a garantir, et un fsync par objet doublerait le
-    cout d'ecriture d'une operation deja serialisee.
+    `write_intent` guarantees **durability** (write + flush + fsync): that is the
+    precondition to the write of section 8.4. `write_outcome` settles for a flush - the
+    POST has already happened, there is nothing left to guarantee, and one fsync per
+    object would double the write cost of an already serialized operation.
 
-    Ni l'un ni l'autre ne leve : l'echec d'ecriture est un fait a consigner, pas une
-    interruption. Seule l'**ouverture** peut etre fatale (§9).
+    Neither of them raises: a write failure is a fact to record, not an interruption.
+    Only **opening** the file can be fatal (section 9).
     """
 
     def __init__(self, path):
@@ -133,7 +133,7 @@ class JournalWriter(object):
             self._handle = open(path, "a", encoding="utf-8", newline="\n")
         except (IOError, OSError) as exc:
             raise FatalJournalError(
-                "journal non ouvrable en ecriture (%s) : %s" % (path, exc)
+                "journal not openable for writing (%s): %s" % (path, exc)
             )
 
     def _write(self, record, sync):

@@ -1,12 +1,12 @@
-"""Normalisation des listes de roles et de la portee de partage (§3.2, §5.5).
+"""Normalization of role lists and of the sharing scope (sections 3.2, 5.5).
 
-Fonctions totales : elles ne levent jamais.
+Total functions: they never raise.
 
-Le filtrage des elements vides n'est pas cosmetique (D-8). Apres un POST portant
-`perms.read=` vide, le GET suivant ne renvoie ni `[]` ni `null` mais `[""]` — une
-liste contenant une chaine vide. Sans ce filtrage, l'etat lu et l'etat fusionne ne
-sont jamais egaux et la detection d'idempotence du §5.5 echoue sur **tout** objet a
-permission vide.
+Filtering out empty items is not cosmetic (D-8). After a POST carrying an empty
+`perms.read=`, the following GET returns neither `[]` nor `null` but `[""]` - a list
+holding one empty string. Without that filtering, the state read and the merged state
+are never equal and the idempotence detection of section 5.5 fails on **every** object
+with an empty permission.
 """
 
 from .model import AclState
@@ -15,7 +15,7 @@ VALID_SHARING = frozenset({"user", "app", "global"})
 
 
 def _flatten(raw):
-    """Aplatit un champ brut en une liste de jetons textuels, sans filtrage."""
+    """Flatten a raw field into a list of text tokens, without filtering."""
     if raw is None:
         return []
     if isinstance(raw, (list, tuple, set, frozenset)):
@@ -29,10 +29,10 @@ def _flatten(raw):
 
 
 def normalize_roles(raw):
-    """Normalise un champ de permissions en tuple trie, dedoublonne, sans vide.
+    """Normalize a permission field into a sorted, deduplicated tuple, no empties.
 
-    Accepte multivalue, chaine separee par virgules, `None`, et toute combinaison.
-    `null`, `[]`, `[""]` et `["", ""]` convergent tous vers le tuple vide.
+    Accepts a multivalue, a comma-separated string, `None`, and any combination.
+    `null`, `[]`, `[""]` and `["", ""]` all converge on the empty tuple.
     """
     tokens = set()
     for part in _flatten(raw):
@@ -43,15 +43,15 @@ def normalize_roles(raw):
 
 
 def serialize_roles(roles):
-    """Serialise un tuple de roles pour le corps du POST.
+    """Serialize a tuple of roles for the POST body.
 
-    Un tuple vide donne la chaine vide, jamais `*` (§3.3).
+    An empty tuple yields the empty string, never `*` (section 3.3).
     """
     return ",".join(roles)
 
 
 def normalize_sharing(raw):
-    """Normalise une portee de partage. Renvoie `None` si le champ est vide."""
+    """Normalize a sharing scope. Returns `None` when the field is empty."""
     for part in _flatten(raw):
         token = part.strip()
         if token:
@@ -60,10 +60,11 @@ def normalize_sharing(raw):
 
 
 def is_field_empty(raw):
-    """Vrai pour `None`, `""`, `[]`, et toute valeur dont tous les jetons sont vides.
+    """True for `None`, `""`, `[]`, and any value whose tokens are all empty.
 
-    Cote permissions, « champ absent », « champ nul » et « champ vide » sont le meme
-    cas (§3.3) : cette fonction est le point ou cette equivalence est realisee.
+    On the permissions side, "field absent", "field null" and "field empty" are the
+    same case (section 3.3): this function is the point where that equivalence is
+    realized.
     """
     for part in _flatten(raw):
         if part.strip():
@@ -87,12 +88,12 @@ def _as_bool(raw, default=True):
 
 
 def parse_acl_state(entry_acl):
-    """Construit un `AclState` a partir du bloc `entry[0].acl` de la reponse du GET.
+    """Build an `AclState` from the `entry[0].acl` block of the GET response.
 
-    Le parametre `f=eai:acl*` du §5.3 filtre `content` et laisse `acl` intact ; c'est
-    `acl` qui fait autorite (§5.3). Le parsing est tolerant a `perms` absent (objet
-    sans permission explicite, cas §10.1) et a `perms.read` / `perms.write` recus
-    indifferemment en liste ou en chaine.
+    The `f=eai:acl*` parameter of section 5.3 filters `content` and leaves `acl`
+    untouched; `acl` is the authority (section 5.3). The parsing tolerates a missing
+    `perms` (object with no explicit permission, case of section 10.1) and accepts
+    `perms.read` / `perms.write` received either as a list or as a string.
     """
     entry_acl = entry_acl or {}
     perms = entry_acl.get("perms") or {}

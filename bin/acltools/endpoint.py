@@ -1,13 +1,13 @@
-"""Resolution et reconstruction de l'URI d'un objet (§5.2).
+"""Resolution and reconstruction of an object URI (section 5.2).
 
-Deux voies **complementaires et disjointes**, pas primaire et repli (D-9) :
+Two **complementary and disjoint** routes, not a primary one and a fallback (D-9):
 
-- `id`, exploitable lorsqu'il provient d'un endpoint natif ;
-- `eai:type`, resolu par la table de correspondance (§6).
+- `id`, usable when it comes from a native endpoint;
+- `eai:type`, resolved through the mapping table (section 6).
 
-Dans les deux cas l'URI est **reconstruite**, jamais reprise telle quelle : le champ
-`id` natif double-encode la barre oblique mais pas les autres caracteres speciaux, il
-n'est donc pas reutilisable comme URI.
+In both cases the URI is **rebuilt**, never reused as is: the native `id` field
+double-encodes the forward slash but not the other special characters, so it is not
+reusable as a URI.
 """
 
 from urllib.parse import quote, unquote, urlsplit
@@ -15,48 +15,49 @@ from urllib.parse import quote, unquote, urlsplit
 from .errors import EventRejected
 from .mapping import is_valid_handler_path
 
-#: Marqueur de namespace dans un chemin REST Splunk.
+#: Namespace marker in a Splunk REST path.
 NAMESPACE_MARKER = "/servicesNS/"
 
-#: **Contexte d'adressage fixe** (§5.2, D-25). Il ne vient pas de l'evenement, il n'est
-#: pas parametrable, et aucune signature de ce module n'expose de proprietaire.
+#: **Fixed addressing context** (section 5.2, D-25). It does not come from the event,
+#: it is not configurable, and no signature in this module exposes an owner.
 #:
-#: Mesure : un objet partage appartenant a un tiers est atteignable par ce contexte, en
-#: lecture comme en ecriture, aux deux portees de partage, et la reponse du GET porte
-#: **toujours le proprietaire reel** — jamais le contexte d'adressage. L'`id` renvoye
-#: par la plateforme est lui-meme en `nobody`.
+#: Measured: a shared object belonging to a third party is reachable through this
+#: context, for reading as well as for writing, at both sharing scopes, and the GET
+#: response always carries **the real owner** - never the addressing context. The `id`
+#: returned by the platform is itself in `nobody`.
 #:
-#: Ce que ce contexte corrige : la v1 adressait par `eai:acl.owner`, or **un objet prive
-#: masque un objet partage homonyme dans le namespace de son detenteur**. La commande
-#: atteignait alors le prive et ecrivait son ACL — `200` au GET, POST abouti, ligne
-#: rapportee `updated`. Une ecriture silencieuse sur la mauvaise cible.
+#: What this context fixes: v1 addressed objects through `eai:acl.owner`, and **a
+#: private object masks a shared object of the same name in the namespace of its
+#: holder**. The command then reached the private one and wrote its ACL - `200` on the
+#: GET, POST accepted, row reported as `updated`. A silent write on the wrong target.
 #:
-#: Le contexte joker `-` n'est **jamais** employe : il refuse l'ecriture, et sur deux
-#: objets homonymes il renvoie deux entrees sur un chemin mono-objet, ou un client
-#: lisant la premiere choisirait a l'aveugle.
+#: The wildcard context `-` is **never** used: it refuses writes, and on two objects of
+#: the same name it returns two entries on a single-object path, where a client reading
+#: the first one would be choosing blindly.
 FIXED_CONTEXT = "nobody"
 
-#: Handler d'agregation : il sait lister, pas ecrire une ACL. Une source `id` qui y
-#: pointe est ecartee (§5.2). La mesure en lab etablit que 100 % des `id` emis par ce
-#: handler sont auto-referents.
+#: Aggregation handler: it can list, it cannot write an ACL. An `id` source pointing at
+#: it is discarded (section 5.2). The lab measurement establishes that 100 % of the
+#: `id` values emitted by this handler are self-referential.
 DIRECTORY_HANDLER = "admin/directory"
 
-#: Regle d'encodage du segment `title`, tranchee empiriquement (mesure 3) : simple
-#: `%`-encodage du segment entier, `safe=''`, aucun caractere laisse litteral.
-#: La barre oblique n'appelle **aucun** traitement special. Le double encodage est un
-#: piege asymetrique : il fonctionne pour `/` seul et casse espace, accent et pourcent.
+#: Encoding rule for the `title` segment, settled empirically (measurement 3): plain
+#: `%`-encoding of the whole segment, `safe=''`, no character left literal.
+#: The forward slash calls for **no** special treatment. Double encoding is an
+#: asymmetric trap: it works for `/` alone and breaks on space, accented letter and
+#: percent sign.
 TITLE_ENCODING_MODE = "single"
 
 
 def encode_namespace_segment(value):
-    """Encode un segment de namespace (`owner`, `app`)."""
+    """Encode a namespace segment (`owner`, `app`)."""
     return quote(str(value), safe="", encoding="utf-8")
 
 
 def encode_title_segment(title):
-    """Encode le dernier segment de chemin — point d'injection unique de la regle.
+    """Encode the last path segment - single injection point of the rule.
 
-    Aucun autre appelant n'encode un titre, aucun autre module ne connait cette regle.
+    No other caller encodes a title, and no other module knows this rule.
     """
     if TITLE_ENCODING_MODE == "single":
         return quote(str(title), safe="", encoding="utf-8")
@@ -66,18 +67,18 @@ def encode_title_segment(title):
         return quote(
             quote(str(title), safe="", encoding="utf-8"), safe="", encoding="utf-8"
         )
-    raise ValueError("TITLE_ENCODING_MODE inconnu : %r" % (TITLE_ENCODING_MODE,))
+    raise ValueError("unknown TITLE_ENCODING_MODE: %r" % (TITLE_ENCODING_MODE,))
 
 
 def handler_path_from_id(id_value):
-    """Extrait le chemin de handler porte par un `id`, ou `None` s'il est inexploitable.
+    """Extract the handler path carried by an `id`, or `None` if it is unusable.
 
-    L'hote et le port portes par `id` sont **ecartes** : la base est `splunkd_uri`. Un
-    `id` renvoye par un membre de cluster de search heads peut designer un autre hote
-    que celui qui execute la commande.
+    The host and port carried by `id` are **discarded**: the base is `splunkd_uri`. An
+    `id` returned by one member of a search head cluster may designate a host other
+    than the one running the command.
 
-    Le dernier segment — le nom de l'objet — est **jete** : le nom est repris de
-    `title`, jamais de `id`.
+    The last segment - the object name - is **thrown away**: the name is taken from
+    `title`, never from `id`.
     """
     if not id_value:
         return None
@@ -92,7 +93,7 @@ def handler_path_from_id(id_value):
 
     remainder = path[marker + len(NAMESPACE_MARKER):]
     segments = [seg for seg in remainder.split("/") if seg != ""]
-    # <owner> / <app> / <handler_path...> / <nom d'objet>
+    # <owner> / <app> / <handler_path...> / <object name>
     if len(segments) < 4:
         return None
     handler_path = "/".join(segments[2:-1])
@@ -107,24 +108,25 @@ def handler_path_from_id(id_value):
 
 
 def namespace_owner_from_id(id_value):
-    """Proprietaire du namespace porte par `id`, ou `None` si `id` n'en porte pas.
+    """Namespace owner carried by `id`, or `None` if `id` carries none.
 
-    **C'est une donnee emise par la plateforme, pas une convention** (§3.5, D-34, et
-    la propriete 3 du §3.4 dont c'est l'application litterale). Splunkd emet
-    `/servicesNS/nobody/…` pour un objet partage et `/servicesNS/<proprietaire>/…` pour
-    un objet prive : le segment lu ici est celui que la plateforme a inscrit dans l'URI
-    de l'objet, jamais un nom reconstruit ni une regle que nous poserions.
+    **This is data emitted by the platform, not a convention** (section 3.5, D-34, and
+    property 3 of section 3.4, of which this is the literal application). Splunkd emits
+    `/servicesNS/nobody/...` for a shared object and `/servicesNS/<owner>/...` for a
+    private one: the segment read here is the one the platform wrote into the object's
+    URI, never a reconstructed name nor a rule of our own making.
 
-    Le champ `id` est aussi la seule chose dont dispose la commande lorsque la colonne
-    de portee est absente du jeu de resultats. Le repli annonce jusqu'ici — le GET par
-    contexte fixe repond `404` et l'objet ressort en `not_found` — **est faux des qu'un
-    homonyme partage existe** : l'adressage fixe atteint alors le partage, et la
-    commande lit puis ecrirait un objet **autre que celui designe en entree**.
+    The `id` field is also the only thing the command has when the sharing scope column
+    is absent from the result set. The fallback claimed until now - the GET through the
+    fixed context answers `404` and the object comes out as `not_found` - **is false as
+    soon as a shared object of the same name exists**: fixed addressing then reaches
+    the shared one, and the command reads then would write an object **other than the
+    one designated as input**.
 
-    La forme attendue est exactement celle qu'exige `handler_path_from_id` :
-    `<owner>/<app>/<handler_path...>/<nom d'objet>`, soit quatre segments au moins. Un
-    `id` d'une autre forme — `/services/…` sans namespace, chemin tronque — ne porte
-    pas la donnee et rend `None` : la commande n'invente alors rien.
+    The expected shape is exactly the one `handler_path_from_id` requires:
+    `<owner>/<app>/<handler_path...>/<object name>`, that is at least four segments. An
+    `id` of any other shape - `/services/...` without a namespace, a truncated path -
+    does not carry the datum and yields `None`: the command then invents nothing.
     """
     if not id_value:
         return None
@@ -147,21 +149,21 @@ def namespace_owner_from_id(id_value):
 
 
 def is_fixed_context(owner):
-    """Vrai si `owner` designe le contexte d'adressage fixe, donc un objet partage.
+    """True if `owner` designates the fixed addressing context, hence a shared object.
 
-    Point d'injection unique de la comparaison : elle ne peut pas deriver ailleurs, et
-    la casse n'a pas a etre decidee par chaque appelant.
+    Single injection point of the comparison: it cannot drift elsewhere, and the case
+    folding does not have to be decided by each caller.
     """
     return str(owner or "").strip().lower() == FIXED_CONTEXT
 
 
 def resolve_handler_path(id_value, eai_type, mapping):
-    """Resout le chemin de handler. Renvoie `(handler_path, source)`.
+    """Resolve the handler path. Returns `(handler_path, source)`.
 
-    `source` vaut `"id"` ou `"eai:type"`.
+    `source` is either `"id"` or `"eai:type"`.
 
-    Erreurs : `EventRejected("rejected", "unresolved_endpoint:<eai:type>")` quand
-    aucune voie n'aboutit.
+    Errors: `EventRejected("rejected", "unresolved_endpoint:<eai:type>")` when neither
+    route succeeds.
     """
     from_id = handler_path_from_id(id_value)
     if from_id:
@@ -177,19 +179,20 @@ def resolve_handler_path(id_value, eai_type, mapping):
 
 
 def build_object_path(app, handler_path, title):
-    """Construit le chemin de l'objet, **sans** le suffixe `/acl` (§5.2).
+    """Build the object path, **without** the `/acl` suffix (section 5.2).
 
-    Le contexte est `FIXED_CONTEXT`, toujours, et cette fonction **n'a pas de parametre
-    de proprietaire** : l'adressage ne peut donc pas en porter un, quelle que soit
-    l'evolution des appelants. C'est la garantie structurelle de D-25.
+    The context is `FIXED_CONTEXT`, always, and this function **has no owner
+    parameter**: addressing therefore cannot carry one, however the callers evolve.
+    That is the structural guarantee of D-25.
 
-    Le GET du §5.3 porte sur ce chemin, le POST du §5.6 sur ce chemin suffixe `/acl`.
-    C'est aussi la chaine exposee en sortie via `acl_endpoint` et la cle de correlation
-    du journal (§8.5) : elle est calculee une seule fois et jamais recalculee.
+    The GET of section 5.3 bears on this path, the POST of section 5.6 on this path
+    suffixed with `/acl`. It is also the string exposed in the output as `acl_endpoint`
+    and the correlation key of the journal (section 8.5): it is computed once and never
+    recomputed.
 
-    `handler_path` n'est **pas** re-encode : c'est un litteral de la table ou de `id`,
-    deja URL-sur et valide par motif. L'encoder transformerait `saved/searches` en
-    `saved%2Fsearches`.
+    `handler_path` is **not** re-encoded: it is a literal from the mapping table or
+    from `id`, already URL-safe and validated by pattern. Encoding it would turn
+    `saved/searches` into `saved%2Fsearches`.
     """
     return "%s%s/%s/%s/%s" % (
         NAMESPACE_MARKER,
@@ -201,5 +204,5 @@ def build_object_path(app, handler_path, title):
 
 
 def build_object_url(splunkd_uri, object_path):
-    """Prefixe le chemin de l'objet par la base splunkd. Aucun hote ni port en dur."""
+    """Prefix the object path with the splunkd base. No hardcoded host or port."""
     return str(splunkd_uri).rstrip("/") + object_path

@@ -1,25 +1,25 @@
-"""Moteur de fusion (§3.2, §3.3, §5.4) — le coeur du contrat d'entree.
+"""Merge engine (sections 3.2, 3.3, 5.4) - the heart of the input contract.
 
-**La presence de la colonne decide seule de modifier ou de preserver ; la cellule
-decide seulement de la valeur.**
+**The presence of the column alone decides whether to modify or to preserve; the cell
+only decides the value.**
 
-    colonne absente  -> attribut preserve, tel que lu par le GET
-    colonne presente, cellule vide    -> attribut vide
-    colonne presente, cellule valuee  -> valeur appliquee
+    column absent                     -> attribute preserved, as read by the GET
+    column present, cell empty        -> attribute emptied
+    column present, cell valued       -> value applied
 
-Le predicat de presence n'est pas evalue ici : il est fige a la liaison
-(`binding.field_present`) et transporte par `EventInput.present`. Ce module ne consulte
-que `event.has(<attribut>)`, ce qui rend structurellement impossible d'y substituer un
-test de type ou de valeur.
+The presence predicate is not evaluated here: it is frozen at binding time
+(`binding.field_present`) and carried by `EventInput.present`. This module only
+consults `event.has(<attribute>)`, which makes it structurally impossible to
+substitute a type or value test for it.
 
-Deux attributs derogent a la ligne « cellule vide -> attribut vide », et pour la meme
-raison : la valeur vide **n'existe pas** cote plateforme.
+Two attributes depart from the "empty cell -> empty attribute" line, and for the same
+reason: the empty value **does not exist** on the platform side.
 
-- `sharing` : `sharing=` n'est pas une portee valide.
-- `owner`   : un proprietaire vide fait refuser le POST.
+- `sharing`: `sharing=` is not a valid scope.
+- `owner`  : an empty owner makes the POST fail.
 
-Dans les deux cas l'evenement est **rejete**, sans POST, sans incrementer le compteur
-du §4.3.
+In both cases the event is **rejected**, with no POST, and without incrementing the
+counter of section 4.3.
 """
 
 from .errors import EventRejected
@@ -39,15 +39,15 @@ from .normalize import (
     serialize_roles,
 )
 
-#: Proprietaire technique : un objet partage en `user` ne peut pas lui appartenir.
+#: Technical owner: an object shared at `user` scope cannot belong to it.
 NOBODY = "nobody"
 
 
 def _merged_roles(current_value, event, attribute, raw):
-    """Applique la semantique de presence a une liste de roles (§3.2).
+    """Apply the presence semantics to a role list (section 3.2).
 
-    `is_field_empty` n'est consulte **qu'apres** que la presence a tranche : il decide
-    de la valeur, jamais de l'intention.
+    `is_field_empty` is consulted **only after** presence has decided: it settles the
+    value, never the intent.
     """
     if not event.has(attribute):
         return current_value
@@ -55,12 +55,12 @@ def _merged_roles(current_value, event, attribute, raw):
 
 
 def merge(current, event):
-    """Calcule l'etat cible et les refus des rangs 1 a 4 du §5.4.
+    """Compute the target state and the rejections of ranks 1 to 4 of section 5.4.
 
-    Les rangs 5 (`validate_roles`), 6 (`noop`) et 7 (`dryrun`) sont appliques par le
-    pipeline, qui seul dispose du referentiel de roles et des parametres. Les rangs -1
-    (`skipped_private`) et 0 (`skipped_derived`) le sont aussi : ils precedent la
-    fusion et n'ont pas d'etat cible.
+    Ranks 5 (`validate_roles`), 6 (`noop`) and 7 (`dryrun`) are applied by the
+    pipeline, which alone holds the role catalog and the parameters. Ranks -1
+    (`skipped_private`) and 0 (`skipped_derived`) are too: they precede the merge and
+    have no target state.
     """
     perms_read = _merged_roles(
         current.perms_read, event, TARGET_PERMS_READ, event.new_perms_read
@@ -73,9 +73,9 @@ def merge(current, event):
     sharing_rejection = None
     if event.has(TARGET_SHARING):
         if is_field_empty(event.new_sharing):
-            # Une portee vide n'existe pas. La transmettre exposerait soit a un rejet
-            # HTTP opaque, soit a une substitution silencieuse — sur un endpoint qui
-            # opere en remplacement integral (§3.3, D-1).
+            # An empty scope does not exist. Sending it would expose the operation
+            # either to an opaque HTTP rejection or to a silent substitution - on an
+            # endpoint that operates by full replacement (section 3.3, D-1).
             sharing_rejection = EventRejected("rejected", "sharing_empty_not_allowed")
         else:
             candidate = normalize_sharing(event.new_sharing)
@@ -86,15 +86,15 @@ def merge(current, event):
             else:
                 sharing = candidate
 
-    # Le proprietaire est transmis **dans tous les cas** — l'omettre du corps produit un
-    # refus de la plateforme — mais il vient du GET tant que la colonne de `new_owner`
-    # est absente (§5.4).
+    # The owner is sent **in every case** - omitting it from the body makes the
+    # platform refuse - but it comes from the GET as long as the `new_owner` column is
+    # absent (section 5.4).
     owner = current.owner
     owner_rejection = None
     if event.has(TARGET_OWNER):
         if is_field_empty(event.new_owner):
-            # Pendant exact de l'exception `sharing` (§3.3). Le cas se produit sur un lot
-            # heterogene ou certaines lignes ne portent pas le proprietaire.
+            # Exact counterpart of the `sharing` exception (section 3.3). The case
+            # arises on a heterogeneous batch where some rows do not carry the owner.
             owner_rejection = EventRejected("rejected", "owner_empty_not_allowed")
         else:
             owner = _first_token(event.new_owner)
@@ -107,32 +107,32 @@ def merge(current, event):
         can_change_perms=current.can_change_perms,
     )
 
-    # Ordre normatif du §5.4 : il determine quel statut l'emporte quand plusieurs
-    # conditions sont reunies.
+    # Normative order of section 5.4: it determines which status wins when several
+    # conditions hold at once.
     rejection = None
-    if not current.can_change_perms:                                     # rang 1
+    if not current.can_change_perms:                                     # rank 1
         rejection = EventRejected("skipped_immutable", "can_change_perms=0")
-    elif sharing_rejection is not None:                                  # rangs 2 et 3
+    elif sharing_rejection is not None:                                  # ranks 2 and 3
         rejection = sharing_rejection
-    elif owner_rejection is not None:                                    # rang 3bis
+    elif owner_rejection is not None:                                    # rank 3bis
         rejection = owner_rejection
     elif after.sharing == "user" and (after.owner or "").lower() == NOBODY:
-        rejection = EventRejected(                                       # rang 4
+        rejection = EventRejected(                                       # rank 4
             "rejected", "sharing_user_requires_named_owner"
         )
 
     warnings = []
     if after.sharing != current.sharing:
-        # La visibilite de l'objet change pour l'ensemble des consommateurs.
+        # The visibility of the object changes for every consumer.
         warnings.append("sharing_change")
     if after.owner != current.owner:
-        # La reprise de propriete change qui detient l'objet et, sur un objet privee,
-        # qui peut encore l'atteindre.
+        # Taking over ownership changes who holds the object and, on a private object,
+        # who can still reach it.
         warnings.append("owner_change")
 
-    # Les quatre attributs sont **toujours** transmis : l'endpoint `/acl` opere en
-    # remplacement integral, toute omission equivaut a un effacement (§5.4). Une valeur
-    # vide est serialisee `perms.read=` — cle presente, valeur vide, jamais l'omission.
+    # The four attributes are **always** sent: the `/acl` endpoint operates by full
+    # replacement, so any omission amounts to an erasure (section 5.4). An empty value
+    # is serialized as `perms.read=` - key present, value empty, never an omission.
     payload = {
         "owner": after.owner,
         "sharing": after.sharing,
@@ -150,10 +150,11 @@ def merge(current, event):
 
 
 def _first_token(raw):
-    """Premiere valeur non vide d'un champ mono-valeur, en chaine.
+    """First non-empty value of a single-valued field, as a string.
 
-    Un `owner` est mono-valeur. Un pipeline peut neanmoins le presenter en multivalue —
-    c'est le cas apres certains `stats` — et la premiere valeur est alors la seule.
+    An `owner` is single-valued. A pipeline may nevertheless present it as a
+    multivalue - that happens after certain `stats` - and the first value is then the
+    only one.
     """
     if isinstance(raw, (list, tuple, set, frozenset)):
         for item in raw:
@@ -167,18 +168,18 @@ def _first_token(raw):
 
 
 def is_noop(current, target):
-    """Egalite stricte de l'etat fusionne et de l'etat lu, apres normalisation (§5.5).
+    """Strict equality of the merged state and the read state, after normalization.
 
-    Porte sur `owner`, `sharing`, `perms_read` et `perms_write`.
+    Section 5.5. Bears on `owner`, `sharing`, `perms_read` and `perms_write`.
 
-    **`owner` y entre depuis D-22.** La v1 l'excluait au motif qu'il n'etait jamais
-    modifie ; ce motif tombe avec `new_owner`. L'exclure rendrait la reprise de
-    propriete inoperante : un lot ne changeant que le proprietaire ressortirait
-    integralement en `noop`, sans un seul POST, et le §11.2-17bis — aller-retour sur
-    `new_owner` — serait intenable.
+    **`owner` entered it with D-22.** v1 excluded it on the grounds that it was never
+    modified; that ground falls with `new_owner`. Excluding it would make ownership
+    takeover inoperative: a batch changing only the owner would come out entirely as
+    `noop`, without a single POST, and section 11.2-17bis - the `new_owner` round
+    trip - would be untenable.
 
-    La comparaison porte sur les collections triees, pas sur les chaines : une
-    permutation d'ordre des roles est un `noop`.
+    The comparison bears on the sorted collections, not on the strings: a permutation
+    of the role order is a `noop`.
     """
     return (
         current.owner == target.owner
@@ -189,15 +190,15 @@ def is_noop(current, target):
 
 
 def validate_roles(before, after, catalog):
-    """Controle du §5.4 rang 5, restreint aux **roles ajoutes** (D-4).
+    """Control of section 5.4 rank 5, restricted to the **added roles** (D-4).
 
-    Renvoie `(inconnus_ajoutes, morts_conserves)`, deux tuples tries.
+    Returns `(unknown_added, stale_preserved)`, two sorted tuples.
 
-    Un role inconnu deja present sur l'objet et non modifie par l'operation ne bloque
-    pas l'ecriture : il est seulement signale. La lecture inverse rendrait l'outil
-    inutilisable sur exactement la plateforme qu'il vise — bloquer une ecriture au
-    motif qu'un role mort traine dans `perms.read` alors qu'on modifie `perms.write`
-    empeche le correctif sans faire disparaitre la reference morte.
+    An unknown role already present on the object and left untouched by the operation
+    does not block the write: it is only reported. The opposite reading would make the
+    tool unusable on exactly the platform it targets - blocking a write on the grounds
+    that a dead role lingers in `perms.read` while `perms.write` is what is being
+    modified prevents the fix without making the dead reference go away.
     """
     before_read, before_write = set(before.perms_read), set(before.perms_write)
     after_read, after_write = set(after.perms_read), set(after.perms_write)

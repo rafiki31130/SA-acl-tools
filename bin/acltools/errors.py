@@ -1,69 +1,69 @@
-"""Taxonomie d'erreurs — cahier des charges §9.
+"""Error taxonomy - spec section 9.
 
-La frontiere entre les deux classes d'erreur est **structurelle** : elle tient au
-type de l'exception, pas a une convention de nommage.
+The boundary between the two error classes is **structural**: it rests on the type of
+the exception, not on a naming convention.
 
-- Erreur **fatale** -> interruption de la recherche. Liste limitative du §9.
-- Erreur **par evenement** -> `EventRejected`, le pipeline se poursuit.
+- **Fatal** error -> the search is interrupted. Exhaustive list in section 9.
+- **Per-event** error -> `EventRejected`, the pipeline carries on.
 
-Aucune autre exception ne doit traverser le pipeline : toute `Exception` inattendue
-y est capturee et convertie en `EventRejected("error", "internal:...")`.
+No other exception may cross the pipeline: any unexpected `Exception` is caught there
+and converted into `EventRejected("error", "internal:...")`.
 """
 
 
 class AclToolsError(Exception):
-    """Racine de la hierarchie du paquet."""
+    """Root of the package hierarchy."""
 
 
 # --------------------------------------------------------------------------- #
-# Erreurs fatales (§9) — interruption de la recherche
+# Fatal errors (section 9) - the search is interrupted
 # --------------------------------------------------------------------------- #
 
 class FatalError(AclToolsError):
-    """Base des erreurs fatales. Interrompt la recherche."""
+    """Base class of fatal errors. Interrupts the search."""
 
 
 class FatalConfigError(FatalError):
-    """`fields` invalide, `max_objects` non entier positif, `splunkd_uri` ou
-    `session_key` indisponibles."""
+    """Invalid `fields`, `max_objects` not a positive integer, `splunkd_uri` or
+    `session_key` unavailable."""
 
 
 class FatalCapabilityError(FatalError):
-    """Capability `edit_acl_bulk` absente, ou execution en recherche temps reel."""
+    """Capability `edit_acl_bulk` missing, or execution inside a real-time search."""
 
 
 class FatalMappingError(FatalError):
-    """Table de correspondance illisible ou mal formee."""
+    """Mapping table unreadable or malformed."""
 
 
 class FatalJournalError(FatalError):
-    """Journal non ouvrable en ecriture alors que `journal=true` ET `dryrun=false`."""
+    """Journal not openable for writing while `journal=true` AND `dryrun=false`."""
 
 
-# **Le plafond `max_objects` n'est plus une erreur fatale** (D-28). Il l'etait en v1 :
-# l'atteinte du plafond interrompait la recherche, la sortie etait integralement perdue,
-# et l'operateur se retrouvait avec une mutation partielle **et** l'aveuglement sur ce
-# qui venait de se passer. Le garde-fou produisait le pire des deux mondes a l'instant
-# precis ou il se declenchait.
+# **The `max_objects` ceiling is no longer a fatal error** (D-28). It was one in v1:
+# reaching the ceiling interrupted the search, the whole output was lost, and the
+# operator was left with a partial mutation **and** no visibility on what had just
+# happened. The safeguard produced the worst of both worlds at the exact moment it
+# fired.
 #
-# Sa valeur reelle — borner le rayon d'action d'une ecriture lancee sans simulation —
-# est integralement conservee par l'arret des ecritures. Ce qui disparait, c'est la
-# cecite : le plafond ressort desormais en `acl_status = "skipped_ceiling"`, statut par
-# evenement, et la sortie de la recherche reste complete. Un garde-fou doit informer,
-# pas aveugler.
+# Its real value - bounding the blast radius of a write launched without a simulation
+# first - is fully preserved by stopping the writes. What disappears is the blindness:
+# the ceiling now surfaces as `acl_status = "skipped_ceiling"`, a per-event status, and
+# the output of the search stays complete. A safeguard must inform, not blind.
 #
-# Il n'y a donc plus de classe d'exception pour le plafond : le chercher ici est
-# l'erreur qu'un lecteur de la v1 commettrait.
+# There is therefore no exception class for the ceiling any more: looking for one here
+# is the mistake a reader of v1 would make.
 
 
 # --------------------------------------------------------------------------- #
-# Erreur par evenement — le pipeline se poursuit
+# Per-event error - the pipeline carries on
 # --------------------------------------------------------------------------- #
 
 class EventRejected(AclToolsError):
-    """Refus portant sur un objet donne.
+    """Rejection bearing on one given object.
 
-    `status` est l'un des `acl_status` du §5.7 ; `error` alimente `acl_error`.
+    `status` is one of the `acl_status` values of section 5.7; `error` feeds
+    `acl_error`.
     """
 
     MAX_ERROR_LEN = 512

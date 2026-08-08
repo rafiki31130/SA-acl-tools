@@ -1,115 +1,115 @@
-"""Identification des objets derives d'un `eventtype` (cahier des charges §3.4, D-18).
+"""Identification of objects derived from an `eventtype` (spec section 3.4, D-18).
 
-Un objet `fvtags` n'est pas un objet de connaissance autonome : c'est la
-materialisation interne par laquelle splunkd applique un tag pose sur un `eventtype`.
-Ecrire l'ACL du porteur **propage** cette ACL au derive, sans POST, sans reponse HTTP,
-donc sans que la commande puisse l'observer. La commande s'abstient donc d'ecrire le
-derive (§5.4 rang 0).
+An `fvtags` object is not a standalone knowledge object: it is the internal
+materialization through which splunkd applies a tag set on an `eventtype`. Writing the
+ACL of the carrier **propagates** that ACL to the derived object, with no POST and no
+HTTP response, hence without the command being able to observe it. The command
+therefore abstains from writing the derived object (section 5.4, rank 0).
 
-La contrainte de conception est la **troisieme propriete normative du §3.4** :
+The design constraint is the **third normative property of section 3.4**:
 
-    « La relation de derivation est DECOUVERTE, pas CONSTRUITE. L'identification d'un
-      objet comme derive ne doit jamais reposer sur une concatenation de chaines a
-      partir du nom du parent. »
+    "The derivation relation is DISCOVERED, not CONSTRUCTED. Identifying an object as
+     derived must never rest on a string concatenation built from the parent's name."
 
-Ce que ce module NE fait PAS
----------------------------
+What this module does NOT do
+----------------------------
 
-Il ne calcule jamais `"eventtype=" + <nom du parent>`. Aucune fonction ici ne prend un
-nom d'`eventtype` en entree pour en deduire un nom d'objet derive. C'est exactement
-l'operation interdite : elle produirait un jour un homonyme, avec les memes
-consequences qu'un endpoint devine (§6.2).
+It never computes `"eventtype=" + <parent name>`. No function here takes an
+`eventtype` name as input in order to deduce a derived object name from it. That is
+exactly the forbidden operation: one day it would produce a name collision, with the
+same consequences as a guessed endpoint (section 6.2).
 
-Ce que ce module fait, et sur quelle donnee de plateforme
----------------------------------------------------------
+What this module does, and on which platform data
+-------------------------------------------------
 
-Le sens de parcours est **inverse** — de l'enfant vers le porteur — et chacune des
-trois etapes s'appuie sur une donnee fournie par splunkd, jamais sur une convention
-que nous aurions posee :
+The direction of travel is **reversed** - from the child towards the carrier - and
+each of the three steps rests on data supplied by splunkd, never on a convention we
+would have laid down:
 
-1. **La famille** vient du chemin de handler resolu (§5.2), lui-meme issu soit du champ
-   `id` emis par l'endpoint natif, soit de la table de correspondance validee par GET
-   reel (§6.4). Seuls les objets de la famille `fvtags` sont candidats : un objet d'une
-   autre famille qui porterait par hasard un nom en `eventtype=...` n'est pas concerne.
+1. **The family** comes from the resolved handler path (section 5.2), itself derived
+   either from the `id` field emitted by the native endpoint, or from the mapping table
+   validated by a real GET (section 6.4). Only objects of the `fvtags` family are
+   candidates: an object of another family that happened to bear a name in the
+   `eventtype=...` shape is not concerned.
 
-2. **L'identite de l'objet** est celle que splunkd renvoie dans la reponse du GET du
-   §5.3 — `entry[0].name` — et non le champ `title` de l'evenement d'entree, qu'un
-   `eval` en amont peut avoir forge. Le §5.3 pose que le resultat du GET fait autorite ;
-   la regle est appliquee ici a la lettre.
+2. **The identity of the object** is the one splunkd returns in the response of the GET
+   of section 5.3 - `entry[0].name` - and not the `title` field of the input event,
+   which an upstream `eval` may have forged. Section 5.3 states that the result of the
+   GET is authoritative; the rule is applied here to the letter.
 
-   Cette identite est la **cle composite** de la famille `fvtags`, dont la grammaire
-   `<champ>=<valeur>` est celle de la plateforme : c'est sous cette forme que splunkd
-   nomme l'objet, l'adresse (`saved/fvtags/<champ>%3D<valeur>`), le cree
-   (`POST saved/fvtags name=<champ>%3D<valeur>`) et l'ecrit dans `tags.conf`
-   (`[<champ>=<valeur>]`). La lire n'est pas une heuristique de nommage : c'est lire la
-   cle primaire de l'objet telle que la plateforme la definit.
+   That identity is the **composite key** of the `fvtags` family, whose
+   `<field>=<value>` grammar is the platform's own: it is under this form that splunkd
+   names the object, addresses it (`saved/fvtags/<field>%3D<value>`), creates it
+   (`POST saved/fvtags name=<field>%3D<value>`) and writes it into `tags.conf`
+   (`[<field>=<value>]`). Reading it is not a naming heuristic: it is reading the
+   primary key of the object as the platform defines it.
 
-3. **L'existence du porteur est confirmee par la plateforme**, par un GET reel sur
-   l'endpoint `saved/eventtypes` du meme namespace. C'est l'etape qui fait de la
-   relation une **observation** et non une supposition : sans porteur, pas de cascade
-   possible, donc pas d'abstention — un `fvtags` orphelin reste modifiable.
+3. **The existence of the carrier is confirmed by the platform**, through a real GET on
+   the `saved/eventtypes` endpoint of the same namespace. That is the step that makes
+   the relation an **observation** rather than a supposition: with no carrier there is
+   no possible cascade, hence no abstention - an orphan `fvtags` stays modifiable.
 
-Mesure qui fonde le point 2
----------------------------
+Measurement grounding point 2
+-----------------------------
 
-La grammaire retenue — decoupage sur le **premier** signe egal — n'est pas deduite
-d'une documentation : c'est la regle que splunkd applique lui-meme, mesuree sur le
-socle de reference. Un `eventtype` dont le nom contient un signe egal engendre un
-objet derive dont la cle composite conserve ce signe dans sa partie valeur, et un POST
-d'ACL sur ce porteur cascade bien vers ce derive. La regle implementee ici est donc
-la **reciproque exacte du comportement observe de la cascade**, pas une convention de
-nommage supposee.
+The chosen grammar - splitting on the **first** equals sign - is not deduced from
+documentation: it is the rule splunkd applies itself, measured on the reference
+platform. An `eventtype` whose name contains an equals sign spawns a derived object
+whose composite key keeps that sign in its value part, and an ACL POST on that carrier
+does cascade to that derived object. The rule implemented here is therefore the
+**exact converse of the observed cascade behavior**, not a supposed naming convention.
 
-Portee
-------
+Scope
+-----
 
-Bornee aux derives d'un `eventtype`, conformement a D-18 et au §11.3 : le motif est
-confine a la grappe des tags sur les 11 familles eprouvees, les 16 autres sont inferees
-exemptes et non observees. La regle n'est volontairement pas formulee sur « tout objet
-derive ».
+Bounded to the objects derived from an `eventtype`, in line with D-18 and section
+11.3: the pattern is confined to the cluster of tags over the 11 families that were
+exercised; the other 16 are inferred exempt and were not observed. The rule is
+deliberately not stated over "any derived object".
 
-Elle ne s'etend pas non plus a la famille `tags` (`admin/tags`), bien que ses objets
-soient eux aussi derives d'un `eventtype` et que la plateforme y expose meme
-explicitement le lien (champ `field_name_value`). Deux raisons, dans cet ordre :
+Nor does it extend to the `tags` family (`admin/tags`), even though its objects are
+also derived from an `eventtype` and the platform even exposes the link explicitly
+there (field `field_name_value`). Two reasons, in this order:
 
-- le §3.4 designe nommement l'objet `fvtags`, et la cascade mesuree porte sur la seule
-  stanza `[tags/<paire>]`, celle de cet objet ;
-- un objet `admin/tags` acquiert une stanza propre des sa premiere ecriture d'ACL et
-  cesse alors d'etre expose a la cascade. S'en abstenir definitivement le soustrairait
-  au cas d'usage moteur du §1.1 — la disparition effective des references a un role
-  decommissionne — sans qu'aucune cascade ne vienne l'aligner en contrepartie. Le
-  §3.4 fait converger le parc par la cascade ; ici il n'y aurait rien pour converger.
+- section 3.4 names the `fvtags` object explicitly, and the measured cascade bears on
+  the `[tags/<pair>]` stanza alone, which is that object's;
+- an `admin/tags` object acquires a stanza of its own from its first ACL write onwards
+  and stops being exposed to the cascade. Abstaining from it for good would remove it
+  from the driving use case of section 1.1 - the effective disappearance of references
+  to a decommissioned role - with no cascade coming to align it in return. Section 3.4
+  makes the estate converge through the cascade; here there would be nothing to
+  converge with.
 """
 
 from .endpoint import build_object_path
 
-#: Chemins de handler de la famille `fvtags`. `saved/fvtags` est la valeur de la table
-#: de correspondance livree ; `admin/fvtags` est le meme handler expose sous l'arbre
-#: d'administration, et un champ `id` peut le designer.
+#: Handler paths of the `fvtags` family. `saved/fvtags` is the value in the shipped
+#: mapping table; `admin/fvtags` is the same handler exposed under the administration
+#: tree, and an `id` field may designate it.
 FVTAGS_HANDLER_PATHS = frozenset({"saved/fvtags", "admin/fvtags"})
 
-#: Chemin de handler du porteur. C'est la valeur que la table de correspondance associe
-#: a `eventtypes`, validee par GET reel (§6.4).
+#: Handler path of the carrier. This is the value the mapping table associates with
+#: `eventtypes`, validated by a real GET (section 6.4).
 EVENTTYPE_HANDLER_PATH = "saved/eventtypes"
 
-#: Partie gauche de la cle composite designant un `eventtype` comme porteur.
+#: Left-hand part of the composite key designating an `eventtype` as the carrier.
 CARRIER_FIELD = "eventtype"
 
-#: Separateur de la cle composite `<champ>=<valeur>` de la famille `fvtags`.
+#: Separator of the `<field>=<value>` composite key of the `fvtags` family.
 PAIR_SEPARATOR = "="
 
-#: Avertissement emis quand le GET de confirmation n'a pu ni etablir ni infirmer
-#: l'existence du porteur. Voir `CarrierProbe.carrier_of`.
+#: Warning emitted when the confirmation GET could neither establish nor disprove the
+#: existence of the carrier. See `CarrierProbe.carrier_of`.
 PROBE_INCONCLUSIVE_WARNING = "carrier_probe_inconclusive"
 
 
 def split_composite_key(platform_name):
-    """Decompose la cle composite d'un objet `fvtags` en `(champ, valeur)`.
+    """Split the composite key of an `fvtags` object into `(field, value)`.
 
-    Renvoie `None` si le nom ne se conforme pas a la grammaire de la plateforme.
+    Returns `None` if the name does not conform to the platform's grammar.
 
-    Le decoupage porte sur le **premier** signe egal : un nom de champ ne peut pas en
-    contenir, une valeur le peut. C'est la regle mesuree sur le socle de reference.
+    The split bears on the **first** equals sign: a field name cannot contain one, a
+    value can. That is the rule measured on the reference platform.
     """
     if platform_name is None:
         return None
@@ -123,11 +123,11 @@ def split_composite_key(platform_name):
 
 
 def designated_carrier(handler_path, platform_name):
-    """Nom de l'`eventtype` que la cle composite de l'objet designe, ou `None`.
+    """Name of the `eventtype` designated by the object's composite key, or `None`.
 
-    Ne conclut rien sur l'existence de cet `eventtype` : c'est le role du GET de
-    confirmation de `CarrierProbe`. Cette fonction ne fait que lire la designation
-    portee par l'identite que la plateforme a renvoyee.
+    Concludes nothing about the existence of that `eventtype`: that is the job of the
+    confirmation GET in `CarrierProbe`. This function only reads the designation
+    carried by the identity the platform returned.
     """
     if str(handler_path or "").strip("/") not in FVTAGS_HANDLER_PATHS:
         return None
@@ -141,14 +141,15 @@ def designated_carrier(handler_path, platform_name):
 
 
 class CarrierProbe(object):
-    """Confirme aupres de la plateforme l'existence du porteur designe.
+    """Confirms with the platform that the designated carrier exists.
 
-    Un GET par couple `(app, porteur)` distinct, memoise sur la duree de l'execution.
-    Sur un lot ou la famille `fvtags` est absente, le cout est nul : la sonde n'est
-    interrogee que lorsque `designated_carrier` a deja repondu.
+    One GET per distinct `(app, carrier)` pair, memoized for the duration of the run.
+    On a batch where the `fvtags` family is absent, the cost is nil: the probe is only
+    queried once `designated_carrier` has already answered.
 
-    Le porteur est cherche au **contexte fixe** (§5.2, D-25), comme l'objet lui-meme :
-    la sonde ne recoit pas de proprietaire, `build_object_path` n'en accepte plus.
+    The carrier is looked up at the **fixed context** (section 5.2, D-25), like the
+    object itself: the probe receives no owner, and `build_object_path` no longer
+    accepts one.
     """
 
     def __init__(self, rest):
@@ -164,22 +165,21 @@ class CarrierProbe(object):
         return self._cache[key]
 
     def carrier_of(self, app, handler_path, platform_name):
-        """Renvoie `(porteur, avertissement)`.
+        """Returns `(carrier, warning)`.
 
-        `porteur` vaut `None` quand l'objet n'est pas un derive d'`eventtype` — soit
-        parce qu'il n'appartient pas a la famille `fvtags`, soit parce que sa cle
-        composite ne designe pas un `eventtype`, soit parce que la plateforme repond
-        que le porteur designe **n'existe pas** (HTTP 404). Ce dernier cas est le
-        `fvtags` orphelin : aucun porteur ne peut cascader vers lui, il reste
-        modifiable.
+        `carrier` is `None` when the object is not derived from an `eventtype` - either
+        because it does not belong to the `fvtags` family, or because its composite key
+        does not designate an `eventtype`, or because the platform answers that the
+        designated carrier **does not exist** (HTTP 404). That last case is the orphan
+        `fvtags`: no carrier can cascade onto it, so it stays modifiable.
 
-        `avertissement` est non nul lorsque le GET de confirmation n'a ni etabli ni
-        infirme l'existence du porteur — 403, 5xx, echec de transport. L'abstention est
-        alors **conservatrice** : elle est prononcee quand meme, parce que l'ecriture
-        d'un derive dont le porteur pourrait exister fausse le jeu de restauration en
-        silence, tandis qu'une abstention de trop est tracee, visible, et sans effet sur
-        l'etat du parc. L'avertissement porte le code obtenu pour que l'operateur puisse
-        distinguer les deux situations.
+        `warning` is non-null when the confirmation GET neither established nor
+        disproved the existence of the carrier - 403, 5xx, transport failure. The
+        abstention is then **conservative**: it is pronounced anyway, because writing a
+        derived object whose carrier might exist silently falsifies the rollback set,
+        whereas one abstention too many is traced, visible, and without effect on the
+        state of the estate. The warning carries the code obtained so that the operator
+        can tell the two situations apart.
         """
         carrier = designated_carrier(handler_path, platform_name)
         if carrier is None:

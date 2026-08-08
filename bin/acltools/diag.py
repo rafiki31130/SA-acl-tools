@@ -1,23 +1,22 @@
-"""Journal de diagnostic d'execution — `editacl.log` (§8.1).
+"""Run diagnostic log - `editacl.log` (section 8.1).
 
-**Ce fichier n'est pas le journal de restauration.** Le journal write-ahead
-(`editacl_journal_<sid>.log`) est le seul filet de securite d'une operation
-irreversible : sa perte n'est pas acceptable, et c'est pourquoi D-3 lui interdit la
-rotation et lui impose un fichier par execution. Le present fichier ne porte aucun etat
-restaurable ; **sa perte n'est pas critique**. Il reste donc unique et rotatif comme
-l'exige le §8.1, et — consequence directe — **aucun de ses echecs n'est fatal, aucun
-n'annule ni ne differe une ecriture**. Un diagnostic qui interrompt l'operation qu'il
-observe serait une seconde defaillance ajoutee a la premiere.
+**This file is not the rollback journal.** The write-ahead journal
+(`editacl_journal_<sid>.log`) is the only safety net of an irreversible operation:
+losing it is not acceptable, and that is why D-3 forbids rotation for it and imposes
+one file per run. The present file carries no restorable state; **losing it is not
+critical**. It therefore stays single and rotating as section 8.1 requires, and - as a
+direct consequence - **none of its failures is fatal, none cancels or delays a write**.
+A diagnostic that interrupts the operation it observes would be a second failure added
+to the first.
 
-Contenu, tel que l'enumere le §8.1 : demarrage, controle d'habilitation, parametres,
-resolution de la table de correspondance, erreurs fatales.
+Contents, as enumerated by section 8.1: startup, capability check, parameters, mapping
+table resolution, fatal errors.
 
-**Aucun secret n'y entre.** La garantie est d'abord **structurelle** : ce module ne
-recoit jamais la cle de session — ni le `Diagnostics`, ni aucune de ses methodes n'a de
-parametre qui la porte, et `rest.py` ne lui parle pas. La redaction ci-dessous est une
-seconde ligne : les messages d'erreur de la plateforme sont recopies dans le fichier, et
-un fichier de diagnostic collecte vers un index est lu par bien plus de monde que le
-disque d'un search head.
+**No secret enters it.** The guarantee is first of all **structural**: this module
+never receives the session key - neither `Diagnostics` nor any of its methods has a
+parameter that carries it, and `rest.py` does not talk to it. The redaction below is a
+second line: platform error messages are copied into the file, and a diagnostic file
+collected into an index is read by far more people than the disk of a search head.
 """
 
 import logging
@@ -26,24 +25,25 @@ import re
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-#: Nom du fichier, unique et rotatif (§8.1). La stanza de monitor du §8.3 le nomme.
+#: File name, single and rotating (section 8.1). The monitor stanza of section 8.3
+#: names it.
 DIAG_BASENAME = "editacl.log"
 
-#: Rotation imposee par le §8.1 : 5 Mo, 5 sauvegardes.
+#: Rotation imposed by section 8.1: 5 MB, 5 backups.
 MAX_BYTES = 5 * 1024 * 1024
 BACKUP_COUNT = 5
 
 LOGGER_NAME = "editacl.diag"
 
-REDACTED = "[redige]"
+REDACTED = "[redacted]"
 
-#: Motifs de redaction. Deliberement larges : un faux positif rend une ligne de
-#: diagnostic moins lisible, un faux negatif publie un secret dans un index.
+#: Redaction patterns. Deliberately broad: a false positive makes one diagnostic line
+#: less readable, a false negative publishes a secret into an index.
 _SECRET_PATTERNS = (
-    # En-tete d'authentification Splunk, sous toutes ses formes.
+    # Splunk authentication header, in all its forms.
     re.compile(r"(?i)\bSplunk\s+[A-Za-z0-9+/=._-]{20,}"),
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9+/=._-]{10,}"),
-    # `cle: valeur` ou `cle=valeur` pour toute cle qui nomme un secret.
+    # `key: value` or `key=value` for any key that names a secret.
     re.compile(
         r"(?i)\b(session[_-]?key|authorization|api[_-]?key|access[_-]?token|token"
         r"|password|passwd|pwd|secret|credential)\b\s*[:=]\s*\S+"
@@ -52,16 +52,16 @@ _SECRET_PATTERNS = (
 
 
 def redact(message):
-    """Retire d'un message toute forme reconnaissable de secret.
+    """Remove from a message every recognizable form of secret.
 
-    La troncature est proscrite : un secret tronque reste un secret partiellement
-    divulgue, et il suffit souvent a reduire un espace de recherche.
+    Truncation is ruled out: a truncated secret is still a partially disclosed secret,
+    and it is often enough to shrink a search space.
     """
     text = "" if message is None else str(message)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTED, text)
-    # Une ligne de diagnostic est une ligne : un message multiligne casserait le
-    # `LINE_BREAKER` du sourcetype `editacl:diag` (§8.3).
+    # A diagnostic line is one line: a multiline message would break the
+    # `LINE_BREAKER` of the `editacl:diag` sourcetype (section 8.3).
     return text.replace("\r", " ").replace("\n", " ")
 
 
@@ -70,7 +70,7 @@ def diag_path(log_dir):
 
 
 class _Formatter(logging.Formatter):
-    """Horodatage ISO 8601 avec fuseau et millisecondes, aligne sur le journal (§8.2)."""
+    """ISO 8601 timestamp with zone and milliseconds, aligned on the journal (8.2)."""
 
     def formatTime(self, record, datefmt=None):                      # noqa: N802
         return (
@@ -81,11 +81,11 @@ class _Formatter(logging.Formatter):
 
 
 class NullDiagnostics(object):
-    """Diagnostic inerte : meme surface, aucun effet.
+    """Inert diagnostic: same surface, no effect.
 
-    C'est la valeur par defaut de l'enveloppe. Elle garantit qu'aucun appel de
-    diagnostic ne peut lever avant que le fichier ne soit ouvert, ni apres son echec
-    d'ouverture — la perte du diagnostic ne doit jamais couter une execution.
+    This is the default value of the wrapper. It guarantees that no diagnostic call can
+    raise before the file is opened, nor after it failed to open - losing the
+    diagnostic must never cost a run.
     """
 
     path = None
@@ -126,12 +126,12 @@ class NullDiagnostics(object):
 
 
 class Diagnostics(NullDiagnostics):
-    """Ecrivain du fichier de diagnostic.
+    """Writer of the diagnostic file.
 
-    Un `logging.Logger` est **construit directement**, jamais obtenu de
-    `logging.getLogger` : le registre global est partage par tout le processus de
-    recherche, et y attacher un handler exposerait a recevoir les enregistrements
-    d'autres bibliotheques — dont on ne controle ni le contenu ni l'absence de secret.
+    A `logging.Logger` is **built directly**, never obtained from
+    `logging.getLogger`: the global registry is shared by the whole search process, and
+    attaching a handler to it would expose us to receiving the records of other
+    libraries - whose content, and whose freedom from secrets, we do not control.
     """
 
     enabled = True
@@ -162,7 +162,7 @@ class Diagnostics(NullDiagnostics):
     # -- primitives --------------------------------------------------------- #
 
     def __call__(self, level, message):
-        """Signature du rappel `diag` attendu par `load_mapping` : `(niveau, message)`."""
+        """Signature of the `diag` callback `load_mapping` expects: `(level, message)`."""
         self._emit(self._LEVELS.get(str(level).upper(), logging.INFO), message)
 
     def _emit(self, level, message):
@@ -171,7 +171,7 @@ class Diagnostics(NullDiagnostics):
                 level, "sid=%s %s", self._sid or "-", redact(message)
             )
         except Exception:                                            # noqa: BLE001
-            # Un diagnostic ne peut pas faire echouer ce qu'il observe (§8.1).
+            # A diagnostic cannot make what it observes fail (section 8.1).
             pass
 
     def info(self, message):
@@ -181,16 +181,15 @@ class Diagnostics(NullDiagnostics):
         self._emit(logging.WARNING, message)
 
     def fatal(self, message):
-        self._emit(logging.CRITICAL, "erreur fatale : %s" % message)
+        self._emit(logging.CRITICAL, "fatal error: %s" % message)
 
-    # -- evenements enumeres par le §8.1 ------------------------------------ #
+    # -- events enumerated by section 8.1 ----------------------------------- #
 
     def startup(self, version="", user="", splunkd_uri="", verify_ssl=None):
-        """Ligne de demarrage. Le membre est journalise separement : `serverName` n'est
-        connu qu'apres un appel REST, et cette ligne doit preceder tout ce qui peut
-        echouer."""
+        """Startup line. The member is logged separately: `serverName` is only known
+        after a REST call, and this line must precede everything that can fail."""
         self.info(
-            "demarrage editacl version=%s user=%s splunkd=%s verify_ssl=%s"
+            "editacl startup version=%s user=%s splunkd=%s verify_ssl=%s"
             % (
                 version or "?",
                 user or "-",
@@ -201,7 +200,7 @@ class Diagnostics(NullDiagnostics):
 
     def params(self, params):
         self.info(
-            "parametres dryrun=%s validate_roles=%s journal=%s max_objects=%s"
+            "parameters dryrun=%s validate_roles=%s journal=%s max_objects=%s"
             % (
                 str(bool(params.dryrun)).lower(),
                 str(bool(params.validate_roles)).lower(),
@@ -209,13 +208,13 @@ class Diagnostics(NullDiagnostics):
                 params.max_objects,
             )
         )
-        # Les neuf parametres de nommage sont consignes separement : ils determinent
-        # quelle colonne du jeu de resultats est lue pour quoi, donc quels attributs
-        # seront modifies et lesquels preserves (§3.2). Sans eux, une execution dont un
-        # nom de champ a ete redirige est illisible a posteriori.
+        # The nine field-naming parameters are recorded separately: they determine
+        # which column of the result set is read for what, hence which attributes will
+        # be modified and which preserved (section 3.2). Without them, a run in which a
+        # field name was redirected is unreadable after the fact.
         names = params.names
         self.info(
-            "nommage title=%s app=%s id=%s type=%s sharing=%s new_perms_read=%s "
+            "field names title=%s app=%s id=%s type=%s sharing=%s new_perms_read=%s "
             "new_perms_write=%s new_sharing=%s new_owner=%s"
             % (
                 names.title,
@@ -230,21 +229,21 @@ class Diagnostics(NullDiagnostics):
             )
         )
         for warning in params.warnings or ():
-            self.warning("parametres : %s" % warning)
+            self.warning("parameters: %s" % warning)
 
     def capability(self, granted, detail=""):
         if granted:
-            self.info("controle d'habilitation : capability accordee")
+            self.info("capability check: capability granted")
         else:
-            self.warning("controle d'habilitation : refuse (%s)" % (detail or "?"))
+            self.warning("capability check: denied (%s)" % (detail or "?"))
 
     def realtime(self, verdict):
-        self.info("controle temps reel : %s" % verdict)
+        self.info("real-time check: %s" % verdict)
 
     def mapping(self, coverage):
         self.info(
-            "table de correspondance : %d entrees (%d livrees, %d d'override, "
-            "%d surchargees, %d ecartees)"
+            "mapping table: %d entries (%d shipped, %d from override, "
+            "%d overridden, %d discarded)"
             % (
                 coverage.get("total", 0),
                 coverage.get("from_json", 0),
@@ -256,9 +255,9 @@ class Diagnostics(NullDiagnostics):
 
     def journal(self, path, opened):
         if opened:
-            self.info("journal de restauration ouvert : %s" % path)
+            self.info("rollback journal opened: %s" % path)
         else:
-            self.warning("journal de restauration non ouvrable : %s" % path)
+            self.warning("rollback journal not openable: %s" % path)
 
     def close(self):
         try:
@@ -269,12 +268,12 @@ class Diagnostics(NullDiagnostics):
 
 
 def open_diagnostics(log_dir, sid=""):
-    """Ouvre le fichier de diagnostic, ou renvoie un diagnostic inerte.
+    """Open the diagnostic file, or return an inert diagnostic.
 
-    **Ne leve jamais.** L'absence de diagnostic degrade l'observabilite, elle ne remet
-    en cause ni la surete de l'operation ni sa reversibilite : ces deux proprietes
-    reposent entierement sur le journal de restauration, qui est un autre fichier avec
-    d'autres garanties.
+    **Never raises.** The absence of a diagnostic degrades observability; it calls into
+    question neither the safety of the operation nor its reversibility: both of those
+    properties rest entirely on the rollback journal, which is another file with other
+    guarantees.
     """
     if not log_dir:
         return NullDiagnostics()

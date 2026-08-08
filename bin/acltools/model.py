@@ -1,21 +1,21 @@
-"""Structures de donnees immuables partagees par le noyau.
+"""Immutable data structures shared by the core.
 
-Toutes en `dataclass(frozen=True)`, sans methode metier : elles transportent, elles
-ne decident pas.
+All of them are `dataclass(frozen=True)`, with no business method: they carry, they do
+not decide.
 """
 
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
-#: Noms logiques des quatre valeurs cibles (§3.3). Ce sont les cles employees par
-#: `EventInput.present` et par le moteur de fusion — jamais des noms de champs SPL,
-#: que l'operateur peut renommer.
+#: Logical names of the four target values (section 3.3). These are the keys used by
+#: `EventInput.present` and by the merge engine - never SPL field names, which the
+#: operator may rename.
 TARGET_PERMS_READ = "perms.read"
 TARGET_PERMS_WRITE = "perms.write"
 TARGET_SHARING = "sharing"
 TARGET_OWNER = "owner"
 
-#: Ordre stable, employe par les tests de matrice et les messages d'erreur.
+#: Stable order, used by the matrix tests and by the error messages.
 TARGET_ATTRIBUTES = (
     TARGET_PERMS_READ,
     TARGET_PERMS_WRITE,
@@ -23,25 +23,25 @@ TARGET_ATTRIBUTES = (
     TARGET_OWNER,
 )
 
-#: **Enumeration normative des `acl_status` du §5.7 — source unique.**
+#: **Normative enumeration of the `acl_status` values of section 5.7 - single source.**
 #:
-#: Elle vit ici, dans le noyau, et non dans le jeu de tests ni dans le cahier des
-#: charges : une enumeration recopiee derive. Trois redactions du contrat, puis une du
-#: jeu de tests, ont eu cette liste fausse — deux fois par omission, une fois par exces.
-#: D-35 a supprime l'enumeration du §8.2 pour la confier au jeu de tests ; le jeu de
-#: tests l'a a son tour ecrite a la main, et elle a derive de la meme facon.
+#: It lives here, in the core, and neither in the test suite nor in the specification:
+#: a copied enumeration drifts. Three drafts of the contract, then one of the test
+#: suite, had this list wrong - twice by omission, once by excess. D-35 removed the
+#: enumeration from section 8.2 to entrust it to the test suite; the test suite in turn
+#: wrote it out by hand, and it drifted the same way.
 #:
-#: Deux tests l'arriment au code et referment la classe d'erreur :
+#: Two tests tie it to the code and close that error class:
 #:
-#: - `tests/test_statuses.py` extrait de l'arbre syntaxique du noyau **tout** statut
-#:   litteral effectivement produit — premier argument d'un `EventRejected(...)`,
-#:   affectation d'un attribut `status` — et exige l'egalite avec ce tuple. Un statut
-#:   ajoute au code sans etre declare ici fait echouer la suite ;
-#: - l'invariant 1 du §8.2 (`tests/test_pipeline.py`) exige d'observer **chacune** de
-#:   ces valeurs sur un cas reel. Un statut declare ici sans cas de test fait donc
-#:   echouer la suite lui aussi.
+#: - `tests/test_statuses.py` extracts from the syntax tree of the core **every**
+#:   literal status actually produced - first argument of an `EventRejected(...)`,
+#:   assignment of a `status` attribute - and requires equality with this tuple. A
+#:   status added to the code without being declared here fails the suite;
+#: - invariant 1 of section 8.2 (`tests/test_pipeline.py`) requires observing **each**
+#:   of these values on a real case. A status declared here with no test case therefore
+#:   fails the suite as well.
 #:
-#: L'ordre est celui du tableau du §5.7.
+#: The order is that of the table in section 5.7.
 ACL_STATUSES = (
     "updated",
     "noop",
@@ -57,8 +57,8 @@ ACL_STATUSES = (
     "error",
 )
 
-#: Champs de sortie portes par **tout** enregistrement, quel que soit `acl_status`
-#: (§5.7). Ils entrent dans l'en-tete du flux par le premier enregistrement venu.
+#: Output fields carried by **every** record, whatever the `acl_status`
+#: (section 5.7). They enter the stream header through the first record emitted.
 ACL_UNCONDITIONAL_FIELDS = (
     "acl_status",
     "acl_endpoint",
@@ -68,10 +68,10 @@ ACL_UNCONDITIONAL_FIELDS = (
     "acl_journaled",
 )
 
-#: Les huit champs d'etat du §5.7. Ils ne sont portes que par les enregistrements dont
-#: la fusion a ete calculee : un `skipped_private`, un `skipped_derived`, un
-#: `skipped_ceiling`, un `not_found`, un `forbidden` ou un rejet **amont** de la fusion
-#: n'en porte aucun.
+#: The eight state fields of section 5.7. They are only carried by the records whose
+#: merge was computed: a `skipped_private`, a `skipped_derived`, a `skipped_ceiling`, a
+#: `not_found`, a `forbidden` or a rejection **upstream** of the merge carries none of
+#: them.
 ACL_STATE_FIELDS = (
     "acl_before_owner",
     "acl_after_owner",
@@ -83,19 +83,20 @@ ACL_STATE_FIELDS = (
     "acl_after_sharing",
 )
 
-#: **Jeu de champs de sortie declare** (§5.7, D-33), dans l'ordre du tableau normatif.
+#: **Declared output field set** (section 5.7, D-33), in the order of the normative
+#: table.
 #:
-#: Le writer du SDK fige l'en-tete du flux sur les cles du **premier** enregistrement
-#: emis, puis y projette tous les suivants : un champ absent de ce premier
-#: enregistrement disparait de la sortie entiere, sans erreur ni avertissement. Les
-#: huit champs de `ACL_STATE_FIELDS` n'etant pas portes par tous les statuts, un lot
-#: commencant par un `skipped_private` — ce que la macro d'inventaire produit
-#: couramment — priverait l'operateur de tout ce que la simulation existe pour montrer.
+#: The SDK writer freezes the stream header on the keys of the **first** record
+#: emitted, then projects every later record onto it: a field absent from that first
+#: record disappears from the entire output, with no error and no warning. Since the
+#: eight fields of `ACL_STATE_FIELDS` are not carried by every status, a batch starting
+#: with a `skipped_private` - which the inventory macro routinely produces - would
+#: deprive the operator of everything the simulation exists to show.
 #:
-#: La declaration est donc **explicite** et vit ici, hors de l'adaptateur, pour que la
-#: liste declaree et la liste projetee soient la meme donnee et ne puissent pas
-#: diverger. Le SDK vendorise n'est pas modifie : il expose `RecordWriter.custom_fields`
-#: pour exactement cet usage.
+#: The declaration is therefore **explicit** and lives here, outside the adapter, so
+#: that the declared list and the projected list are the same datum and cannot diverge.
+#: The vendored SDK is not modified: it exposes `RecordWriter.custom_fields` for
+#: exactly this purpose.
 ACL_OUTPUT_FIELDS = (
     "acl_status",
     "acl_endpoint",
@@ -116,15 +117,15 @@ ACL_OUTPUT_FIELDS = (
 
 @dataclass(frozen=True)
 class FieldNames:
-    """Nom du champ SPL ou lire chaque information (§3.1, §3.3, §4.1).
+    """Name of the SPL field to read each piece of information from (3.1, 3.3, 4.1).
 
-    Chaque entree logique de la commande est un **parametre nommant un champ**, assorti
-    d'un defaut qui est la nomenclature native. L'operateur qui emploie celle-ci n'ecrit
-    donc aucun parametre.
+    Every logical input of the command is a **parameter naming a field**, with a
+    default that is the platform's native field name. An operator who uses the native
+    names therefore writes no parameter at all.
 
-    Il n'y a **aucun** champ de propriete d'adressage : l'adressage se fait par un
-    contexte fixe (§5.2, D-25). `new_owner` existe, mais c'est une **valeur cible**, pas
-    une adresse.
+    There is **no** addressing property field: addressing uses a fixed context
+    (section 5.2, D-25). `new_owner` exists, but it is a **target value**, not an
+    address.
     """
 
     title: str = "title"
@@ -138,22 +139,22 @@ class FieldNames:
     new_owner: str = "eai:acl.owner"
 
 
-#: Defauts du §3.1 et du §3.3, exposes pour la documentation et les tests.
+#: Defaults of sections 3.1 and 3.3, exposed for the documentation and the tests.
 DEFAULT_FIELD_NAMES = FieldNames()
 
 
 @dataclass(frozen=True)
 class EventInput:
-    """Projection d'un evenement d'entree (§3.1, §3.2, §3.3).
+    """Projection of one input event (sections 3.1, 3.2, 3.3).
 
-    **`present` est le coeur du contrat.** Il porte le sous-ensemble de
-    `TARGET_ATTRIBUTES` dont la **colonne existe dans le jeu de resultats**. C'est le
-    seul discriminant entre « preserver » et « modifier » : ni le type de la valeur, ni
-    la valeur elle-meme n'y entrent (§3.2).
+    **`present` is the heart of the contract.** It carries the subset of
+    `TARGET_ATTRIBUTES` whose **column exists in the result set**. It is the only
+    discriminant between "preserve" and "modify": neither the type of the value nor the
+    value itself enters into it (section 3.2).
 
-    `current_sharing` est la portee **courante** (§3.1), utilisee pour ecarter les
-    objets privees (§3.5). `None` signifie que la colonne est absente du jeu de
-    resultats — cas ou la commande ne peut pas les ecarter en amont.
+    `current_sharing` is the **current** sharing scope (section 3.1), used to skip
+    private objects (section 3.5). `None` means the column is absent from the result
+    set - the case where the command cannot skip them upstream.
     """
 
     title: str
@@ -168,18 +169,18 @@ class EventInput:
     present: frozenset = frozenset()
 
     def has(self, attribute):
-        """Vrai si la colonne de `attribute` existe dans le jeu de resultats.
+        """True if the column of `attribute` exists in the result set.
 
-        C'est l'unique predicat de presence du noyau : aucun autre module n'interroge
-        `present` directement, ce qui garantit qu'aucun ne peut y substituer un test de
-        type ou de valeur.
+        This is the core's only presence predicate: no other module queries `present`
+        directly, which guarantees that none can substitute a type or value test for
+        it.
         """
         return attribute in self.present
 
 
 @dataclass(frozen=True)
 class AclState:
-    """Etat ACL d'un objet, normalise (§5.5)."""
+    """Normalized ACL state of an object (section 5.5)."""
 
     owner: str = ""
     sharing: str = ""
@@ -190,7 +191,7 @@ class AclState:
 
 @dataclass(frozen=True)
 class MergeResult:
-    """Resultat de la fusion (§5.4)."""
+    """Result of the merge (section 5.4)."""
 
     before: AclState
     after: AclState
@@ -201,7 +202,7 @@ class MergeResult:
 
 @dataclass(frozen=True)
 class Params:
-    """Parametres valides de la commande (§4.1)."""
+    """Validated parameters of the command (section 4.1)."""
 
     names: FieldNames
     dryrun: bool
@@ -213,7 +214,7 @@ class Params:
 
 @dataclass(frozen=True)
 class RunContext:
-    """Constantes d'execution, identiques pour toutes les lignes de journal."""
+    """Run constants, identical for every journal line."""
 
     sid: str
     user: str
@@ -223,7 +224,7 @@ class RunContext:
 
 @dataclass(frozen=True)
 class EventResult:
-    """Resultat du traitement d'un evenement (§5.7 + besoins du journal §8.2)."""
+    """Result of processing one event (section 5.7 plus the journal needs of 8.2)."""
 
     status: str
     title: str = ""

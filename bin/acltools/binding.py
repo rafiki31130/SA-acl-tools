@@ -1,26 +1,27 @@
-"""Liaison enregistrement SPL -> `EventInput` (§3.1, §3.2, §3.3).
+"""Binding of an SPL record to an `EventInput` (spec sections 3.1, 3.2, 3.3).
 
-C'est **le** module ou se joue la semantique de presence du §3.2, et il ne fait que
-cela : lire, dans un enregistrement, les champs que les parametres de nommage
-designent, et consigner **quelles colonnes existent**.
+This is **the** module where the presence semantics of section 3.2 is decided, and it
+does nothing else: read, in a record, the fields designated by the field-naming
+parameters, and record **which columns exist**.
 
-    | Situation                            | Effet                        |
+    | Situation                            | Effect                       |
     |--------------------------------------|------------------------------|
-    | colonne **absente** du jeu de resultats | attribut **preserve**      |
-    | colonne **presente**, cellule **vide**  | attribut **vide**          |
-    | colonne **presente**, cellule valuee    | valeur appliquee           |
+    | column **absent** from the result set  | attribute **preserved**    |
+    | column **present**, cell **empty**     | attribute **emptied**      |
+    | column **present**, cell valued        | value applied              |
 
-**Le discriminant est la presence de la cle dans l'enregistrement — jamais le type,
-jamais la valeur.** Mesure sur 9.4.6 : la commande recoit soit une cle absente de
-l'enregistrement, soit une cle presente valant la chaine vide. Jamais `None`, jamais
-une liste vide. Et un champ multivalue **reduit a une seule valeur arrive en chaine**,
-pas en liste : un test de type conclurait « valeur unique » la ou il n'y a rien a
-conclure, et surtout ne dirait rien de la presence.
+**The discriminant is the presence of the key in the record - never the type, never
+the value.** Measured on 9.4.6: the command receives either a key absent from the
+record, or a key present holding the empty string. Never `None`, never an empty list.
+And a multivalue field **reduced to a single value arrives as a string**, not as a
+list: a type test would conclude "single value" where there is nothing to conclude,
+and above all would say nothing about presence.
 
-La prudence supplementaire — `raw is not None` en plus de `key in record` — serait une
-erreur, pas une precaution : elle reintroduirait par la bande la discrimination par la
-valeur que le §3.2 proscrit, et transformerait un « vider cet attribut » explicite en
-« preserver ». Le predicat est donc **exactement** `key in record`, sans clause.
+The extra caution - `raw is not None` on top of `key in record` - would be a mistake,
+not a precaution: it would reintroduce through the back door the value-based
+discrimination that section 3.2 forbids, and would turn an explicit "empty this
+attribute" into "preserve it". The predicate is therefore **exactly** `key in record`,
+with no further clause.
 """
 
 from .model import (
@@ -33,10 +34,10 @@ from .model import (
 
 
 def field_present(record, name):
-    """Predicat de presence d'une colonne. Point d'injection unique de la regle §3.2.
+    """Column presence predicate. Single injection point of the section 3.2 rule.
 
-    Aucun autre appelant du paquet ne teste la presence d'un champ : la regle vit ici,
-    en une ligne, et ne peut pas deriver ailleurs.
+    No other caller in the package tests for the presence of a field: the rule lives
+    here, on one line, and cannot drift elsewhere.
     """
     if record is None or not name:
         return False
@@ -47,17 +48,17 @@ def field_present(record, name):
 
 
 def field_value(record, name, default=None):
-    """Valeur brute d'une colonne, sans aucune interpretation ni coercition."""
+    """Raw value of a column, with no interpretation and no coercion."""
     if not field_present(record, name):
         return default
     return record.get(name)
 
 
 def _text(raw):
-    """Reduit une valeur brute a une chaine, sans decider de sa vacuite.
+    """Reduce a raw value to a string, without deciding whether it is empty.
 
-    Un multivalue est reduit a sa premiere valeur non vide : c'est le cas de `title`,
-    `app`, `id`, `type` et de la portee courante, qui sont mono-valeur par nature.
+    A multivalue is reduced to its first non-empty value: this covers `title`, `app`,
+    `id`, `type` and the current sharing scope, which are single-valued by nature.
     """
     if raw is None:
         return ""
@@ -73,14 +74,14 @@ def _text(raw):
 
 
 def build_event(record, names):
-    """Construit l'`EventInput` d'un enregistrement, selon les parametres de nommage.
+    """Build the `EventInput` of a record, following the field-naming parameters.
 
-    Les champs de **reference** (§3.1) sont lus pour leur valeur ; leur presence en tant
-    que colonne n'a d'effet que pour la portee courante, dont l'absence prive la
-    commande du filtre du §3.5.
+    The **reference** fields (section 3.1) are read for their value; their presence as
+    a column only matters for the current sharing scope, whose absence deprives the
+    command of the section 3.5 filter.
 
-    Les quatre **valeurs cibles** (§3.3) sont lues pour leur valeur **et** pour leur
-    presence, celle-ci etant consignee dans `present`.
+    The four **target values** (section 3.3) are read for their value **and** for their
+    presence, the latter being recorded in `present`.
     """
     record = record if record is not None else {}
 

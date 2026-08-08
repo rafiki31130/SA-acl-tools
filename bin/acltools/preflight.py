@@ -1,7 +1,7 @@
-"""Legitimite de l'execution, etablie une fois pour toutes avant tout evenement (§5.1).
+"""Legitimacy of the run, established once and for all before any event (section 5.1).
 
-`validate_params` est **pure** et se teste seule. Le reste consomme un `RestPort` et se
-teste par substitution — aucun mock HTTP, aucune socket.
+`validate_params` is **pure** and tests on its own. The rest consumes a `RestPort` and
+is tested by substitution - no HTTP mock, no socket.
 """
 
 import json
@@ -9,59 +9,59 @@ import json
 from .endpoint import encode_namespace_segment
 from .errors import FatalCapabilityError, FatalConfigError
 from .model import DEFAULT_FIELD_NAMES, FieldNames, Params
-# Import relatif d'un **predicat pur** : `preflight` continue de ne consommer qu'un
-# port `RestPort` et reste substituable sans socket. Voir `rest.is_tls_failure`.
+# Relative import of a **pure predicate**: `preflight` still consumes nothing but a
+# `RestPort` port and stays substitutable without a socket. See `rest.is_tls_failure`.
 from .rest import TLS_REMEDIATION, is_tls_failure
 
-#: Capability dediee, declaree par `default/authorize.conf` (§7). Splunk n'offre pas de
-#: gating natif des commandes de recherche par capability : le controle est implemente
-#: dans le code et constitue une erreur fatale.
+#: Dedicated capability, declared by `default/authorize.conf` (section 7). Splunk
+#: offers no native gating of search commands by capability: the check is implemented
+#: in the code and constitutes a fatal error.
 REQUIRED_CAPABILITY = "edit_acl_bulk"
 
-#: Le role `*` est une valeur legitime du referentiel et n'est **jamais** developpe en
-#: liste de roles (§10.2).
+#: The `*` role is a legitimate value of the catalog and is **never** expanded into a
+#: list of roles (section 10.2).
 WILDCARD_ROLE = "*"
 
-#: Plafond d'ecritures par defaut (§4.1, D-30). **Dix, et non cinq cents.**
+#: Default write ceiling (section 4.1, D-30). **Ten, and not five hundred.**
 #:
-#: Une correction ponctuelle — quelques objets identifies, verifies en simulation —
-#: passe sans que l'operateur ait a s'occuper du plafond. Au-dela, il doit l'ecrire,
-#: donc enoncer le volume qu'il s'apprete a muter. Un plafond de cinq cents laissait
-#: passer sans un mot des operations de plusieurs centaines d'objets, ce qui revenait a
-#: ne rien garder du garde-fou dans la plupart des cas reels.
+#: A one-off fix - a few identified objects, checked in simulation - goes through
+#: without the operator having to bother with the ceiling. Beyond that, they have to
+#: write it, hence to state the volume they are about to mutate. A ceiling of five
+#: hundred let operations of several hundred objects through without a word, which
+#: amounted to keeping nothing of the safeguard in most real cases.
 #:
-#: Ce defaut n'est tenable que parce que **le plafond ne se declenche jamais en
-#: simulation** : le compteur n'est incremente que par un POST emis, et la simulation
-#: n'en emet aucun. La friction porte sur l'ecriture reelle, jamais sur l'examen.
+#: This default is only tenable because **the ceiling never fires in simulation**: the
+#: counter is only incremented by a POST actually sent, and a simulation sends none.
+#: The friction bears on the real write, never on the review.
 DEFAULT_MAX_OBJECTS = 10
 
-#: Rappel emis en tete d'execution quand la simulation est active (§4.1).
+#: Reminder emitted at the head of the run when the simulation is active (section 4.1).
 #:
-#: `dryrun` vaut `true` par defaut : sans ce rappel, une execution qui n'ecrit rien est
-#: indiscernable d'une execution qui a tout ecrit — les deux rendent une table de
-#: resultats pleine, et seule la colonne `acl_status` les distingue. C'est le parametre
-#: le plus consequent de la commande, et son etat par defaut etait le seul a n'etre
-#: signale nulle part.
+#: `dryrun` is `true` by default: without this reminder, a run that writes nothing is
+#: indistinguishable from a run that wrote everything - both return a full result
+#: table, and only the `acl_status` column tells them apart. It is the most
+#: consequential parameter of the command, and its default state was the only one
+#: reported nowhere.
 #:
-#: Le message porte les deux informations que l'operateur doit avoir : ce qui ne se
-#: produira pas, et le geste exact qui le produirait.
+#: The message carries the two things the operator needs: what will not happen, and the
+#: exact gesture that would make it happen.
 #:
-#: Il est porte par `Params.warnings`, donc emis **une seule fois par execution** par
-#: l'adaptateur (§5.1) — jamais par evenement. Un lot de plusieurs centaines d'objets
-#: le repeterait autant de fois, et un avertissement repete se filtre mentalement :
-#: il cesserait d'etre lu exactement la ou il compte.
+#: It is carried by `Params.warnings`, hence emitted **once per run** by the adapter
+#: (section 5.1) - never per event. A batch of several hundred objects would repeat it
+#: as many times, and a repeated warning gets filtered out mentally: it would stop
+#: being read exactly where it matters.
 #:
-#: C'est un avertissement (`MSG[WARN]`), jamais une erreur : il ne change ni le statut
-#: du job, ni le nombre de resultats, ni le code de sortie de la commande.
+#: It is a warning (`MSG[WARN]`), never an error: it changes neither the status of the
+#: job, nor the number of results, nor the exit code of the command.
 DRYRUN_WARNING = (
-    "simulation active (dryrun=true, valeur par defaut) : AUCUNE modification ne "
-    "sera ecrite. Les objets ressortent en acl_status=dryrun. Pour appliquer "
-    "reellement les changements, relancer la meme recherche avec dryrun=false."
+    "simulation active (dryrun=true, the default value): NO change will be written. "
+    "The objects come out with acl_status=dryrun. To actually apply the changes, run "
+    "the same search again with dryrun=false."
 )
 
 
 def _decode(response):
-    """Decode un corps de reponse JSON. Renvoie `None` si indecodable."""
+    """Decode a JSON response body. Returns `None` if it cannot be decoded."""
     if response is None or response.status != 200 or not response.body:
         return None
     try:
@@ -71,9 +71,9 @@ def _decode(response):
 
 
 def _as_bool(raw, name, default=None):
-    """Coerce un booleen. `None` signifie « non fourni » et retombe sur le defaut du
-    §4.1 : le SDK expose une option non renseignee comme `None`, pas comme sa valeur
-    par defaut."""
+    """Coerce a boolean. `None` means "not supplied" and falls back on the section 4.1
+    default: the SDK exposes an option that was not set as `None`, not as its default
+    value."""
     if raw is None and default is not None:
         return default
     if isinstance(raw, bool):
@@ -83,11 +83,11 @@ def _as_bool(raw, name, default=None):
         return True
     if token in ("0", "false", "f", "no", "n", "off"):
         return False
-    raise FatalConfigError("parametre invalide : '%s' n'est pas un booleen (%r)" % (name, raw))
+    raise FatalConfigError("invalid parameter: '%s' is not a boolean (%r)" % (name, raw))
 
 
-#: Ordre stable des neuf parametres de nommage (§3.1, §3.3), pour la validation et les
-#: messages d'erreur.
+#: Stable order of the nine field-naming parameters (sections 3.1, 3.3), for the
+#: validation and the error messages.
 FIELD_NAME_PARAMS = (
     "title",
     "app",
@@ -100,27 +100,27 @@ FIELD_NAME_PARAMS = (
     "new_owner",
 )
 
-#: Caracteres qui ne peuvent pas apparaitre dans un nom de champ SPL passe en parametre.
+#: Characters that cannot appear in an SPL field name passed as a parameter.
 #:
-#: La virgule est la plus utile des trois : elle attrape l'operateur qui raisonne encore
-#: en `fields` de la v1 et ecrit `new_perms_read="perms.read,perms.write"`. Chaque
-#: parametre ne porte plus qu'un **nom de champ unique** — c'est ce qui fait disparaitre
-#: par construction le piege de quotation de la v1.3 (§4.4), ou SPL tronquait
-#: silencieusement une liste non quotee a sa premiere valeur. Le refuser explicitement
-#: vaut mieux que de traiter « perms.read,perms.write » comme un nom de champ improbable.
+#: The comma is the most useful of the three: it catches the operator who still thinks
+#: in terms of the v1 `fields` and writes `new_perms_read="perms.read,perms.write"`.
+#: Each parameter now carries a **single field name** - that is what makes the v1.3
+#: quoting trap (section 4.4) disappear by construction, where SPL silently truncated
+#: an unquoted list to its first value. Refusing it explicitly is better than treating
+#: "perms.read,perms.write" as an improbable field name.
 _FORBIDDEN_NAME_CHARS = (",", "|", "\n")
 
 
 def parse_field_names(raw_names):
-    """Valide les parametres de nommage et rend un `FieldNames` (§3.1, §3.3, §5.1-2).
+    """Validate the field-naming parameters and return a `FieldNames` (3.1, 3.3, 5.1-2).
 
-    `raw_names` est un mapping `<parametre> -> <valeur brute>`. Une valeur `None` ou
-    absente retombe sur le defaut du cahier des charges — la nomenclature native — ce
-    qui rend le cas nominal implicite : l'operateur qui l'emploie n'ecrit aucun
-    parametre.
+    `raw_names` is a mapping `<parameter> -> <raw value>`. A `None` or missing value
+    falls back on the default of the specification - the platform's native field
+    names - which makes the nominal case implicit: an operator who uses them writes no
+    parameter at all.
 
-    Erreurs : `FatalConfigError` si un parametre designe un identifiant de champ vide ou
-    syntaxiquement invalide (§9).
+    Errors: `FatalConfigError` if a parameter designates an empty or syntactically
+    invalid field identifier (section 9).
     """
     raw_names = raw_names or {}
     resolved = {}
@@ -132,16 +132,16 @@ def parse_field_names(raw_names):
         value = str(raw).strip()
         if not value:
             raise FatalConfigError(
-                "parametre invalide : '%s' designe un nom de champ vide. Omettre le "
-                "parametre pour reprendre le defaut (%s)."
+                "invalid parameter: '%s' designates an empty field name. Omit the "
+                "parameter to take the default (%s)."
                 % (param, getattr(DEFAULT_FIELD_NAMES, param))
             )
         for char in _FORBIDDEN_NAME_CHARS:
             if char in value:
                 raise FatalConfigError(
-                    "parametre invalide : '%s=%s' n'est pas un nom de champ. Chaque "
-                    "parametre de nommage designe UN champ, jamais une liste — le "
-                    "parametre 'fields' de la v1 n'existe plus." % (param, value)
+                    "invalid parameter: '%s=%s' is not a field name. Each naming "
+                    "parameter designates ONE field, never a list - the v1 'fields' "
+                    "parameter no longer exists." % (param, value)
                 )
         resolved[param] = value
     return FieldNames(**resolved)
@@ -155,10 +155,10 @@ def validate_params(
     max_objects=DEFAULT_MAX_OBJECTS,
     max_objects_explicit=True,
 ):
-    """Valide les parametres du §4.1. Fonction pure.
+    """Validate the parameters of section 4.1. Pure function.
 
-    Erreurs : `FatalConfigError` si un parametre de nommage est invalide, ou si
-    `max_objects` n'est pas un entier strictement positif (§9).
+    Errors: `FatalConfigError` if a field-naming parameter is invalid, or if
+    `max_objects` is not a strictly positive integer (section 9).
     """
     names = parse_field_names(names_raw)
     dryrun = _as_bool(dryrun, "dryrun", default=True)
@@ -171,13 +171,13 @@ def validate_params(
         max_objects_int = int(str(max_objects).strip())
     except (TypeError, ValueError):
         raise FatalConfigError(
-            "parametre invalide : 'max_objects' doit etre un entier strictement "
-            "positif (%r)" % (max_objects,)
+            "invalid parameter: 'max_objects' must be a strictly positive integer "
+            "(%r)" % (max_objects,)
         )
     if max_objects_int <= 0:
         raise FatalConfigError(
-            "parametre invalide : 'max_objects' doit etre un entier strictement "
-            "positif (%r)" % (max_objects,)
+            "invalid parameter: 'max_objects' must be a strictly positive integer "
+            "(%r)" % (max_objects,)
         )
 
     warnings = []
@@ -185,7 +185,7 @@ def validate_params(
         warnings.append(DRYRUN_WARNING)
     if not dryrun and not max_objects_explicit:
         warnings.append(
-            "dryrun=false sans max_objects explicite : plafond par defaut applique "
+            "dryrun=false with no explicit max_objects: the default ceiling applies "
             "(%d)" % max_objects_int
         )
 
@@ -200,26 +200,26 @@ def validate_params(
 
 
 def check_capability(rest):
-    """Controle d'habilitation (§5.1 etape 3).
+    """Capability check (section 5.1, step 3).
 
-    `content.capabilities` de `current-context` est l'ensemble **effectif aplati** des
-    capabilities de l'utilisateur, heritage `imported_roles` compris (mesure 6). Le
-    controle se reduit donc a un test d'appartenance ; aucun parcours de la hierarchie
-    de roles n'est necessaire.
+    `content.capabilities` of `current-context` is the **effective flattened** set of
+    the user's capabilities, `imported_roles` inheritance included (measurement 6). The
+    check therefore reduces to a membership test; no walk of the role hierarchy is
+    needed.
     """
     response = rest.get_json("/services/authentication/current-context", None)
     document = _decode(response)
     if document is None:
-        # Le premier appel REST de l'execution est aussi celui sur lequel un socle a
-        # certificat auto-signe echoue. Sans designation explicite, l'operateur ne lit
-        # qu'un « HTTP 0 » sur un endpoint d'authentification et cherche du cote des
-        # droits, pas du certificat.
+        # The first REST call of the run is also the one a platform with a self-signed
+        # certificate fails on. With no explicit naming, the operator only reads an
+        # "HTTP 0" on an authentication endpoint and looks at permissions, not at the
+        # certificate.
         if is_tls_failure(response):
             raise FatalCapabilityError(
-                "%s (detail : %s)" % (TLS_REMEDIATION, response.error)
+                "%s (detail: %s)" % (TLS_REMEDIATION, response.error)
             )
         raise FatalCapabilityError(
-            "controle d'habilitation impossible : reponse inexploitable de "
+            "capability check impossible: unusable response from "
             "/services/authentication/current-context (HTTP %s%s)"
             % (
                 getattr(response, "status", "?"),
@@ -230,27 +230,27 @@ def check_capability(rest):
         content = document["entry"][0]["content"]
     except (KeyError, IndexError, TypeError):
         raise FatalCapabilityError(
-            "controle d'habilitation impossible : structure de reponse inattendue"
+            "capability check impossible: unexpected response structure"
         )
 
     capabilities = content.get("capabilities") or []
     if REQUIRED_CAPABILITY not in capabilities:
         roles = content.get("roles") or []
         raise FatalCapabilityError(
-            "capability '%s' absente. Roles de l'utilisateur : %s"
-            % (REQUIRED_CAPABILITY, ", ".join(str(role) for role in roles) or "(aucun)")
+            "capability '%s' missing. Roles of the user: %s"
+            % (REQUIRED_CAPABILITY, ", ".join(str(role) for role in roles) or "(none)")
         )
 
 
 def check_realtime(rest, sid):
-    """Controle du mode temps reel (§4.2, D-2).
+    """Real-time mode check (section 4.2, D-2).
 
-    Renvoie `"realtime"` (jamais atteint : une exception est levee), `"batch"` si la
-    recherche est confirmee non temps reel, ou `"unknown"` si la detection n'a pas
-    abouti. Le garde-fou ne se transforme pas en faux positif : une detection qui
-    n'aboutit pas est signalee par l'enveloppe, pas transformee en refus.
+    Returns `"realtime"` (never actually reached: an exception is raised), `"batch"` if
+    the search is confirmed not to be real-time, or `"unknown"` if the detection did
+    not succeed. The safeguard does not turn into a false positive: a detection that
+    does not succeed is reported by the adapter, not turned into a refusal.
 
-    Erreurs : `FatalCapabilityError` si le mode temps reel est detecte.
+    Errors: `FatalCapabilityError` if real-time mode is detected.
     """
     if not sid:
         return "unknown"
@@ -270,16 +270,16 @@ def check_realtime(rest, sid):
     if flag is not None:
         if _truthy(flag):
             raise FatalCapabilityError(
-                "execution en recherche temps reel refusee (§4.2)."
+                "running inside a real-time search is refused (section 4.2)."
             )
         return "batch"
 
-    # Repli : inspection des bornes temporelles.
+    # Fallback: inspection of the time bounds.
     earliest = str(content.get("earliest_time") or "")
     latest = str(content.get("latest_time") or "")
     if earliest.startswith("rt") or latest.startswith("rt"):
         raise FatalCapabilityError(
-            "execution en recherche temps reel refusee (§4.2)."
+            "running inside a real-time search is refused (section 4.2)."
         )
     if earliest or latest:
         return "batch"
@@ -293,10 +293,10 @@ def _truthy(value):
 
 
 def load_roles_catalog(rest):
-    """Referentiel des roles existants (§5.1 etape 5).
+    """Catalog of the existing roles (section 5.1, step 5).
 
-    Cet appel ne sert **qu'a** `validate_roles` : il est inutile au controle
-    d'habilitation, que la mesure 6 reduit a un test d'appartenance.
+    This call serves **only** `validate_roles`: it is useless to the capability check,
+    which measurement 6 reduces to a membership test.
     """
     response = rest.get_json(
         "/services/authorization/roles", {"count": "0", "f": "title"}
@@ -313,7 +313,7 @@ def load_roles_catalog(rest):
 
 
 def resolve_server_name(rest):
-    """`serverName` du membre, pour le champ `host` du journal. `""` si indisponible."""
+    """`serverName` of the member, for the journal `host` field. `""` if unavailable."""
     response = rest.get_json("/services/server/info", None)
     document = _decode(response)
     if document is None:
@@ -325,10 +325,10 @@ def resolve_server_name(rest):
 
 
 class AppStateCache(object):
-    """Etat d'activation des apps, **memoise par app** (§10.5).
+    """Enablement state of the apps, **memoized per app** (section 10.5).
 
-    L'information n'est portee ni par l'evenement ni par la reponse `/acl` : elle exige
-    un appel dedie. Cout : un appel par app distincte sur l'execution.
+    The information is carried neither by the event nor by the `/acl` response: it
+    requires a dedicated call. Cost: one call per distinct app over the run.
     """
 
     def __init__(self, rest):

@@ -1,14 +1,14 @@
-"""Noyau metier de la commande de recherche `editacl`.
+"""Business core of the `editacl` search command.
 
-Regle d'import, verifiable mecaniquement et verifiee par `tests/test_layering.py` :
-**aucun fichier de ce paquet ne mentionne un SDK de commande de recherche, ni
-n'importe `socket`, `http` ou `urllib.request`, a l'exception de `acltools.rest`.**
+Import rule, mechanically checkable and checked by `tests/test_layering.py`:
+**no file in this package mentions a search-command SDK, and none imports `socket`,
+`http` or `urllib.request`, with the sole exception of `acltools.rest`.**
 
-C'est cette regle qui rend la totalite de la logique metier — normalisation, fusion,
-resolution d'endpoint, serialisation du journal, machine a etats — testable hors
-Splunk, sans instance et sans reseau, comme l'exige le §11.1 du cahier des charges.
-Elle n'est pas un confort de developpement : c'est le seul moyen d'eprouver de facon
-exhaustive une operation irreversible dont la macro de restauration est le seul filet.
+That rule is what makes the whole of the business logic - normalization, merge,
+endpoint resolution, journal serialization, state machine - testable outside Splunk,
+with no instance and no network, as spec section 11.1 requires. It is not a
+development convenience: it is the only way to exhaustively exercise an irreversible
+operation whose rollback macro is the only safety net.
 """
 
 __version__ = "1.0.0"

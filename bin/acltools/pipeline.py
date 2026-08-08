@@ -1,12 +1,12 @@
-"""Machine a etats du traitement d'un evenement (§5, §8.4, §4.3, §10.8).
+"""State machine for processing one event (sections 5, 8.4, 4.3, 10.8).
 
-Porte l'ordre des lignes de journal vis-a-vis du POST, le compteur `max_objects` et la
-deduplication par URI. C'est le module qui tient les trois invariants verifiables du
-§8.2.
+It carries the ordering of the journal lines with respect to the POST, the
+`max_objects` counter and the deduplication by URI. It is the module that holds the
+three checkable invariants of section 8.2.
 
-Aucune exception inattendue ne le traverse : toute `Exception` non prevue est
-convertie en `EventRejected("error", "internal:...")`, faute de quoi une trace non
-capturee interromprait la recherche et violerait le §9.
+No unexpected exception crosses it: any unforeseen `Exception` is converted into
+`EventRejected("error", "internal:...")`, failing which an uncaught traceback would
+interrupt the search and violate section 9.
 """
 
 import json
@@ -28,107 +28,106 @@ from .normalize import parse_acl_state
 
 MAX_ERROR_LEN = 512
 
-#: Portee de partage des objets hors perimetre (§3.5, D-26). Un objet en `sharing=user`
-#: n'est visible que de son proprietaire et des administrateurs : les permissions qu'il
-#: porterait n'accordent rien a personne, elles sont **inertes**.
+#: Sharing scope of the objects out of scope (section 3.5, D-26). An object in
+#: `sharing=user` is only visible to its owner and to the administrators: whatever
+#: permissions it carried grant nothing to anybody, they are **inert**.
 PRIVATE_SHARING = "user"
 
-#: Motif d'ecartement d'un objet prive (§3.5). **Identique par les deux voies de
-#: detection** : c'est le meme fait — l'objet est hors perimetre — et l'operateur qui
-#: filtre sur ce motif ne doit pas avoir a en connaitre deux.
+#: Reason for skipping a private object (section 3.5). **Identical through both
+#: detection routes**: it is the same fact - the object is out of scope - and an
+#: operator filtering on this reason must not have to know two of them.
 PRIVATE_ERROR = "private_object_out_of_scope"
 
-#: Avertissement porte par `acl_warning` quand l'objet a ete ecarte par la **seconde**
-#: voie du §3.5 (D-34) : namespace nominatif porte par `id`, colonne de portee absente
-#: du jeu de resultats. Il ne change ni le statut ni le motif ; il dit a l'operateur que
-#: son pipeline n'emet pas la portee courante et que l'ecartement repose donc sur `id`
-#: seul. Le remede est le meme que partout ailleurs : batir le pipeline sur la macro
-#: d'inventaire, qui emet toujours les deux.
+#: Warning carried by `acl_warning` when the object was skipped through the **second**
+#: route of section 3.5 (D-34): a named namespace carried by `id`, with the sharing
+#: scope column absent from the result set. It changes neither the status nor the
+#: reason; it tells the operator that their pipeline does not emit the current sharing
+#: scope and that the skip therefore rests on `id` alone. The remedy is the same as
+#: everywhere else: build the pipeline on the inventory macro, which always emits both.
 PRIVATE_BY_ID_WARNING = "private_detected_by_id_namespace"
 
-#: Avertissement porte par `acl_warning` quand **aucune** des deux voies du §3.5 n'est
-#: alimentee : la portee courante est indisponible et l'`id` ne porte pas de namespace
-#: exploitable (D-38, §3.5).
+#: Warning carried by `acl_warning` when **neither** of the two routes of section 3.5
+#: is fed: the current sharing scope is unavailable and `id` carries no usable
+#: namespace (D-38, section 3.5).
 #:
-#: La commande ne dispose alors que d'un nom et d'une application. Elle resout par le
-#: contexte fixe et atteint donc l'objet **partage** s'il en existe un de ce nom, alors
-#: que la ligne d'entree designait peut-etre un prive homonyme. Ce n'est pas un defaut
-#: de l'adressage : sans designation de portee, aucune information ne permet de
-#: distinguer les deux. Le comportement n'est donc pas change — il est **rendu
-#: visible**.
+#: The command then only has a name and an application. It resolves through the fixed
+#: context and therefore reaches the **shared** object if one of that name exists, while
+#: the input row may have designated a private object of the same name. This is not a
+#: defect of the addressing: with no sharing scope designated, no information allows the
+#: two to be told apart. The behavior is therefore not changed - it is **made visible**.
 #:
-#: **Il ne se declenche que la ou la discrimination est reellement impossible.** Des que
-#: la portee courante est exploitable, ou que l'`id` porte un namespace — nominatif
-#: (l'objet est ecarte) comme fixe (l'objet est partage, et l'`id` le dit) —, la portee
-#: est etablie et l'avertissement n'est pas emis. Un avertissement qui se declencherait
-#: dans le cas nominal serait du bruit, et le bruit se filtre mentalement : il ne
-#: vaudrait plus rien le jour ou il compte.
+#: **It only fires where the discrimination is genuinely impossible.** As soon as the
+#: current sharing scope is usable, or `id` carries a namespace - named (the object is
+#: skipped) as well as fixed (the object is shared, and `id` says so) - the scope is
+#: established and the warning is not emitted. A warning that fired in the nominal case
+#: would be noise, and noise gets filtered out mentally: it would be worth nothing on
+#: the day it matters.
 SCOPE_UNDETERMINED_WARNING = "scope_undetermined"
 
-#: Contexte applicatif hors perimetre (§1.3, §4.2). Refus **par evenement** : le §9
-#: enumere limitativement les erreurs fatales et ne l'y fait pas figurer.
+#: Application context out of scope (sections 1.3, 4.2). Rejection is **per event**:
+#: section 9 enumerates the fatal errors exhaustively and does not list this one.
 FORBIDDEN_APP = "system"
 
-#: Classe de codes HTTP d'un refus de persistance cote handler splunkd. Mesure en lab :
-#: le POST est refuse, la vue **runtime** de splunkd est neanmoins mutee, le disque
-#: reste intact.
+#: Class of HTTP codes of a persistence refusal on the splunkd handler side. Measured
+#: in the lab: the POST is refused, the **runtime** view of splunkd is nevertheless
+#: mutated, the disk stays intact.
 #:
-#: **Toute la classe `5xx`, pas le seul `500`** (D-16). Rien dans le mecanisme observe
-#: n'attache la divergence au code `500` en particulier : elle tient a ce que le
-#: handler a mute son etat en memoire avant d'echouer a le persister, ce qu'un `502`,
-#: un `503` ou un `507` produisent aussi bien. Restreindre l'avertissement a `500`
-#: laisserait passer sans signal exactement le cas qu'il doit couvrir.
+#: **The whole `5xx` class, not `500` alone** (D-16). Nothing in the observed mechanism
+#: attaches the divergence to code `500` in particular: it comes from the handler having
+#: mutated its in-memory state before failing to persist it, which a `502`, a `503` or a
+#: `507` produce just as well. Restricting the warning to `500` would let through
+#: without a signal exactly the case it must cover.
 PERSISTENCE_FAILURE_MIN = 500
 PERSISTENCE_FAILURE_MAX = 600
 
 
 def is_persistence_failure(status):
-    """Vrai si `status` releve de la classe `5xx` (D-16)."""
+    """True if `status` belongs to the `5xx` class (D-16)."""
     return PERSISTENCE_FAILURE_MIN <= int(status) < PERSISTENCE_FAILURE_MAX
 
-#: Avertissement porte par `acl_warning` quand la persistance est refusee. La
-#: divergence est produite par la plateforme et la commande ne peut pas l'empecher ;
-#: elle doit la rendre **visible**.
+#: Warning carried by `acl_warning` when persistence is refused. The divergence is
+#: produced by the platform and the command cannot prevent it; it must make it
+#: **visible**.
 RUNTIME_DIVERGENCE_WARNING = "runtime_divergence_possible"
 
-#: Texte adresse a l'operateur au niveau de la recherche, emis une fois par execution.
-#: `acl_warning` est un jeu de jetons concatenes : la phrase ne peut pas y tenir.
+#: Text addressed to the operator at the search level, emitted once per run.
+#: `acl_warning` is a set of concatenated tokens: the sentence cannot fit in it.
 RUNTIME_DIVERGENCE_MESSAGE = (
-    "au moins un objet a ete refuse en HTTP 5xx (persistance) : la vue runtime de "
-    "splunkd peut avoir ete mutee alors que le disque ne l'est pas, et c'est cette vue "
-    "que voient les utilisateurs, les recherches et les controles d'acces jusqu'au "
-    "prochain rechargement de configuration. Ces objets ne sont PAS couverts par "
-    "editacl_rollback, qui ne retient que les ecritures abouties : la remise en etat "
-    "passe par un rechargement de configuration ou un redemarrage du membre, pas par "
-    "la restauration."
+    "at least one object was refused with HTTP 5xx (persistence): the runtime view of "
+    "splunkd may have been mutated while the disk was not, and that view is the one "
+    "users, searches and access controls see until the next configuration reload. "
+    "These objects are NOT covered by editacl_rollback, which only keeps the writes "
+    "that succeeded: putting them right goes through a configuration reload or a "
+    "restart of the member, not through the rollback."
 )
 
 
 def ceiling_message(max_objects, skipped):
-    """Avertissement **unique** de l'atteinte du plafond (§4.3, D-28).
+    """**Single** warning that the ceiling was reached (section 4.3, D-28).
 
-    Il porte les deux informations dont l'operateur a besoin : que le plafond a ete
-    atteint, et **combien** d'objets ont ete ecartes — d'ou son emission en fin
-    d'execution, seul moment ou ce nombre est connu d'une commande qui recoit son entree
-    par chunks successifs.
+    It carries the two pieces of information the operator needs: that the ceiling was
+    reached, and **how many** objects were skipped - hence its emission at the end of
+    the run, the only moment at which that number is known to a command that receives
+    its input through successive chunks.
 
-    Il reste un avertissement : le job n'est pas marque en echec, la sortie de la
-    recherche est complete, et chaque objet ecarte porte son propre
+    It remains a warning: the job is not marked as failed, the output of the search is
+    complete, and each skipped object carries its own
     `acl_status = "skipped_ceiling"`.
     """
     return (
-        "plafond max_objects=%d atteint : %d objet(s) ecarte(s) sans GET ni POST, en "
-        "acl_status=skipped_ceiling. Les objets deja ecrits ne sont pas annules et la "
-        "sortie de cette recherche est complete. Pour traiter le reste, relancer avec "
-        "un max_objects superieur." % (int(max_objects), int(skipped))
+        "max_objects=%d ceiling reached: %d object(s) skipped with no GET and no POST, "
+        "with acl_status=skipped_ceiling. The objects already written are not rolled "
+        "back and the output of this search is complete. To process the rest, run "
+        "again with a higher max_objects." % (int(max_objects), int(skipped))
     )
 
 
 def default_clock():
-    """Horodatage ISO 8601 avec fuseau explicite et **millisecondes obligatoires**.
+    """ISO 8601 timestamp with an explicit zone and **mandatory milliseconds**.
 
-    Aligne sur le `TIME_FORMAT` de `props.conf` (§8.3) : les millisecondes departagent
-    deux mutations rapprochees, ce dont depend le `earliest(...)` de la macro §8.6.
+    Aligned on the `TIME_FORMAT` of `props.conf` (section 8.3): the milliseconds
+    separate two mutations close in time, which the `earliest(...)` of the section 8.6
+    macro depends on.
     """
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
@@ -139,7 +138,7 @@ def _truncate(message):
 
 
 class _Work(object):
-    """Etat mutable du traitement d'un evenement, fige en `EventResult` a la sortie."""
+    """Mutable state of the processing of one event, frozen into an `EventResult`."""
 
     __slots__ = (
         "title", "app", "eai_type", "endpoint", "http_code", "status",
@@ -162,9 +161,9 @@ class _Work(object):
         self.post_attempted = False
         self.counted = False
         self.source = ""
-        #: Identite renvoyee par splunkd dans la reponse du GET (§5.3), jamais le
-        #: `title` de l'evenement : le §5.3 pose que le GET fait autorite, et un `eval`
-        #: en amont peut avoir forge le `title`.
+        #: Identity returned by splunkd in the GET response (section 5.3), never the
+        #: `title` of the event: section 5.3 states that the GET is authoritative, and
+        #: an upstream `eval` may have forged the `title`.
         self.platform_name = None
 
     def warn(self, message):
@@ -191,14 +190,14 @@ class _Work(object):
 
 
 class _FailedPost(object):
-    """Memoire d'un POST **emis et refuse**, pour la deduplication du §10.8.
+    """Memory of a POST **sent and refused**, for the deduplication of section 10.8.
 
-    Un POST refuse ne modifie pas l'objet : son etat anterieur reste l'etat courant.
-    Sans cette memoire, une seconde occurrence du meme objet relit l'etat, recalcule la
-    meme fusion, ecrit une **seconde ligne `intent` rigoureusement identique** a la
-    premiere et reemet le meme POST — ce que le §8.5 (univocite du triplet
-    `sid` + `endpoint` + `phase`) et D-6 excluent, et ce que le §10.8 economise
-    explicitement.
+    A refused POST does not modify the object: its prior state remains the current
+    state. Without this memory, a second occurrence of the same object reads the state
+    again, recomputes the same merge, writes a **second `intent` line strictly
+    identical** to the first and re-sends the same POST - which section 8.5
+    (uniqueness of the `sid` + `endpoint` + `phase` triple) and D-6 exclude, and which
+    section 10.8 explicitly saves.
     """
 
     __slots__ = ("before", "after", "status", "error", "http_code", "warnings")
@@ -213,10 +212,10 @@ class _FailedPost(object):
 
 
 class EventProcessor(object):
-    """Traite un evenement et produit exactement un `EventResult`.
+    """Processes one event and produces exactly one `EventResult`.
 
-    Le compteur `counter` est incremente a chaque POST **emis**, qu'il aboutisse ou
-    echoue. Les statuts sans POST ne le comptent pas (§4.3).
+    The `counter` is incremented on each POST **sent**, whether it succeeds or fails.
+    Statuses with no POST do not count towards it (section 4.3).
     """
 
     def __init__(
@@ -238,32 +237,32 @@ class EventProcessor(object):
         self._roles = frozenset(roles_catalog or ())
         self._app_disabled_fn = app_disabled_fn
         self._clock = clock or default_clock
-        #: Sonde du rang 0 (§3.4, D-18). Elle n'emet un appel que sur un objet dont la
-        #: famille et la cle composite designent deja un porteur : sur un lot sans
-        #: `fvtags`, son cout est nul.
+        #: Probe of rank 0 (section 3.4, D-18). It only sends a call on an object whose
+        #: family and composite key already designate a carrier: on a batch with no
+        #: `fvtags`, its cost is nil.
         self._carrier = CarrierProbe(rest)
         self.counter = 0
-        #: Nombre d'objets ecartes faute de plafond (§4.3, D-28). Il alimente
-        #: l'avertissement unique de fin d'execution ; il ne vaut zero que si le plafond
-        #: n'a jamais mordu.
+        #: Number of objects skipped for want of ceiling headroom (section 4.3, D-28).
+        #: It feeds the single end-of-run warning; it is only zero if the ceiling never
+        #: bit.
         self.skipped_ceiling = 0
-        #: endpoint -> etat resultant d'un POST **abouti**.
+        #: endpoint -> state resulting from a **successful** POST.
         self._written = {}
-        #: endpoint -> `_FailedPost` d'un POST **emis et refuse**.
+        #: endpoint -> `_FailedPost` of a POST **sent and refused**.
         self._failed = {}
-        #: endpoint -> identite renvoyee par splunkd au premier GET reussi (§5.3).
+        #: endpoint -> identity returned by splunkd on the first successful GET (5.3).
         #:
-        #: Cette memoire n'existe que pour le court-circuit de deduplication du §10.8 :
-        #: le rang 0 du §5.4 lit `work.platform_name`, or le court-circuit rend la main
-        #: sans emettre de GET. Sans elle, la deduplication et l'identification des
-        #: derives seraient couplees par une propriete **externe** — un derive n'emet
-        #: pas de POST, il n'entre donc pas dans `_written` / `_failed` — au lieu de
-        #: l'etre par une garantie locale. La propriete est vraie, mais elle appartient
-        #: a un autre mecanisme et se romprait sans bruit a la premiere evolution de la
-        #: deduplication.
+        #: This memory exists only for the deduplication short circuit of section 10.8:
+        #: rank 0 of section 5.4 reads `work.platform_name`, and the short circuit
+        #: returns without sending a GET. Without it, deduplication and the
+        #: identification of derived objects would be coupled by an **external**
+        #: property - a derived object sends no POST, so it never enters `_written` /
+        #: `_failed` - instead of by a local guarantee. The property is true, but it
+        #: belongs to another mechanism and would break silently at the first evolution
+        #: of the deduplication.
         self._platform_names = {}
 
-    # -- point d'entree unique --------------------------------------------- #
+    # -- single entry point ------------------------------------------------ #
 
     def process(self, event):
         work = _Work(event)
@@ -279,76 +278,78 @@ class EventProcessor(object):
             )
         return self._emit(work.result())
 
-    # -- machine a etats ---------------------------------------------------- #
+    # -- state machine ------------------------------------------------------ #
 
     def _run(self, event, work):
         self._check_required(event)
 
-        # Plafond (§4.3, D-28) — **avant le GET**, donc avant tout echange HTTP et avant
-        # toute ligne de journal `intent`, ce que le §4.3 exige. Une fois le compteur
-        # d'ecritures a son plafond, chaque objet suivant ressort ici : sans GET, sans
-        # POST, avec sa ligne `outcome` comme tout autre statut, et la recherche
-        # poursuit son cours. La sortie reste complete — c'est tout l'objet de D-28.
+        # Ceiling (section 4.3, D-28) - **before the GET**, hence before any HTTP
+        # exchange and before any `intent` journal line, which section 4.3 requires.
+        # Once the write counter is at its ceiling, every following object comes out
+        # here: with no GET, no POST, with its `outcome` line like any other status, and
+        # the search carries on. The output stays complete - that is the whole point of
+        # D-28.
         if self.counter >= self._params.max_objects:
             self.skipped_ceiling += 1
             raise EventRejected(
                 "skipped_ceiling", "max_objects_reached:%d" % self._params.max_objects
             )
 
-        # Resolution de l'endpoint (§5.2) : calcul pur, aucun echange HTTP. Elle precede
-        # la table de controles du §5.4 — c'est deja son rang dans la v1 — et donne un
-        # `acl_endpoint` exploitable a tous les statuts qui atteignent le GET.
+        # Endpoint resolution (section 5.2): a pure computation, no HTTP exchange. It
+        # precedes the control table of section 5.4 - that was already its rank in v1 -
+        # and gives a usable `acl_endpoint` to every status that reaches the GET.
         #
-        # **Elle ne vaut pas pour `skipped_private`**, qui l'efface (voir plus bas). La
-        # chaine calculee ici est celle de l'objet **partage homonyme** : c'est un objet
-        # *autre* que celui que la ligne d'entree designe, et le publier dans une sortie
-        # destinee a etre relue induirait en erreur. La produire pour le prive reellement
-        # designe n'est pas une option : elle exigerait un contexte d'adressage
-        # nominatif, or `build_object_path` n'a deliberement **aucun** parametre de
-        # proprietaire — c'est la garantie structurelle de D-25. La valeur juste est donc
-        # vide, comme elle l'est deja pour `skipped_ceiling`, l'autre abstention sans
-        # echange HTTP : `acl_endpoint` vide et `acl_http_code = 0` disent la meme chose,
-        # rien n'a ete adresse.
+        # **It does not hold for `skipped_private`**, which erases it (see below). The
+        # string computed here is that of the **shared object of the same name**: that
+        # is an object *other* than the one the input row designates, and publishing it
+        # in an output meant to be read back would mislead. Producing it for the private
+        # object actually designated is not an option: it would require a named
+        # addressing context, and `build_object_path` deliberately has **no** owner
+        # parameter - that is the structural guarantee of D-25. The correct value is
+        # therefore empty, as it already is for `skipped_ceiling`, the other abstention
+        # with no HTTP exchange: an empty `acl_endpoint` and `acl_http_code = 0` say the
+        # same thing, nothing was addressed.
         handler_path, source = resolve_handler_path(
             event.id_value, event.eai_type, self._mapping
         )
         work.source = source
         work.endpoint = build_object_path(event.app, handler_path, event.title)
 
-        # Rang -1 (§3.5, D-26, D-34) — objets prives, ecartes **sans GET ni POST**.
+        # Rank -1 (section 3.5, D-26, D-34) - private objects, skipped **with no GET
+        # and no POST**.
         #
-        # DEUX voies de detection, et la seconde n'est pas un confort. Toutes deux
-        # s'appuient sur une donnee **emise par la plateforme** : la portee courante que
-        # le jeu de resultats porte, ou le namespace que la plateforme a inscrit dans
-        # l'`id` de l'objet. Rien n'est reconstruit, rien n'est suppose.
+        # TWO detection routes, and the second one is not a convenience. Both rest on
+        # data **emitted by the platform**: the current sharing scope the result set
+        # carries, or the namespace the platform wrote into the object's `id`. Nothing
+        # is reconstructed, nothing is supposed.
         #
-        #  1. La portee courante vaut `user`. Voie principale, exacte, sans ambiguite.
+        #  1. The current sharing scope is `user`. Main route, exact, unambiguous.
         #
-        #  2. La portee courante est **indisponible** — colonne absente du jeu de
-        #     resultats, ou presente et vide, ce qui ne renseigne pas davantage — et
-        #     l'`id` porte un namespace **nominatif**. Splunkd emet `/servicesNS/nobody/`
-        #     pour un objet partage et `/servicesNS/<proprietaire>/` pour un prive : un
-        #     namespace autre que le contexte fixe designe donc un objet prive.
+        #  2. The current sharing scope is **unavailable** - column absent from the
+        #     result set, or present and empty, which says no more - and `id` carries a
+        #     **named** namespace. Splunkd emits `/servicesNS/nobody/` for a shared
+        #     object and `/servicesNS/<owner>/` for a private one: a namespace other
+        #     than the fixed context therefore designates a private object.
         #
-        # Sans la voie 2, le repli annonce jusqu'ici — « le GET par contexte fixe repond
-        # 404 et l'objet ressort en not_found » — **est faux des qu'un homonyme partage
-        # existe** : l'adressage fixe atteint alors le partage, et la commande lit puis
-        # ecrirait un objet **autre que celui designe en entree**. C'est la meme classe
-        # de defaut que celui de la v1 que le §5.2 declare clos, reintroduite par le
-        # repli.
+        # Without route 2, the fallback claimed until now - "the GET through the fixed
+        # context answers 404 and the object comes out as not_found" - **is false as
+        # soon as a shared object of the same name exists**: fixed addressing then
+        # reaches the shared one, and the command reads then would write an object
+        # **other than the one designated as input**. That is the same class of defect
+        # as the v1 one that section 5.2 declares closed, reintroduced by the fallback.
         #
-        # Erreur possible et son sens : un objet partage dont l'`id` aurait ete moissonne
-        # dans un contexte nominatif ressortirait `skipped_private` a tort. Comme au
-        # rang 0, **l'erreur est une abstention, jamais une ecriture fautive**.
+        # Possible error and its meaning: a shared object whose `id` had been harvested
+        # in a named context would come out as `skipped_private` wrongly. As at rank 0,
+        # **the error is an abstention, never a faulty write**.
         #
-        # Si ni la portee ni un `id` exploitable ne sont disponibles, la commande **ne
-        # peut pas savoir** (D-38). Elle ne dispose que d'un nom et d'une application,
-        # resout par le contexte fixe, et atteint donc l'objet partage s'il en existe un
-        # de ce nom — la ligne d'entree designait peut-etre un prive homonyme. Le
-        # comportement reste celui-la, faute de toute information permettant de
-        # discriminer ; il est en revanche **signale** par `SCOPE_UNDETERMINED_WARNING`.
-        # Le README recommande de batir le pipeline sur la macro d'inventaire, qui emet
-        # toujours les deux designations et rend ce cas inatteignable.
+        # If neither the sharing scope nor a usable `id` is available, the command
+        # **cannot know** (D-38). It only has a name and an application, resolves
+        # through the fixed context, and therefore reaches the shared object if one of
+        # that name exists - the input row may have designated a private object of the
+        # same name. The behavior stays that one, for want of any information allowing
+        # discrimination; it is however **reported** by `SCOPE_UNDETERMINED_WARNING`.
+        # The README recommends building the pipeline on the inventory macro, which
+        # always emits both designations and makes this case unreachable.
         current_scope = (event.current_sharing or "").strip().lower()
         if current_scope == PRIVATE_SHARING:
             work.endpoint = ""
@@ -356,9 +357,9 @@ class EventProcessor(object):
         if not current_scope:
             namespace_owner = namespace_owner_from_id(event.id_value)
             if namespace_owner is None:
-                # Aucune des deux voies n'est alimentee : la portee est indeterminee.
-                # L'avertissement est emis ici, et **seulement ici** — les deux branches
-                # suivantes ont, elles, etabli la portee.
+                # Neither route is fed: the sharing scope is undetermined. The warning
+                # is emitted here, and **only here** - the two following branches have
+                # established the scope.
                 work.warn(SCOPE_UNDETERMINED_WARNING)
             elif not is_fixed_context(namespace_owner):
                 work.endpoint = ""
@@ -367,15 +368,15 @@ class EventProcessor(object):
 
         before = self._read_state(work)
 
-        # Rang 0 (§3.4, D-18) — il precede TOUS les autres controles, y compris
-        # `can_change_perms`. La relation de derivation est decouverte aupres de la
-        # plateforme : famille issue du chemin de handler resolu, identite issue de la
-        # reponse du GET, existence du porteur confirmee par un GET reel. Rien n'est
-        # reconstruit par concatenation a partir du nom d'un parent.
+        # Rank 0 (section 3.4, D-18) - it precedes ALL the other controls, including
+        # `can_change_perms`. The derivation relation is discovered from the platform:
+        # family from the resolved handler path, identity from the GET response,
+        # existence of the carrier confirmed by a real GET. Nothing is reconstructed by
+        # concatenation from a parent's name.
         #
-        # Le controle est place ici, apres le GET et **avant** la fusion : l'objet n'est
-        # pas modifie, il n'a donc pas d'etat cible, et sa ligne `outcome` ne porte pas
-        # de `before_*` / `after_*` — ce qui est exactement l'enumeration du §8.2.
+        # The control sits here, after the GET and **before** the merge: the object is
+        # not modified, so it has no target state, and its `outcome` line carries no
+        # `before_*` / `after_*` - which is exactly the enumeration of section 8.2.
         carrier, carrier_warning = self._carrier.carrier_of(
             event.app, handler_path, work.platform_name
         )
@@ -393,10 +394,10 @@ class EventProcessor(object):
         for warning in merged.warnings:
             work.warn(warning)
 
-        if merged.rejection is not None:                              # rangs 1 a 4
+        if merged.rejection is not None:                              # ranks 1 to 4
             raise merged.rejection
 
-        if self._params.validate_roles:                               # rang 5
+        if self._params.validate_roles:                               # rank 5
             unknown_added, stale_preserved = validate_roles(
                 merged.before, merged.after, self._roles
             )
@@ -407,24 +408,24 @@ class EventProcessor(object):
                     "invalid_role", "invalid_role:%s" % ",".join(unknown_added)
                 )
 
-        if is_noop(merged.before, merged.after):                      # rang 6
-            # Le rang 6 precede le rang 7 : un objet deja conforme est un `noop` meme
-            # en simulation. C'est ce qui permet de mesurer la convergence d'un lot
-            # sans ecrire.
+        if is_noop(merged.before, merged.after):                      # rank 6
+            # Rank 6 precedes rank 7: an object already compliant is a `noop` even in
+            # simulation. That is what makes it possible to measure the convergence of a
+            # batch without writing.
             work.status = "noop"
             return
 
-        if self._params.dryrun:                                       # rang 7
+        if self._params.dryrun:                                       # rank 7
             work.status = "dryrun"
             return
 
         failed = self._failed.get(work.endpoint)
         if failed is not None and failed.after == merged.after:
-            # §10.8 : le meme objet, deja soumis au meme etat cible dans cette
-            # execution, n'est pas resoumis. Le resultat du premier envoi est reproduit
-            # tel quel — ni ligne `intent`, ni POST, ni increment du compteur. Une
-            # occulation serait pire : le doublon ressortirait `updated` sur un objet
-            # que la plateforme a refuse d'ecrire.
+            # Section 10.8: the same object, already submitted with the same target
+            # state within this run, is not resubmitted. The result of the first send is
+            # reproduced as is - no `intent` line, no POST, no increment of the counter.
+            # Hiding it would be worse: the duplicate would come out as `updated` on an
+            # object the platform refused to write.
             work.status = failed.status
             work.error = failed.error
             work.http_code = failed.http_code
@@ -436,8 +437,8 @@ class EventProcessor(object):
         if self._journal is not None:
             record = build_intent_record(self._ctx, work.result(), self._clock())
             if not self._journal.write_intent(record):
-                # L'echec de la sequence write + flush + fsync annule le POST pour
-                # l'objet concerne (§8.4).
+                # A failure of the write + flush + fsync sequence cancels the POST for
+                # the object concerned (section 8.4).
                 raise EventRejected("error", "journal_intent_failed")
             work.journaled = True
 
@@ -457,14 +458,14 @@ class EventProcessor(object):
                 % (response.status, response.error or response.text())
             )
             if is_persistence_failure(response.status):
-                # Un refus de persistance laisse la vue **runtime** de splunkd mutee
-                # alors que le disque est intact : la commande dit vrai vis-a-vis du
-                # disque et faux vis-a-vis de ce que voient les utilisateurs, les
-                # recherches et les controles d'acces. L'objet est de surcroit exclu du
-                # jeu de restauration — `editacl_rollback` ne retient que les `outcome`
-                # de statut `updated`, filtre correct au regard du disque et muet au
-                # regard de l'observable. La divergence est produite par la plateforme
-                # et n'est pas evitable ; elle doit etre visible.
+                # A persistence refusal leaves the **runtime** view of splunkd mutated
+                # while the disk is intact: the command tells the truth with respect to
+                # the disk and something false with respect to what users, searches and
+                # access controls see. The object is moreover excluded from the rollback
+                # set - `editacl_rollback` only keeps the `outcome` lines with status
+                # `updated`, a filter that is correct with respect to the disk and silent
+                # with respect to the observable. The divergence is produced by the
+                # platform and cannot be avoided; it must be visible.
                 work.warn(RUNTIME_DIVERGENCE_WARNING)
             self._failed[work.endpoint] = _FailedPost(
                 merged.before,
@@ -475,14 +476,14 @@ class EventProcessor(object):
                 tuple(work.warnings),
             )
 
-    # -- etapes --------------------------------------------------------- #
+    # -- steps ----------------------------------------------------------- #
 
     def _check_required(self, event):
-        """`title` et `app` sont requis (§3.1). Le proprietaire ne l'est plus.
+        """`title` and `app` are required (section 3.1). The owner no longer is.
 
-        Il ne l'est plus parce qu'il n'entre plus : l'adressage se fait par contexte
-        fixe et la valeur transmise au POST est celle du GET tant que `new_owner` n'est
-        pas fourni (D-25).
+        It no longer is because it no longer enters: addressing goes through the fixed
+        context and the value sent with the POST is the one from the GET as long as
+        `new_owner` is not supplied (D-25).
         """
         for name, value in (("title", event.title), ("app", event.app)):
             if not str(value or "").strip():
@@ -491,27 +492,28 @@ class EventProcessor(object):
             raise EventRejected("rejected", "app_system_forbidden")
 
     def _read_state(self, work):
-        """Lecture de l'etat courant (§5.3). Le resultat du GET fait autorite.
+        """Read the current state (section 5.3). The result of the GET is authoritative.
 
-        La deduplication du §10.8 court-circuite le GET pour un objet deja soumis a un
-        POST dans l'execution courante : l'etat memorise tient lieu d'etat courant. Il
-        vaut l'etat cible si le POST a abouti, l'etat anterieur s'il a ete refuse — un
-        POST refuse ne modifie pas l'objet.
+        The deduplication of section 10.8 short-circuits the GET for an object already
+        submitted with a POST within the current run: the memorized state stands for the
+        current state. It is the target state if the POST succeeded, the prior state if
+        it was refused - a refused POST does not modify the object.
 
-        Ce court-circuit est aussi ce qui rend le traitement **deterministe** sur le cas
-        du §5.6 : un refus `HTTP 500` de persistance laisse la vue runtime mutee, si
-        bien qu'une relecture ferait ressortir le doublon en `noop` et masquerait
-        l'echec. La memoire d'execution fait autorite sur cette vue divergente.
+        This short circuit is also what makes the processing **deterministic** on the
+        case of section 5.6: an `HTTP 500` persistence refusal leaves the runtime view
+        mutated, so much so that reading it again would make the duplicate come out as
+        `noop` and would mask the failure. The run's memory is authoritative over that
+        divergent view.
 
-        La deduplication ne modifie jamais le nombre d'evenements de sortie ni le
-        nombre de lignes `outcome`.
+        The deduplication never changes the number of output events nor the number of
+        `outcome` lines.
 
-        **Le court-circuit restitue l'identite de plateforme** memorisee au premier GET.
-        Le rang 0 du §5.4 la lit juste apres cet appel : la laisser a `None` rendrait le
-        controle de derivation inoperant sur une seconde occurrence du meme endpoint.
-        La sortie de cette methode porte donc le meme `platform_name` par les deux
-        chemins — c'est une garantie **locale**, qui ne suppose rien du mecanisme qui
-        alimente `_written` / `_failed`.
+        **The short circuit restores the platform identity** memorized on the first GET.
+        Rank 0 of section 5.4 reads it right after this call: leaving it at `None` would
+        make the derivation control inoperative on a second occurrence of the same
+        endpoint. The output of this method therefore carries the same `platform_name`
+        through both paths - a **local** guarantee, which supposes nothing about the
+        mechanism that feeds `_written` / `_failed`.
         """
         cached = self._written.get(work.endpoint)
         if cached is None:
@@ -540,9 +542,9 @@ class EventProcessor(object):
             document = json.loads(response.body.decode("utf-8", "replace"))
             entry = document["entry"][0]
             acl_block = entry["acl"]
-            # Identite canonique de l'objet telle que splunkd la renvoie. Elle alimente
-            # le rang 0 du §5.4 : c'est la donnee de plateforme sur laquelle repose
-            # l'identification d'un derive, par opposition au `title` de l'evenement.
+            # Canonical identity of the object as splunkd returns it. It feeds rank 0 of
+            # section 5.4: it is the platform datum on which the identification of a
+            # derived object rests, as opposed to the `title` of the event.
             work.platform_name = entry.get("name")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise EventRejected(
@@ -552,16 +554,16 @@ class EventProcessor(object):
         return parse_acl_state(acl_block)
 
     def _emit(self, result):
-        """Ecrit la ligne `outcome` et renvoie le resultat definitif.
+        """Write the `outcome` line and return the final result.
 
-        `write_outcome` est appele sur **toutes** les sorties, sans exception : c'est ce
-        qui tient l'invariant « une ligne `outcome` par evenement de sortie ».
+        `write_outcome` is called on **every** exit, without exception: that is what
+        holds the invariant "one `outcome` line per output event".
         """
         if self._journal is not None:
             record = build_outcome_record(self._ctx, result, self._clock())
             if not self._journal.write_outcome(record):
-                # Le POST a deja eu lieu : rien n'est annule, mais l'atteinte a
-                # l'invariant doit etre signalee.
+                # The POST has already happened: nothing is rolled back, but the breach
+                # of the invariant must be reported.
                 result = replace(
                     result, warnings=result.warnings + ("journal_outcome_failed",)
                 )

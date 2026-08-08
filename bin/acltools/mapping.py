@@ -1,13 +1,12 @@
-"""Table de correspondance `eai:type` -> chemin de handler (§6).
+"""Mapping table `eai:type` -> handler path (section 6).
 
-Deux sources, dans cet ordre : `bin/acl_endpoint_map.json` (livre), puis
-`lookups/acl_endpoint_map_override.csv` (cree par l'exploitant, jamais livre — D-5),
-qui surcharge la premiere.
+Two sources, in this order: `bin/acl_endpoint_map.json` (shipped), then
+`lookups/acl_endpoint_map_override.csv` (created by the operator, never shipped -
+D-5), which overrides the first.
 
-Aucune heuristique de derivation n'est admise (§6.2) : `resolve` renvoie `None` sur
-un type inconnu, jamais une valeur devinee. La mesure en lab le justifie
-empiriquement — `commands` se resout en `admin/commandsconf`, `conf-times` en
-`data/ui/times`.
+No derivation heuristic is allowed (section 6.2): `resolve` returns `None` on an
+unknown type, never a guessed value. The lab measurement justifies this empirically -
+`commands` resolves to `admin/commandsconf`, `conf-times` to `data/ui/times`.
 """
 
 import csv
@@ -17,29 +16,28 @@ import re
 
 from .errors import FatalMappingError
 
-#: Un chemin de handler est un litteral URL-sur. Le fichier d'override etant
-#: editable par l'exploitant, il constitue une entree non fiable : un chemin forge
-#: pourrait viser un endpoint arbitraire.
+#: A handler path is a URL-safe literal. Since the override file is editable by the
+#: operator, it is untrusted input: a forged path could aim at an arbitrary endpoint.
 HANDLER_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$")
 
-#: Segment de traversee de chemin — `.`, `..`, et toute suite de points. Le motif
-#: ci-dessus exige un premier caractere alphanumerique, ce qui ecarte un `../` en tete,
-#: mais admet un `..` en position ulterieure : le point figure dans la classe de
-#: caracteres des segments suivants.
+#: Path traversal segment - `.`, `..`, and any run of dots. The pattern above requires
+#: an alphanumeric first character, which rules out a leading `../`, but it admits a
+#: `..` in a later position: the dot belongs to the character class of the following
+#: segments.
 _DOT_SEGMENT_RE = re.compile(r"^\.+$")
 
 
 def is_valid_handler_path(path):
-    """Vrai si `path` est un chemin de handler admissible.
+    """True if `path` is an admissible handler path.
 
-    Le refus des segments `.` et `..` est **la defense de l'outil**, pas un doublon de
-    celle de la plateforme. Splunk 9.4.6 ne normalise pas `..` — il le traite comme une
-    action de handler et repond 404 — mais faire reposer le confinement au namespace
-    sur le comportement d'un tiers n'est pas s'en defendre : un socle qui normaliserait
-    le chemin, ou un changement de comportement en amont, rendrait la reconstruction
-    d'URI exploitable. `handler_path` est le seul des quatre segments a n'etre
-    deliberement pas `%`-encode (§5.2), et il provient soit de la table livree, soit du
-    fichier d'override edite par l'exploitant, soit du champ `id` de l'evenement.
+    Refusing the `.` and `..` segments is **the tool's own defense**, not a duplicate
+    of the platform's. Splunk 9.4.6 does not normalize `..` - it treats it as a handler
+    action and answers 404 - but resting namespace confinement on a third party's
+    behavior is not defending against it: a platform that did normalize the path, or a
+    behavior change upstream, would make the URI reconstruction exploitable.
+    `handler_path` is the only one of the four segments deliberately left un-`%`-encoded
+    (section 5.2), and it comes either from the shipped table, or from the override
+    file edited by the operator, or from the `id` field of the event.
     """
     if not path or not HANDLER_PATH_RE.match(path):
         return False
@@ -47,7 +45,7 @@ def is_valid_handler_path(path):
 
 
 class Mapping(object):
-    """Table `eai:type` -> `handler_path`, immuable apres construction."""
+    """Table `eai:type` -> `handler_path`, immutable once built."""
 
     def __init__(self, entries, from_json=(), from_override=(), rejected=()):
         self._entries = dict(entries)
@@ -56,7 +54,7 @@ class Mapping(object):
         self._rejected = tuple(rejected)
 
     def resolve(self, eai_type):
-        """Renvoie le `handler_path` d'un `eai:type`, ou `None` s'il est inconnu."""
+        """Return the `handler_path` of an `eai:type`, or `None` if it is unknown."""
         if not eai_type:
             return None
         return self._entries.get(str(eai_type).strip())
@@ -65,7 +63,7 @@ class Mapping(object):
         return tuple(sorted(self._entries))
 
     def coverage(self):
-        """Etat de la table, pour le README §6.4 et la re-validation §6.5."""
+        """State of the table, for README section 6.4 and re-validation section 6.5."""
         return {
             "total": len(self._entries),
             "from_json": len(self._from_json),
@@ -85,15 +83,15 @@ class Mapping(object):
 
 
 def load_mapping(json_path, override_csv_path=None, diag=None):
-    """Charge la table livree puis l'override eventuel.
+    """Load the shipped table, then the override if there is one.
 
-    `diag` est un callable optionnel `(niveau, message)` pour le journal de
-    diagnostic ; le paquet ne connait pas `logging` de la plateforme.
+    `diag` is an optional callable `(level, message)` for the diagnostic log; the
+    package does not know the platform's `logging`.
 
-    Erreurs : `FatalMappingError` si le JSON est absent, illisible ou mal forme (§9).
-    Un CSV d'override **absent est normal** ; un CSV illisible produit un
-    avertissement de diagnostic, pas une erreur fatale — l'absence d'override ne doit
-    pas empecher l'execution avec la table livree.
+    Errors: `FatalMappingError` if the JSON is missing, unreadable or malformed
+    (section 9). A **missing override CSV is normal**; an unreadable CSV produces a
+    diagnostic warning, not a fatal error - the absence of an override must not prevent
+    running with the shipped table.
     """
     def _diag(level, message):
         if diag is not None:
@@ -104,16 +102,16 @@ def load_mapping(json_path, override_csv_path=None, diag=None):
             raw = json.load(handle)
     except (IOError, OSError) as exc:
         raise FatalMappingError(
-            "table de correspondance illisible (%s) : %s" % (json_path, exc)
+            "mapping table unreadable (%s): %s" % (json_path, exc)
         )
     except ValueError as exc:
         raise FatalMappingError(
-            "table de correspondance mal formee (%s) : %s" % (json_path, exc)
+            "mapping table malformed (%s): %s" % (json_path, exc)
         )
 
     if not isinstance(raw, dict):
         raise FatalMappingError(
-            "table de correspondance mal formee (%s) : objet JSON attendu" % json_path
+            "mapping table malformed (%s): a JSON object was expected" % json_path
         )
 
     entries = {}
@@ -124,7 +122,7 @@ def load_mapping(json_path, override_csv_path=None, diag=None):
         value = str(handler_path).strip()
         if not key or not is_valid_handler_path(value):
             rejected.append((key, value, "acl_endpoint_map.json"))
-            _diag("WARNING", "entree de table ecartee : %r -> %r" % (key, value))
+            _diag("WARNING", "table entry discarded: %r -> %r" % (key, value))
             continue
         entries[key] = value
         from_json.append(key)
@@ -139,21 +137,21 @@ def load_mapping(json_path, override_csv_path=None, diag=None):
                 ]
                 if "eai_type" not in fieldnames or "handler_path" not in fieldnames:
                     raise ValueError(
-                        "colonnes 'eai_type' et 'handler_path' attendues, vu %r"
+                        "columns 'eai_type' and 'handler_path' expected, saw %r"
                         % (fieldnames,)
                     )
                 for row in reader:
                     key = (row.get("eai_type") or "").strip()
                     value = (row.get("handler_path") or "").strip()
                     if not key or key.startswith("#"):
-                        # Ligne de commentaire : le fichier est edite a la main par
-                        # l'exploitant, il en contient necessairement.
+                        # Comment line: the file is hand-edited by the operator, so it
+                        # necessarily contains some.
                         continue
                     if not is_valid_handler_path(value):
                         rejected.append((key, value, "override"))
                         _diag(
                             "WARNING",
-                            "entree d'override ecartee : %r -> %r" % (key, value),
+                            "override entry discarded: %r -> %r" % (key, value),
                         )
                         continue
                     entries[key] = value
@@ -161,7 +159,7 @@ def load_mapping(json_path, override_csv_path=None, diag=None):
         except (IOError, OSError, ValueError, csv.Error) as exc:
             _diag(
                 "WARNING",
-                "override illisible, table livree conservee (%s) : %s"
+                "override unreadable, shipped table kept (%s): %s"
                 % (override_csv_path, exc),
             )
 

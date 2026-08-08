@@ -1,10 +1,10 @@
-"""Client REST vers splunkd. **Seul module du paquet autorise a ouvrir une socket.**
+"""REST client towards splunkd. **Only module of the package allowed to open a socket.**
 
-Bibliotheque standard uniquement : aucune dependance a `requests`, ni a la version
-du SDK de commande de recherche livree par la plateforme.
+Standard library only: no dependency on `requests`, and none on the version of the
+search-command SDK shipped by the platform.
 
-Aucune exception reseau ne remonte : un echec de transport devient une reponse de
-statut `0`. Le noyau n'a ainsi qu'un seul chemin de traitement.
+No network exception escapes: a transport failure becomes a response with status `0`.
+The core therefore has a single processing path.
 """
 
 import ssl
@@ -13,23 +13,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-#: Constantes de module, **pas** des parametres de commande : le §4.1 fige la surface
-#: parametrique de `editacl`.
+#: Module constants, **not** command parameters: section 4.1 freezes the parameter
+#: surface of `editacl`.
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 60
 
-#: Une seule reprise, apres temporisation, sur `5xx` **au GET** (§5.3).
-#: **Aucune reprise sur le POST** : elle ne distinguerait pas « le premier POST n'est
-#: pas parti » de « le premier POST a abouti et la reponse s'est perdue ». Le §8.7
-#: traite ce cas par controle croise avec le journal d'acces de splunkd, ce qui suppose
-#: de ne pas multiplier les tentatives.
+#: A single retry, after a delay, on `5xx` **for the GET** (section 5.3).
+#: **No retry on the POST**: it could not tell "the first POST never left" from "the
+#: first POST succeeded and the response was lost". Section 8.7 handles that case by
+#: cross-checking with the splunkd access log, which presupposes not multiplying the
+#: attempts.
 RETRY_DELAY_SECONDS = 2
 
-#: Marqueurs d'un echec de transport imputable a TLS, cherches en minuscules dans le
-#: message normalise de `RestResponse.error`.
+#: Markers of a transport failure attributable to TLS, searched for in lower case in
+#: the normalized message of `RestResponse.error`.
 #:
-#: Le classement vit ici, avec le code qui **produit** ce message : separer les deux
-#: garantirait leur divergence au premier changement de format.
+#: The classification lives here, next to the code that **produces** that message:
+#: separating the two would guarantee they diverge at the first format change.
 TLS_FAILURE_MARKERS = (
     "sslcertverificationerror",
     "sslerror",
@@ -43,33 +43,32 @@ TLS_FAILURE_MARKERS = (
     "doesn't match either of",
 )
 
-#: Message de remediation d'un echec TLS. Il **designe le parametre** : sans cela,
-#: l'operateur ne voit qu'un `HTTP 0` sur un appel de preflight et n'a aucune raison de
-#: soupconner le certificat. Le cas nominal est un socle a certificat auto-signe, sur
-#: lequel `verify_ssl` vaut `true` par defaut (§2.2).
+#: Remediation message for a TLS failure. It **names the setting**: without it the
+#: operator only sees an `HTTP 0` on a preflight call and has no reason to suspect the
+#: certificate. The nominal case is a platform with a self-signed certificate, on which
+#: `verify_ssl` defaults to `true` (section 2.2).
 TLS_REMEDIATION = (
-    "echec de la verification TLS du certificat de splunkd. Socle a certificat "
-    "auto-signe : creer le fichier local/editacl.conf de l'app SA-acl-tools avec "
-    "[editacl] puis verify_ssl = false, ou installer le CA de la plateforme dans "
+    "TLS verification of the splunkd certificate failed. On a platform with a "
+    "self-signed certificate: create the file local/editacl.conf of the SA-acl-tools "
+    "app with [editacl] then verify_ssl = false, or install the platform CA in "
     "$SPLUNK_HOME/etc/auth/cacert.pem."
 )
 
 
 def is_tls_failure(response):
-    """Vrai si `response` est un echec de **transport** imputable a TLS.
+    """True if `response` is a **transport** failure attributable to TLS.
 
-    Un echec TLS se presente au noyau comme n'importe quel autre echec de transport —
-    `status = 0` — donc comme un `HTTP 0` indifferencie. C'est ce que cette fonction
-    permet de lever.
+    A TLS failure reaches the core like any other transport failure - `status = 0` -
+    hence as an undifferentiated `HTTP 0`. This function is what lifts that ambiguity.
     """
     if response is None or getattr(response, "status", None) != 0:
         return False
     marker = str(getattr(response, "error", "") or "").lower()
-    return any(motif in marker for motif in TLS_FAILURE_MARKERS)
+    return any(pattern in marker for pattern in TLS_FAILURE_MARKERS)
 
 
 class RestResponse(object):
-    """`(status, body, error)`. `status = 0` signale un echec de transport."""
+    """`(status, body, error)`. `status = 0` signals a transport failure."""
 
     __slots__ = ("status", "body", "error")
 
@@ -94,7 +93,7 @@ class RestResponse(object):
 
 
 def build_ssl_context(verify_ssl=True, ca_file=None):
-    """Contexte TLS. Verification activee par defaut, avec le CA bundle de la plateforme."""
+    """TLS context. Verification on by default, with the platform CA bundle."""
     if not verify_ssl:
         context = ssl.create_default_context()
         context.check_hostname = False
@@ -106,10 +105,10 @@ def build_ssl_context(verify_ssl=True, ca_file=None):
 
 
 class RestClient(object):
-    """Client HTTP minimal vers `splunkd_uri`.
+    """Minimal HTTP client towards `splunkd_uri`.
 
-    La cle de session ne figure ni dans un log, ni dans un message d'erreur, ni dans
-    une URL : elle n'est portee que par l'en-tete `Authorization`.
+    The session key appears in no log, in no error message and in no URL: it is only
+    carried by the `Authorization` header.
     """
 
     def __init__(self, base_uri, session_key, verify_ssl=True, ca_file=None):
@@ -145,15 +144,15 @@ class RestClient(object):
                 body = b""
             return RestResponse(exc.code, body)
         except Exception as exc:
-            # Echec de transport : jamais d'exception vers le noyau. Le message est
-            # normalise et ne peut pas contenir la cle de session, qui n'apparait que
-            # dans un en-tete.
+            # Transport failure: never an exception towards the core. The message is
+            # normalized and cannot contain the session key, which only appears in a
+            # header.
             return RestResponse(0, b"", "transport:%s: %s" % (type(exc).__name__, exc))
 
-    # -- port REST --------------------------------------------------------- #
+    # -- REST port --------------------------------------------------------- #
 
     def get_object_acl(self, object_path):
-        """`GET <object_path>?output_mode=json&f=eai:acl*` — une reprise sur `5xx`."""
+        """`GET <object_path>?output_mode=json&f=eai:acl*` - one retry on `5xx`."""
         params = {"output_mode": "json", "f": "eai:acl*"}
         response = self._request("GET", object_path, params=params)
         if 500 <= response.status < 600:
@@ -162,16 +161,16 @@ class RestClient(object):
         return response
 
     def post_object_acl(self, object_path, payload):
-        """`POST <object_path>/acl`, corps `application/x-www-form-urlencoded`.
+        """`POST <object_path>/acl`, body `application/x-www-form-urlencoded`.
 
-        Aucune reprise, volontairement.
+        No retry, deliberately.
         """
         body = dict(payload)
         body["output_mode"] = "json"
         return self._request("POST", object_path + "/acl", payload=body)
 
     def get_json(self, path, params=None):
-        """Appel de preflight (contexte, roles, apps, tache de recherche)."""
+        """Preflight call (context, roles, apps, search job)."""
         merged = {"output_mode": "json"}
         if params:
             merged.update(params)
