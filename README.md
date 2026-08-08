@@ -627,10 +627,24 @@ portée. L'objet ressort alors en `skipped_private` avec l'avertissement
 > moissonné dans un contexte nominatif ressortirait `skipped_private` à tort.
 > **L'abstention, jamais une écriture fautive** — c'est la même discipline qu'au rang 0.
 
-Si ni la portée ni un `id` exploitable ne sont disponibles, l'objet suit son cours et
-ressort en `not_found` — et cette fois la promesse tient, faute de toute désignation
-permettant de faire mieux. **Bâtissez le pipeline sur la macro d'inventaire**, qui émet
-toujours les deux.
+**Si ni la portée ni un `id` exploitable ne sont disponibles, la commande ne peut pas
+savoir.** Elle ne dispose alors que d'un nom et d'une application, résout par le contexte
+fixe, et atteint donc **l'objet partagé** s'il en existe un de ce nom — alors que la
+ligne d'entrée désignait peut-être un privé homonyme. Ce n'est pas un défaut de
+l'adressage : sans désignation de portée, aucune information ne permet de distinguer les
+deux.
+
+Le comportement n'est donc pas modifié, il est **rendu visible** : l'événement porte
+`acl_warning = "scope_undetermined"`. L'opérateur voit qu'il opère sans discrimination,
+au lieu de le déduire. L'avertissement ne se déclenche que là où la discrimination est
+réellement impossible : dès que la portée courante est exploitable, ou que l'`id` porte
+un namespace — nominatif comme `nobody` —, la portée est établie et rien n'est signalé.
+
+> Les versions antérieures de cette section promettaient un `not_found` dans ce cas.
+> **C'était faux**, mesuré : dès qu'un homonyme partagé existe, le GET aboutit sur lui.
+
+**Bâtissez le pipeline sur la macro d'inventaire**, qui émet toujours les deux
+désignations et rend ce cas inatteignable.
 
 L'inventaire, lui, continue de les lister : la règle porte sur l'écriture, pas sur la
 vue.
@@ -879,7 +893,7 @@ l'intégralité de ses champs, augmenté de :
 | Champ | Contenu |
 |---|---|
 | `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `skipped_derived`, `skipped_private`, `skipped_ceiling`, `error` |
-| `acl_endpoint` | Chemin de l'objet ciblé, **sans** schéma, hôte, port ni suffixe `/acl` |
+| `acl_endpoint` | Chemin de l'objet ciblé, **sans** schéma, hôte, port ni suffixe `/acl`. **Vide** sur les abstentions qui n'adressent rien — `skipped_private`, `skipped_ceiling` — où il désignerait un objet autre que celui de la ligne d'entrée |
 | `acl_http_code` | Code HTTP du POST, ou du GET en cas d'échec amont. **Sentinelle `0`** en l'absence de tout échange HTTP |
 | `acl_error` | Message d'erreur, tronqué à 512 caractères |
 | `acl_warning` | Avertissements non bloquants, **concaténés par `;`** dans un ordre stable |
@@ -891,7 +905,8 @@ l'intégralité de ses champs, augmenté de :
 Avertissements possibles : `sharing_change`, `owner_change`, `app_disabled`,
 `stale_role_preserved:<liste>`, `journal_outcome_failed`,
 `duplicate_post_suppressed`, `runtime_divergence_possible`,
-`carrier_probe_inconclusive:<code>`, `private_detected_by_id_namespace`.
+`carrier_probe_inconclusive:<code>`, `private_detected_by_id_namespace`,
+`scope_undetermined`.
 
 > **Le jeu de champs de sortie est déclaré, jamais inféré.** Le writer du SDK construit
 > l'en-tête du flux à partir des clés du **premier enregistrement émis**, puis y projette

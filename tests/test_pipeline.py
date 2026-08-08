@@ -2,10 +2,13 @@
 
 import unittest
 
+from acltools.endpoint import build_object_path
+from acltools.model import ACL_STATUSES
 from acltools.pipeline import (
     PRIVATE_BY_ID_WARNING,
     RUNTIME_DIVERGENCE_MESSAGE,
     RUNTIME_DIVERGENCE_WARNING,
+    SCOPE_UNDETERMINED_WARNING,
     EventProcessor,
     ceiling_message,
 )
@@ -225,14 +228,15 @@ class SkippedPrivateTest(unittest.TestCase):
         result = processor().process(make_event(current_sharing=" User "))
         self.assertEqual(result.status, "skipped_private")
 
-    def test_ni_portee_ni_id_exploitable_repli_en_not_found(self):
-        """§3.5 — ni portee courante, ni `id` : l'objet ressort en `not_found`.
+    def test_ni_portee_ni_id_exploitable_le_get_a_lieu_et_tranche(self):
+        """§3.5, D-38 — ni portee courante, ni `id` : la commande **poursuit**.
 
-        C'est le seul cas ou le repli annonce tient, et il tient **parce qu'aucune
-        designation ne permet de faire mieux**. Des qu'un `id` est disponible, la
-        seconde voie du §3.5 s'applique et ce chemin n'est plus emprunte — d'ou la
-        recommandation de batir le pipeline sur la macro d'inventaire, qui emet
-        toujours les deux.
+        Elle n'a plus rien pour discriminer : elle resout par le contexte fixe et
+        emet le GET. Ici l'objet n'existe pas sous ce chemin, l'objet ressort donc en
+        `not_found` — mais ce `not_found` est le verdict du GET, **pas un repli
+        garanti** : qu'un homonyme partage existe et le GET aboutit (voir
+        `PorteeIndetermineeTest`). C'est exactement la promesse que les versions
+        anterieures du §3.5 tenaient pour acquise et que la mesure a dementie.
         """
         rest = FakeRest(default_get=RestResponse(404, b"{}"))
         result = processor(rest).process(
@@ -240,6 +244,7 @@ class SkippedPrivateTest(unittest.TestCase):
         )
         self.assertEqual(result.status, "not_found")
         self.assertEqual(len(rest.gets()), 1)
+        self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
 
     def test_un_objet_partage_nest_pas_ecarte(self):
         for portee in ("app", "global"):
@@ -297,12 +302,58 @@ class PriveDetecteParLeNamespaceDeIdTest(unittest.TestCase):
         self.assertEqual(result.http_code, 0)
 
     def test_le_meme_lot_sans_la_correction_atteindrait_le_partage(self):
-        """Temoin explicite du defaut : l'endpoint que la commande aurait cible est
-        bien celui du partage, pas celui du prive. C'est ce que l'auditeur a mesure."""
-        result = processor().process(self._evenement(self.ID_PRIVE))
+        """Temoin explicite du defaut : le chemin que l'adressage fixe produit pour
+        cette ligne est bien celui du **partage**, pas celui du prive. C'est ce que
+        l'auditeur a mesure — et c'est precisement pourquoi la commande ne le publie
+        pas en `acl_endpoint` (test suivant)."""
         self.assertEqual(
-            result.endpoint, "/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche"
+            build_object_path("mon_app", "saved/searches", "Ma recherche"),
+            "/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche",
         )
+
+    def test_acl_endpoint_ne_designe_pas_lhomonyme_partage(self):
+        """B-6 — `acl_endpoint` d'un `skipped_private` doit etre **vide**.
+
+        Renseigne, il porterait le chemin de l'objet partage homonyme, c'est-a-dire un
+        objet *autre* que celui que la ligne d'entree designe, dans une sortie faite
+        pour etre relue. Le chemin du prive reellement designe n'est pas une option de
+        rechange : il exigerait un contexte d'adressage nominatif, que
+        `build_object_path` n'accepte pas — garantie structurelle de D-25.
+
+        Vide est donc la seule valeur juste, et elle est **coherente avec le reste de
+        la sortie** : `acl_http_code = 0` dit deja qu'aucun echange n'a eu lieu.
+        """
+        result = processor().process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(result.status, "skipped_private")
+        self.assertEqual(result.endpoint, "")
+        self.assertEqual(result.http_code, 0)
+
+    def test_acl_endpoint_est_vide_par_les_deux_voies_de_detection(self):
+        """Le motif d'ecartement est le meme par les deux voies (`PRIVATE_ERROR`) ;
+        le champ d'endpoint l'est aussi. Un operateur qui filtre sur le statut ne doit
+        pas avoir a connaitre la voie."""
+        result = processor().process(
+            make_event(current_sharing="user", write="nouveau_role_admin")
+        )
+        self.assertEqual(result.status, "skipped_private")
+        self.assertEqual(result.endpoint, "")
+
+    def test_la_ligne_de_journal_porte_le_meme_endpoint_vide(self):
+        """§8.5 — `acl_endpoint` et le champ `endpoint` du journal sont **la meme
+        chaine**, calculee une fois. Corriger l'un sans l'autre reintroduirait la
+        divergence que le §8.5 interdit."""
+        journal = FakeJournal()
+        proc = processor(journal=journal)
+        result = proc.process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(journal.outcomes[0]["endpoint"], result.endpoint)
+        self.assertEqual(journal.outcomes[0]["endpoint"], "")
+
+    def test_un_statut_qui_a_bien_cible_conserve_son_endpoint(self):
+        """La correction est **circonscrite** a l'abstention sans echange HTTP : un
+        statut dont le GET a porte sur l'objet designe garde son `acl_endpoint`."""
+        result = processor().process(self._evenement(self.ID_PARTAGE))
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(result.endpoint, ENDPOINT)
 
     def test_lecartement_est_signale_a_loperateur(self):
         """Le statut ne dit pas par quelle voie l'objet a ete ecarte ; l'avertissement
@@ -346,6 +397,160 @@ class PriveDetecteParLeNamespaceDeIdTest(unittest.TestCase):
         self.assertEqual(len(journal.outcomes), 1)
         self.assertEqual(journal.outcomes[0]["status"], "skipped_private")
         self.assertEqual(journal.intents, [])
+
+
+class PorteeIndetermineeTest(unittest.TestCase):
+    """§3.5, D-38 — la portee indeterminee est **rendue visible**.
+
+    Quand ni la colonne de portee ni un `id` exploitable ne sont disponibles, la
+    commande ne dispose que d'un nom et d'une application. Elle resout par le contexte
+    fixe et atteint donc l'objet **partage** s'il en existe un de ce nom, alors que la
+    ligne d'entree designait peut-etre un prive homonyme. Le §3.5 ne demande pas de
+    changer ce comportement — sans designation de portee, rien ne permet de
+    discriminer — mais de le **signaler**.
+
+    Ce que ces tests eprouvent, c'est autant l'emission de l'avertissement que sa
+    **justesse** : un avertissement qui se declencherait dans le cas nominal serait du
+    bruit, et le bruit se filtre mentalement. Il ne vaudrait plus rien le jour ou il
+    compte. La moitie « il n'apparait pas » compte donc autant que l'autre.
+    """
+
+    #: `id` sans namespace : la forme `/services/...` ne porte pas la donnee de portee.
+    ID_SANS_NAMESPACE = "https://base.invalid:0/services/saved/searches/Ma%2520recherche"
+
+    #: `id` tronque : moins de quatre segments apres le marqueur, rien n'est exploitable.
+    ID_TRONQUE = "https://base.invalid:0/servicesNS/nobody/mon_app"
+
+    ID_PRIVE = PriveDetecteParLeNamespaceDeIdTest.ID_PRIVE
+    ID_PARTAGE = PriveDetecteParLeNamespaceDeIdTest.ID_PARTAGE
+
+    # -- le cas indetermine : l'avertissement est la ----------------------- #
+
+    def test_ni_portee_ni_id_du_tout(self):
+        result = processor().process(
+            make_event(current_sharing=None, id_value=None, write="nouveau_role_admin")
+        )
+        self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_portee_presente_mais_vide_et_pas_d_id(self):
+        """Une cellule vide ne dit pas que l'objet est partage : elle ne dit rien."""
+        for portee in ("", "   "):
+            with self.subTest(portee=repr(portee)):
+                result = processor().process(
+                    make_event(current_sharing=portee, id_value=None,
+                               write="nouveau_role_admin")
+                )
+                self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_id_present_mais_sans_namespace_exploitable(self):
+        """L'`id` existe, mais ne porte pas la donnee : ce n'est pas la presence du
+        champ qui compte, c'est ce qu'il permet d'etablir."""
+        for id_value in (self.ID_SANS_NAMESPACE, self.ID_TRONQUE, ""):
+            with self.subTest(id_value=id_value):
+                result = processor().process(
+                    make_event(current_sharing=None, id_value=id_value,
+                               write="nouveau_role_admin")
+                )
+                self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_lavertissement_accompagne_lecriture_reelle_et_ne_lempeche_pas(self):
+        """Le comportement n'est pas change : l'objet est bien ecrit, et c'est cela
+        meme que l'avertissement rend visible. Un avertissement qui bloquerait serait
+        un autre contrat que celui du §3.5."""
+        rest = FakeRest()
+        result = processor(rest).process(
+            make_event(current_sharing=None, id_value=None, write="nouveau_role_admin")
+        )
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(len(rest.posts()), 1)
+        self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_lavertissement_survit_a_tous_les_statuts_en_aval(self):
+        """Il est pose avant le GET : il ne depend pas de l'issue du traitement, et un
+        `not_found` ou un `noop` le portent aussi bien qu'un `updated`."""
+        cas = (
+            ("not_found", FakeRest(default_get=RestResponse(404, b"{}")), "w"),
+            ("noop", FakeRest(default_get=RestResponse(200, acl_body(write=("w",)))), "w"),
+            ("dryrun", None, "nouveau_role_admin"),
+        )
+        for statut, rest, cible in cas:
+            with self.subTest(statut=statut):
+                params = make_params(dryrun=(statut == "dryrun"))
+                result = processor(rest, params=params).process(
+                    make_event(current_sharing=None, id_value=None, write=cible)
+                )
+                self.assertEqual(result.status, statut)
+                self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_il_est_emis_une_seule_fois_par_evenement(self):
+        result = processor().process(
+            make_event(current_sharing=None, id_value=None, write="nouveau_role_admin")
+        )
+        self.assertEqual(
+            list(result.warnings).count(SCOPE_UNDETERMINED_WARNING), 1
+        )
+
+    def test_il_ne_perturbe_pas_les_autres_avertissements(self):
+        """`acl_warning` est un jeu de jetons concatenes par `;` : le nouveau jeton
+        s'y ajoute, il ne se substitue a aucun autre."""
+        rest = FakeRest(default_get=RestResponse(200, acl_body(sharing="app")))
+        result = processor(rest).process(
+            make_event(current_sharing=None, id_value=None, sharing="global")
+        )
+        self.assertIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+        self.assertIn("sharing_change", result.warnings)
+
+    # -- le cas nominal : l'avertissement n'est pas la --------------------- #
+
+    def test_une_portee_partagee_exploitable_ne_le_declenche_pas(self):
+        for portee in ("app", "global", " App "):
+            with self.subTest(portee=portee):
+                result = processor().process(
+                    make_event(current_sharing=portee, id_value=None,
+                               write="nouveau_role_admin")
+                )
+                self.assertNotIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_un_objet_prive_detecte_par_la_portee_ne_le_declenche_pas(self):
+        """La portee est connue — elle vaut `user`. Rien n'est indetermine."""
+        result = processor().process(
+            make_event(current_sharing="user", write="nouveau_role_admin")
+        )
+        self.assertEqual(result.status, "skipped_private")
+        self.assertNotIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_un_id_en_namespace_nominatif_ne_le_declenche_pas(self):
+        """La seconde voie a tranche : l'objet est prive et il est ecarte. La portee
+        est etablie, l'avertissement n'aurait rien a dire."""
+        result = processor().process(
+            make_event(current_sharing=None, id_value=self.ID_PRIVE,
+                       write="nouveau_role_admin")
+        )
+        self.assertEqual(result.status, "skipped_private")
+        self.assertNotIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_un_id_en_contexte_fixe_ne_le_declenche_pas(self):
+        """Le cas qui compte le plus pour la justesse : la portee n'est pas dans le jeu
+        de resultats, mais l'`id` la porte — `nobody` dit que l'objet est partage. La
+        discrimination a eu lieu, l'objet ecrit est bien celui que la ligne designe."""
+        result = processor().process(
+            make_event(current_sharing=None, id_value=self.ID_PARTAGE,
+                       write="nouveau_role_admin")
+        )
+        self.assertEqual(result.status, "updated")
+        self.assertNotIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
+
+    def test_le_pipeline_recommande_ne_le_declenche_jamais(self):
+        """La macro d'inventaire emet **toujours** la portee et un `id` : le cas
+        indetermine lui est inatteignable. C'est la clause d'usage du §3.5, verifiee
+        sur la combinaison qu'elle produit."""
+        for portee in ("app", "global", "user"):
+            with self.subTest(portee=portee):
+                result = processor().process(
+                    make_event(current_sharing=portee, id_value=self.ID_PARTAGE,
+                               write="nouveau_role_admin")
+                )
+                self.assertNotIn(SCOPE_UNDETERMINED_WARNING, result.warnings)
 
 
 class AdressageSansProprietaireTest(unittest.TestCase):
@@ -423,11 +628,15 @@ class WarningTest(unittest.TestCase):
 class JournalInvariantTest(unittest.TestCase):
     """Les trois invariants verifiables du §8.2."""
 
-    DOUZE_STATUTS = (
-        "updated", "noop", "dryrun", "rejected", "not_found", "forbidden",
-        "invalid_role", "skipped_immutable", "skipped_private", "skipped_ceiling",
-        "error",
-    )
+    #: **L'enumeration n'est pas ecrite ici** : elle est importee de
+    #: `acltools.model.ACL_STATUSES`, elle-meme arrimee au code par
+    #: `tests/test_statuses.py`. La constante manuelle qui occupait cette place
+    #: annoncait douze statuts et en portait onze — `skipped_derived` manquait —, ce qui
+    #: rendait l'ensemble ferme ci-dessous muet sur ce statut. C'etait la quatrieme
+    #: redaction fausse de la meme liste ; une liste recopiee derive, un import non.
+    #:
+    #: Consequence recherchee : ajouter un statut au code sans lui ajouter un cas
+    #: ci-dessous **fait echouer ce test**.
 
     def test_invariant_1_une_ligne_outcome_par_evenement_de_sortie_tous_statuts(self):
         journal = FakeJournal()
@@ -450,7 +659,16 @@ class JournalInvariantTest(unittest.TestCase):
                     200, acl_body(can_change_perms=False)
                 ),
                 chemin("obj_invalidrole"): RestResponse(200, acl_body(write=("ancien_role",))),
-            }
+                # Derive : splunkd nomme l'objet `eventtype=<porteur>`, et le porteur
+                # existe — c'est le GET de confirmation ci-dessous qui l'etablit.
+                "/servicesNS/nobody/mon_app/saved/fvtags/eventtype%3Dun_porteur":
+                    RestResponse(200, acl_body(name="eventtype=un_porteur")),
+            },
+            json_responses={
+                "/servicesNS/nobody/mon_app/saved/eventtypes/un_porteur":
+                    RestResponse(200, b'{"entry":[]}'),
+            },
+            default_json=RestResponse(404, b"{}"),
         )
         proc = EventProcessor(
             params=make_params(validate_roles=True),
@@ -474,6 +692,17 @@ class JournalInvariantTest(unittest.TestCase):
         vus.append(proc.process(make_event(title="obj_rejected", app="system")).status)
         vus.append(
             proc.process(make_event(title="obj_prive", current_sharing="user")).status
+        )
+        # `skipped_derived` — le statut que l'enumeration manuelle omettait, et que
+        # l'ensemble ferme ci-dessous rendait donc invisible a cet invariant.
+        vus.append(
+            proc.process(
+                make_event(
+                    title="eventtype=un_porteur",
+                    eai_type="fvtags",
+                    write="nouveau_role_admin",
+                )
+            ).status
         )
         # Plafond a 1, sur un processeur dedie : le premier objet est ecrit, le second
         # est ecarte. Partager le journal fait entrer ses lignes dans le meme decompte.
@@ -510,7 +739,12 @@ class JournalInvariantTest(unittest.TestCase):
             ).status
         )
 
-        self.assertEqual(sorted(set(vus)), sorted(self.DOUZE_STATUTS))
+        self.assertEqual(
+            sorted(set(vus)), sorted(ACL_STATUSES),
+            "chaque acl_status declare par le noyau doit etre observe ici sur un cas "
+            "reel : c'est ce qui interdit qu'un statut entre dans la commande sans "
+            "son cas de test",
+        )
         self.assertEqual(
             len(journal.outcomes), len(vus),
             "une ligne outcome par evenement de sortie, sans exception",

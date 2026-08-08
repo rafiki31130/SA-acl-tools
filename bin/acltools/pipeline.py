@@ -46,6 +46,25 @@ PRIVATE_ERROR = "private_object_out_of_scope"
 #: d'inventaire, qui emet toujours les deux.
 PRIVATE_BY_ID_WARNING = "private_detected_by_id_namespace"
 
+#: Avertissement porte par `acl_warning` quand **aucune** des deux voies du §3.5 n'est
+#: alimentee : la portee courante est indisponible et l'`id` ne porte pas de namespace
+#: exploitable (D-38, §3.5).
+#:
+#: La commande ne dispose alors que d'un nom et d'une application. Elle resout par le
+#: contexte fixe et atteint donc l'objet **partage** s'il en existe un de ce nom, alors
+#: que la ligne d'entree designait peut-etre un prive homonyme. Ce n'est pas un defaut
+#: de l'adressage : sans designation de portee, aucune information ne permet de
+#: distinguer les deux. Le comportement n'est donc pas change — il est **rendu
+#: visible**.
+#:
+#: **Il ne se declenche que la ou la discrimination est reellement impossible.** Des que
+#: la portee courante est exploitable, ou que l'`id` porte un namespace — nominatif
+#: (l'objet est ecarte) comme fixe (l'objet est partage, et l'`id` le dit) —, la portee
+#: est etablie et l'avertissement n'est pas emis. Un avertissement qui se declencherait
+#: dans le cas nominal serait du bruit, et le bruit se filtre mentalement : il ne
+#: vaudrait plus rien le jour ou il compte.
+SCOPE_UNDETERMINED_WARNING = "scope_undetermined"
+
 #: Contexte applicatif hors perimetre (§1.3, §4.2). Refus **par evenement** : le §9
 #: enumere limitativement les erreurs fatales et ne l'y fait pas figurer.
 FORBIDDEN_APP = "system"
@@ -278,8 +297,18 @@ class EventProcessor(object):
 
         # Resolution de l'endpoint (§5.2) : calcul pur, aucun echange HTTP. Elle precede
         # la table de controles du §5.4 — c'est deja son rang dans la v1 — et donne un
-        # `acl_endpoint` exploitable a **tous** les statuts qui suivent, `skipped_private`
-        # compris.
+        # `acl_endpoint` exploitable a tous les statuts qui atteignent le GET.
+        #
+        # **Elle ne vaut pas pour `skipped_private`**, qui l'efface (voir plus bas). La
+        # chaine calculee ici est celle de l'objet **partage homonyme** : c'est un objet
+        # *autre* que celui que la ligne d'entree designe, et le publier dans une sortie
+        # destinee a etre relue induirait en erreur. La produire pour le prive reellement
+        # designe n'est pas une option : elle exigerait un contexte d'adressage
+        # nominatif, or `build_object_path` n'a deliberement **aucun** parametre de
+        # proprietaire — c'est la garantie structurelle de D-25. La valeur juste est donc
+        # vide, comme elle l'est deja pour `skipped_ceiling`, l'autre abstention sans
+        # echange HTTP : `acl_endpoint` vide et `acl_http_code = 0` disent la meme chose,
+        # rien n'a ete adresse.
         handler_path, source = resolve_handler_path(
             event.id_value, event.eai_type, self._mapping
         )
@@ -312,16 +341,27 @@ class EventProcessor(object):
         # dans un contexte nominatif ressortirait `skipped_private` a tort. Comme au
         # rang 0, **l'erreur est une abstention, jamais une ecriture fautive**.
         #
-        # Si ni la portee ni un `id` exploitable ne sont disponibles, l'objet suit son
-        # cours et ressortira en `not_found` faute de toute designation permettant de
-        # faire mieux — d'ou la recommandation du README de batir le pipeline sur la
-        # macro d'inventaire, qui emet toujours les deux.
+        # Si ni la portee ni un `id` exploitable ne sont disponibles, la commande **ne
+        # peut pas savoir** (D-38). Elle ne dispose que d'un nom et d'une application,
+        # resout par le contexte fixe, et atteint donc l'objet partage s'il en existe un
+        # de ce nom — la ligne d'entree designait peut-etre un prive homonyme. Le
+        # comportement reste celui-la, faute de toute information permettant de
+        # discriminer ; il est en revanche **signale** par `SCOPE_UNDETERMINED_WARNING`.
+        # Le README recommande de batir le pipeline sur la macro d'inventaire, qui emet
+        # toujours les deux designations et rend ce cas inatteignable.
         current_scope = (event.current_sharing or "").strip().lower()
         if current_scope == PRIVATE_SHARING:
+            work.endpoint = ""
             raise EventRejected("skipped_private", PRIVATE_ERROR)
         if not current_scope:
             namespace_owner = namespace_owner_from_id(event.id_value)
-            if namespace_owner is not None and not is_fixed_context(namespace_owner):
+            if namespace_owner is None:
+                # Aucune des deux voies n'est alimentee : la portee est indeterminee.
+                # L'avertissement est emis ici, et **seulement ici** — les deux branches
+                # suivantes ont, elles, etabli la portee.
+                work.warn(SCOPE_UNDETERMINED_WARNING)
+            elif not is_fixed_context(namespace_owner):
+                work.endpoint = ""
                 work.warn(PRIVATE_BY_ID_WARNING)
                 raise EventRejected("skipped_private", PRIVATE_ERROR)
 

@@ -23,6 +23,40 @@ TARGET_ATTRIBUTES = (
     TARGET_OWNER,
 )
 
+#: **Enumeration normative des `acl_status` du §5.7 — source unique.**
+#:
+#: Elle vit ici, dans le noyau, et non dans le jeu de tests ni dans le cahier des
+#: charges : une enumeration recopiee derive. Trois redactions du contrat, puis une du
+#: jeu de tests, ont eu cette liste fausse — deux fois par omission, une fois par exces.
+#: D-35 a supprime l'enumeration du §8.2 pour la confier au jeu de tests ; le jeu de
+#: tests l'a a son tour ecrite a la main, et elle a derive de la meme facon.
+#:
+#: Deux tests l'arriment au code et referment la classe d'erreur :
+#:
+#: - `tests/test_statuses.py` extrait de l'arbre syntaxique du noyau **tout** statut
+#:   litteral effectivement produit — premier argument d'un `EventRejected(...)`,
+#:   affectation d'un attribut `status` — et exige l'egalite avec ce tuple. Un statut
+#:   ajoute au code sans etre declare ici fait echouer la suite ;
+#: - l'invariant 1 du §8.2 (`tests/test_pipeline.py`) exige d'observer **chacune** de
+#:   ces valeurs sur un cas reel. Un statut declare ici sans cas de test fait donc
+#:   echouer la suite lui aussi.
+#:
+#: L'ordre est celui du tableau du §5.7.
+ACL_STATUSES = (
+    "updated",
+    "noop",
+    "dryrun",
+    "rejected",
+    "not_found",
+    "forbidden",
+    "invalid_role",
+    "skipped_immutable",
+    "skipped_derived",
+    "skipped_private",
+    "skipped_ceiling",
+    "error",
+)
+
 #: Champs de sortie portes par **tout** enregistrement, quel que soit `acl_status`
 #: (§5.7). Ils entrent dans l'en-tete du flux par le premier enregistrement venu.
 ACL_UNCONDITIONAL_FIELDS = (
