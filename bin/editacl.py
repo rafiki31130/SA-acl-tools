@@ -1,29 +1,30 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Commande de recherche `editacl` — adaptateur, **aucune regle metier ici**.
+"""`editacl` search command - adapter, **no business rule here**.
 
-Ce fichier fait trois choses et rien d'autre :
+This file does three things and nothing else:
 
-1. il insere `bin/lib` puis `bin` en tete de `sys.path`, avant tout autre import ;
-2. il declare la commande et ses parametres (§4.1) et cable le noyau `acltools` ;
-3. il traduit les exceptions fatales en sortie d'erreur et projette les champs `acl_*`
-   du §5.7 dans l'enregistrement de sortie.
+1. it inserts `bin/lib` then `bin` at the head of `sys.path`, before any other import;
+2. it declares the command and its parameters (section 4.1) and wires the `acltools`
+   core;
+3. it turns fatal exceptions into an error output and projects the `acl_*` fields of
+   section 5.7 into the output record.
 
-Toute la logique — normalisation, fusion, resolution d'endpoint, journal, machine a
-etats — vit dans `acltools`, qui ne depend ni du SDK ni du reseau et se teste hors
-Splunk.
+All the logic - normalization, merge, endpoint resolution, journal, state machine -
+lives in `acltools`, which depends neither on the SDK nor on the network and is tested
+outside Splunk.
 """
 
 import os
 import sys
 
 # --------------------------------------------------------------------------- #
-# sys.path — AVANT tout import du projet ou du SDK (§8.3 de la spec)
-# `bin/lib` en tete : la version vendorisee prime sur celle de la plateforme.
-# `bin` egalement, pour que `acltools` soit importable independamment du repertoire
-# de travail du processus de recherche, que la plateforme ne garantit pas.
-# Le chemin derive de `__file__`, jamais d'une variable d'environnement ni d'un chemin
-# absolu.
+# sys.path - BEFORE any import of the project or of the SDK (spec section 8.3)
+# `bin/lib` first: the vendored version takes precedence over the platform's.
+# `bin` as well, so that `acltools` is importable independently of the working
+# directory of the search process, which the platform does not guarantee.
+# The path is derived from `__file__`, never from an environment variable nor from an
+# absolute path.
 # --------------------------------------------------------------------------- #
 _BIN = os.path.dirname(os.path.abspath(__file__))
 for _p in (os.path.join(_BIN, "lib"), _BIN):
@@ -73,13 +74,33 @@ _APP_ROOT = os.path.dirname(_BIN)
 _MAP_JSON = os.path.join(_BIN, "acl_endpoint_map.json")
 _OVERRIDE_CSV = os.path.join(_APP_ROOT, "lookups", "acl_endpoint_map_override.csv")
 
+#: Prefix carried by **every** message addressed to the operator through the search
+#: interface: the name of the command, a colon, one space.
+#:
+#: A search pipeline concatenates the messages of every command it chains, and the
+#: interface displays them stripped of their origin. Until now an `editacl` warning was
+#: indistinguishable from a warning of the macro that feeds it, of `map`, or of the
+#: platform itself - which is precisely the situation where an operator dismisses a
+#: message that concerns an irreversible write.
+#:
+#: The prefix is applied at a **single emission point**, `_emit_message`, and never
+#: repeated on the literals: the day the form changes, it changes in one place. The
+#: repository already has that culture of the single injection point - see
+#: `field_present` in `acltools/binding.py`.
+#:
+#: It does **not** apply to `editacl.log` nor to the write-ahead journal: their origin
+#: is already established by their dedicated sourcetypes, `editacl:diag` and
+#: `editacl:journal` (section 8.3), and prefixing every line there would add noise to a
+#: stream that is parsed, not read.
+MESSAGE_PREFIX = "editacl: "
+
 
 def _read_app_setting(name, default):
-    """Lit `default/editacl.conf` puis `local/editacl.conf`.
+    """Read `default/editacl.conf` then `local/editacl.conf`.
 
-    Volontairement par fichier et non par l'endpoint REST `configs/conf-editacl` :
-    `verify_ssl` conditionne la construction du contexte TLS, on ne peut pas le lire
-    par un appel qui en depend.
+    Deliberately from the files and not through the `configs/conf-editacl` REST
+    endpoint: `verify_ssl` conditions the construction of the TLS context, so it cannot
+    be read through a call that depends on it.
     """
     parser = configparser.ConfigParser()
     for layer in ("default", "local"):
@@ -95,7 +116,7 @@ def _read_app_setting(name, default):
 
 
 def _app_version():
-    """Version declaree par `default/app.conf`, pour la ligne de demarrage du §8.1."""
+    """Version declared by `default/app.conf`, for the startup line of section 8.1."""
     parser = configparser.ConfigParser()
     try:
         parser.read(os.path.join(_APP_ROOT, "default", "app.conf"), encoding="utf-8")
@@ -108,12 +129,12 @@ def _app_version():
 
 
 def _abort_process(code=1):
-    """Quitte le processus **sans** derouler les `finally` ni le protocole du SDK.
+    """Leave the process **without** unwinding the `finally` blocks nor the SDK protocol.
 
-    Point d'indirection unique, pour deux raisons. La premiere est de nommer ce que
-    fait `os._exit` : il n'y a pas de retour, pas de nettoyage, pas de chunk final.
-    La seconde est de rendre le chemin d'echec **eprouvable** — un `os._exit` en dur
-    tuerait le processus de test au lieu de le faire echouer.
+    A single point of indirection, for two reasons. The first is to name what `os._exit`
+    does: there is no return, no cleanup, no final chunk. The second is to make the
+    failure path **exercisable** - a hardcoded `os._exit` would kill the test process
+    instead of failing it.
     """
     os._exit(code)                                                   # pragma: no cover
 
@@ -126,112 +147,114 @@ def _truthy(value, default=True):
     return str(value).strip().lower() in ("1", "true", "t", "yes", "y", "on")
 
 
-# `type` n'est pas passe a `@Configuration` : la classe de base `StreamingCommand` le
-# fige a `streaming`, et le SDK refuse toute redeclaration. Le §2.1 du cahier des
-# charges enonce `@Configuration(type='streaming', ...)` ; l'effet est identique, la
-# forme est imposee par le SDK. `local = true` est porte par `commands.conf`.
+# `type` is not passed to `@Configuration`: the `StreamingCommand` base class pins it to
+# `streaming`, and the SDK refuses any redeclaration. Section 2.1 of the specification
+# states `@Configuration(type='streaming', ...)`; the effect is identical, the form is
+# imposed by the SDK. `local = true` is carried by `commands.conf`.
 @Configuration(local=True)
 class EditAclCommand(StreamingCommand):
-    """Reecrit les ACL d'objets de connaissance decrits par le pipeline d'entree.
+    """Rewrites the ACLs of the knowledge objects described by the input pipeline.
 
     ##Syntax
 
     .. code-block::
-        editacl [title=<champ>] [app=<champ>] [id=<champ>] [type=<champ>]
-                [sharing=<champ>] [new_perms_read=<champ>] [new_perms_write=<champ>]
-                [new_sharing=<champ>] [new_owner=<champ>] [dryrun=<bool>]
-                [validate_roles=<bool>] [journal=<bool>] [max_objects=<entier>]
+        editacl [title=<field>] [app=<field>] [id=<field>] [type=<field>]
+                [sharing=<field>] [new_perms_read=<field>] [new_perms_write=<field>]
+                [new_sharing=<field>] [new_owner=<field>] [dryrun=<bool>]
+                [validate_roles=<bool>] [journal=<bool>] [max_objects=<int>]
 
     ##Description
 
-    Chaque parametre nomme le champ SPL ou lire une information, et prend pour defaut
-    la nomenclature native : l'operateur qui l'emploie n'ecrit aucun parametre.
+    Each parameter names the SPL field to read one piece of information from, and
+    defaults to the platform's native field name: an operator who uses those writes no
+    parameter at all.
 
-    C'est la **presence de la colonne** dans le jeu de resultats qui decide : colonne
-    absente, attribut preserve ; colonne presente et cellule vide, attribut vide ;
-    colonne presente et valuee, valeur appliquee.
+    It is the **presence of the column** in the result set that decides: column absent,
+    attribute preserved; column present and cell empty, attribute emptied; column
+    present and valued, value applied.
 
     ##Example
 
     .. code-block::
-        | `acl_inventory` | search "eai:acl.perms.write"="ancien_role"
-        | eval "eai:acl.perms.write" = "nouveau_role_admin"
+        | `acl_inventory` | search "eai:acl.perms.write"="legacy_role"
+        | eval "eai:acl.perms.write" = "new_role_admin"
         | editacl dryrun=f max_objects=200
     """
 
-    # -- parametres de nommage (§3.1) : desigen l'objet ---------------------- #
+    # -- field-naming parameters (section 3.1): designate the object ---------- #
     title = Option(
-        doc="Champ portant le nom de l'objet. Defaut : title.",
+        doc="Field carrying the name of the object. Default: title.",
         require=False,
         default=None,
     )
     app = Option(
-        doc="Champ portant l'application du namespace. Defaut : eai:acl.app.",
+        doc="Field carrying the application of the namespace. Default: eai:acl.app.",
         require=False,
         default=None,
     )
     id = Option(
-        doc="Champ portant l'URI complete de l'objet. Defaut : id.",
+        doc="Field carrying the full URI of the object. Default: id.",
         require=False,
         default=None,
     )
     type = Option(
-        doc="Champ portant le type d'objet, resolu par la table. Defaut : eai:type.",
+        doc="Field carrying the object type, resolved through the table. "
+            "Default: eai:type.",
         require=False,
         default=None,
     )
     sharing = Option(
-        doc="Champ portant la portee COURANTE, qui sert a ecarter les objets prives. "
-            "Defaut : eai:acl.sharing.",
+        doc="Field carrying the CURRENT sharing scope, used to skip private objects. "
+            "Default: eai:acl.sharing.",
         require=False,
         default=None,
     )
 
-    # -- parametres de nommage (§3.3) : valeurs cibles ----------------------- #
+    # -- field-naming parameters (section 3.3): target values ---------------- #
     new_perms_read = Option(
-        doc="Champ portant la valeur cible de perms.read. "
-            "Defaut : eai:acl.perms.read.",
+        doc="Field carrying the target value of perms.read. "
+            "Default: eai:acl.perms.read.",
         require=False,
         default=None,
     )
     new_perms_write = Option(
-        doc="Champ portant la valeur cible de perms.write. "
-            "Defaut : eai:acl.perms.write.",
+        doc="Field carrying the target value of perms.write. "
+            "Default: eai:acl.perms.write.",
         require=False,
         default=None,
     )
     new_sharing = Option(
-        doc="Champ portant la valeur cible de sharing. Defaut : eai:acl.sharing.",
+        doc="Field carrying the target value of sharing. Default: eai:acl.sharing.",
         require=False,
         default=None,
     )
     new_owner = Option(
-        doc="Champ portant la valeur cible de owner. Defaut : eai:acl.owner.",
+        doc="Field carrying the target value of owner. Default: eai:acl.owner.",
         require=False,
         default=None,
     )
 
     dryrun = Option(
-        doc="Simulation : aucune ecriture. Defaut : vrai.",
+        doc="Simulation: no write at all. Default: true.",
         require=False,
         default=True,
         validate=validators.Boolean(),
     )
     validate_roles = Option(
-        doc="Controle de l'existence des roles ajoutes avant ecriture. Defaut : vrai.",
+        doc="Check that the added roles exist before writing. Default: true.",
         require=False,
         default=True,
         validate=validators.Boolean(),
     )
     journal = Option(
-        doc="Consignation dans le journal indexe. Defaut : vrai.",
+        doc="Record into the indexed journal. Default: true.",
         require=False,
         default=True,
         validate=validators.Boolean(),
     )
     max_objects = Option(
-        doc="Nombre maximal d'objets ECRITS par execution. Defaut : 10. Sans effet en "
-            "simulation, qui n'emet aucun POST et porte donc sur tout le lot.",
+        doc="Maximum number of objects WRITTEN per run. Default: 10. No effect in "
+            "simulation, which sends no POST and therefore covers the whole batch.",
         require=False,
         default=None,
     )
@@ -239,56 +262,90 @@ class EditAclCommand(StreamingCommand):
     def __init__(self):
         super(EditAclCommand, self).__init__()
         self._processor = None
-        # `_journal_writer`, et surtout PAS `_journal` : le SDK range la valeur d'une
-        # `Option` dans l'attribut `"_" + <nom de l'option>`
-        # (`searchcommands/decorators.py`). L'option `journal` occupe donc `_journal`.
-        # Y ranger le writer creait une collision bidirectionnelle — le booleen de
-        # l'option se faisait fermer comme un fichier sur le chemin d'erreur fatale, et
-        # l'ecriture du writer rendait la valeur de l'option illisible.
-        # `tests/test_editacl_adapter.py` interdit mecaniquement le retour du defaut.
+        # `_journal_writer`, and above all NOT `_journal`: the SDK stores the value of
+        # an `Option` in the attribute `"_" + <option name>`
+        # (`searchcommands/decorators.py`). The `journal` option therefore occupies
+        # `_journal`. Storing the writer there created a two-way collision - the
+        # boolean of the option got closed like a file on the fatal error path, and
+        # writing the writer made the value of the option unreadable.
+        # `tests/test_editacl_adapter.py` mechanically forbids the return of the
+        # defect.
         self._journal_writer = None
         self._params = None
         self._ready = False
-        # Diagnostic inerte tant que le fichier n'est pas ouvert : aucun appel de
-        # diagnostic ne peut lever avant `_setup()`.
+        # Inert diagnostic as long as the file is not open: no diagnostic call can
+        # raise before `_setup()`.
         self._diag = NullDiagnostics()
-        # Le message de divergence runtime/disque (§5.6) est emis **une fois** par
-        # execution : un lot dont le systeme de fichiers refuse toute ecriture le
-        # produirait sinon a chaque objet, et le noierait.
+        # The runtime/disk divergence message (section 5.6) is emitted **once** per
+        # run: a batch whose file system refuses every write would otherwise produce it
+        # on every object, and drown it.
         self._runtime_divergence_signaled = False
-        # L'avertissement de plafond (§4.3, D-28) est emis **une fois**, en fin
-        # d'execution : c'est le seul moment ou le nombre d'objets ecartes est connu
-        # d'une commande qui recoit son entree par chunks successifs. Emis a la premiere
-        # atteinte, il ne pourrait pas le porter ; emis par objet, il serait du bruit.
+        # The ceiling warning (section 4.3, D-28) is emitted **once**, at the end of
+        # the run: that is the only moment at which the number of skipped objects is
+        # known to a command that receives its input through successive chunks. Emitted
+        # earlier, it could not carry that number; emitted per object, it would be
+        # noise.
         self._ceiling_signaled = False
 
-    # -- declaration du jeu de champs de sortie (§5.7, D-33) ---------------- #
+    # -- single emission point of the operator-facing messages -------------- #
+
+    def _emit_message(self, level, message):
+        """**The** point where a message reaches the search interface (D-39).
+
+        Every message the operator reads goes through here, and it is here - and
+        nowhere else - that `MESSAGE_PREFIX` is applied. No other method of this file
+        calls `write_warning`, `write_error`, `write_info` or `write_fatal`;
+        `tests/test_editacl_adapter.py` reads the syntax tree of this module and fails
+        if one of them is called outside this method, or through a construct it cannot
+        analyse.
+
+        The concentration is what makes the rule verifiable. Repeating the prefix on
+        each literal would make it a convention, that is, something that holds until
+        the next contributor.
+        """
+        text = MESSAGE_PREFIX + ("" if message is None else str(message))
+        if level == "error":
+            self.write_error(text)
+        elif level == "info":
+            self.write_info(text)
+        else:
+            self.write_warning(text)
+
+    def _warn(self, message):
+        """Warning addressed to the operator, prefixed."""
+        self._emit_message("warning", message)
+
+    def _error(self, message):
+        """Error addressed to the operator, prefixed."""
+        self._emit_message("error", message)
+
+    # -- declaration of the output field set (section 5.7, D-33) ------------ #
 
     def _declare_output_fields(self):
-        """Declare au writer l'integralite du jeu de champs du §5.7.
+        """Declare to the writer the whole field set of section 5.7.
 
-        Le writer du SDK construit l'en-tete du flux a partir des **cles du premier
-        enregistrement emis** (`RecordWriter._write_record`), puis y projette tous les
-        suivants : un champ absent de ce premier enregistrement disparait de la sortie
-        entiere, **sans erreur ni avertissement**. Les huit champs `acl_before_*` /
-        `acl_after_*` n'etant portes que par les enregistrements dont la fusion a ete
-        calculee, un lot commencant par un `skipped_private` prive l'operateur de tout
-        ce que la simulation existe pour montrer — et la macro d'inventaire, qui liste
-        les objets prives au meme titre que les autres, produit couramment de tels lots.
+        The SDK writer builds the stream header from the **keys of the first record
+        emitted** (`RecordWriter._write_record`), then projects every later record onto
+        it: a field absent from that first record disappears from the entire output,
+        **with no error and no warning**. Since the eight `acl_before_*` /
+        `acl_after_*` fields are only carried by the records whose merge was computed, a
+        batch starting with a `skipped_private` deprives the operator of everything the
+        simulation exists to show - and the inventory macro, which lists private objects
+        alongside the others, routinely produces such batches.
 
-        Le SDK expose `RecordWriter.custom_fields` pour exactement cet usage : les noms
-        qui y figurent sont ajoutes a l'en-tete quel que soit le contenu du premier
-        enregistrement. **Le SDK vendorise n'est donc pas modifie** ; la declaration se
-        fait depuis l'app, et `custom_fields` survit au `_clear()` de fin de chunk, ce
-        qui la rend valable pour tous les chunks de l'execution.
+        The SDK exposes `RecordWriter.custom_fields` for exactly this purpose: the names
+        listed there are added to the header whatever the content of the first record.
+        **The vendored SDK is therefore not modified**; the declaration is made from the
+        app, and `custom_fields` survives the end-of-chunk `_clear()`, which makes it
+        valid for every chunk of the run.
 
-        Appelee par `prepare()` — le point d'extension prevu par le SDK, invoque avant
-        toute execution — **et** par `_setup()`, qui s'execute avant le premier `yield`
-        et couvre donc le cas d'un protocole ou `prepare()` ne serait pas atteint. La
-        declaration est idempotente.
+        Called by `prepare()` - the extension point the SDK provides, invoked before any
+        execution - **and** by `_setup()`, which runs before the first `yield` and
+        therefore covers the case of a protocol where `prepare()` would not be reached.
+        The declaration is idempotent.
 
-        Aucune defaillance de cette declaration ne doit interrompre la commande : elle
-        ameliore la sortie, elle ne conditionne aucune ecriture.
+        No failure of this declaration must interrupt the command: it improves the
+        output, it conditions no write.
         """
         writer = getattr(self, "_record_writer", None)
         declared = getattr(writer, "custom_fields", None)
@@ -303,7 +360,7 @@ class EditAclCommand(StreamingCommand):
         super(EditAclCommand, self).prepare()
         self._declare_output_fields()
 
-    # -- cablage ----------------------------------------------------------- #
+    # -- wiring ------------------------------------------------------------- #
 
     def _setup(self):
         self._declare_output_fields()
@@ -314,10 +371,10 @@ class EditAclCommand(StreamingCommand):
             os.path.join(splunk_home, "var", "log", "splunk") if splunk_home else ""
         )
 
-        # Ouvert en tout premier, pour que la ligne de demarrage et **toute** erreur
-        # fatale ulterieure — y compris un parametre invalide — soient consignees. Son
-        # echec d'ouverture ne coute rien : `open_diagnostics` ne leve pas et rend un
-        # diagnostic inerte (§8.1, le fichier de diagnostic n'est pas le filet).
+        # Opened first of all, so that the startup line and **every** later fatal
+        # error - including an invalid parameter - are recorded. Its failure to open
+        # costs nothing: `open_diagnostics` does not raise and returns an inert
+        # diagnostic (section 8.1, the diagnostic file is not the safety net).
         self._diag = open_diagnostics(log_dir, sid)
         verify_ssl = _truthy(_read_app_setting("verify_ssl", "true"), default=True)
         self._diag.startup(
@@ -350,18 +407,18 @@ class EditAclCommand(StreamingCommand):
         self._params = params
         self._diag.params(params)
         for warning in params.warnings:
-            self.write_warning(warning)
+            self._warn(warning)
 
-        # La cle de session ne quitte jamais cette portee vers le diagnostic : aucune
-        # methode de `Diagnostics` n'a de parametre qui la porte (§8.1, R5).
+        # The session key never leaves this scope towards the diagnostic: no method of
+        # `Diagnostics` has a parameter that carries it (section 8.1, R5).
         session_key = getattr(info, "session_key", None)
         splunkd_uri = getattr(info, "splunkd_uri", None)
         if not session_key or not splunkd_uri:
             from acltools.errors import FatalConfigError
 
             raise FatalConfigError(
-                "splunkd_uri ou session_key indisponibles : la commande ne peut pas "
-                "s'adresser a la plateforme."
+                "splunkd_uri or session_key unavailable: the command cannot address "
+                "the platform."
             )
 
         ca_file = None
@@ -371,12 +428,12 @@ class EditAclCommand(StreamingCommand):
                 ca_file = candidate
         if not verify_ssl:
             self._diag.warning(
-                "verify_ssl=false : verification du certificat de splunkd desactivee "
-                "par local/editacl.conf."
+                "verify_ssl=false: verification of the splunkd certificate is "
+                "disabled by local/editacl.conf."
             )
-            self.write_warning(
-                "verify_ssl=false : la verification du certificat de splunkd est "
-                "desactivee par local/editacl.conf."
+            self._warn(
+                "verify_ssl=false: verification of the splunkd certificate is "
+                "disabled by local/editacl.conf."
             )
 
         rest = RestClient(splunkd_uri, session_key, verify_ssl=verify_ssl, ca_file=ca_file)
@@ -387,9 +444,9 @@ class EditAclCommand(StreamingCommand):
         verdict = check_realtime(rest, sid)
         self._diag.realtime(verdict)
         if verdict == "unknown":
-            self.write_warning(
-                "mode temps reel non determinable pour ce sid : le garde-fou du §4.2 "
-                "n'a pas pu s'appliquer."
+            self._warn(
+                "real-time mode could not be determined for this sid: the safeguard "
+                "of section 4.2 could not be applied."
             )
 
         roles_catalog = load_roles_catalog(rest) if params.validate_roles else frozenset()
@@ -397,7 +454,7 @@ class EditAclCommand(StreamingCommand):
         self._diag.mapping(mapping.coverage())
 
         host = resolve_server_name(rest) or socket.gethostname()
-        self._diag.info("membre : %s" % host)
+        self._diag.info("member: %s" % host)
         ctx = RunContext(
             sid=sid,
             user=str(getattr(info, "username", "") or ""),
@@ -411,15 +468,16 @@ class EditAclCommand(StreamingCommand):
                 self._journal_writer = JournalWriter(path)
                 self._diag.journal(path, True)
             except FatalError:
-                # L'echec d'ouverture n'est fatal que si une ecriture reelle est
-                # prevue (§5.1 etape 7, §9). En simulation il degrade en avertissement.
+                # Failing to open is only fatal if a real write is planned
+                # (section 5.1 step 7, section 9). In simulation it degrades to a
+                # warning.
                 self._diag.journal(path, False)
                 if not params.dryrun:
                     raise
                 self._journal_writer = None
-                self.write_warning(
-                    "journal non ouvrable (%s) : execution en simulation poursuivie "
-                    "sans journal." % path
+                self._warn(
+                    "journal not openable (%s): the run carries on in simulation "
+                    "without a journal." % path
                 )
 
         self._processor = EventProcessor(
@@ -433,7 +491,7 @@ class EditAclCommand(StreamingCommand):
         )
         self._ready = True
 
-    # -- boucle de traitement ---------------------------------------------- #
+    # -- processing loop ---------------------------------------------------- #
 
     def stream(self, records):
         try:
@@ -443,9 +501,10 @@ class EditAclCommand(StreamingCommand):
                 yield self._handle(record)
             self._signal_ceiling()
         except FatalError as exc:
-            # Point de consignation unique des erreurs fatales du §9. `_setup()` est
-            # appele depuis ce `try`, ses erreurs passent donc ici. Le plafond, lui,
-            # n'y figure plus : depuis D-28 il ne leve pas, il produit un statut.
+            # Single recording point of the fatal errors of section 9. `_setup()` is
+            # called from within this `try`, so its errors pass through here. The
+            # ceiling no longer appears there: since D-28 it does not raise, it
+            # produces a status.
             self._diag.fatal(str(exc))
             self._cleanup()
             self._fatal_exit(exc)
@@ -453,16 +512,17 @@ class EditAclCommand(StreamingCommand):
             self._cleanup()
 
     def _signal_ceiling(self):
-        """Avertissement unique de plafond, apres le dernier enregistrement (§4.3).
+        """Single ceiling warning, after the last record (section 4.3).
 
-        La commande recoit son entree par chunks successifs : `stream()` est reinvoquee
-        a chaque chunk, et le compteur du processeur les cumule. Le nombre d'objets
-        ecartes n'est donc juste qu'au **dernier** chunk — que le SDK signale par
-        `self._finished`, renseigne depuis la metadonnee du chunk avant l'appel.
+        The command receives its input through successive chunks: `stream()` is
+        re-invoked on each chunk, and the counter of the processor accumulates them. The
+        number of skipped objects is therefore only right on the **last** chunk - which
+        the SDK signals through `self._finished`, filled in from the chunk metadata
+        before the call.
 
-        Emettre plus tot sous-compterait ; emettre a chaque chunk multiplierait un
-        avertissement que le §4.3 veut unique. `_ceiling_signaled` ferme le cas du
-        protocole v1, ou `_finished` n'est jamais renseigne.
+        Emitting earlier would undercount; emitting on each chunk would multiply a
+        warning that section 4.3 wants to be unique. `_ceiling_signaled` closes the case
+        of protocol v1, where `_finished` is never filled in.
         """
         processor = self._processor
         if processor is None or self._ceiling_signaled:
@@ -476,16 +536,16 @@ class EditAclCommand(StreamingCommand):
             self._params.max_objects, processor.skipped_ceiling
         )
         self._diag.warning(message)
-        self.write_warning(message)
+        self._warn(message)
 
     def _cleanup(self):
-        """Referme journal et diagnostic. Idempotent, et ne leve jamais.
+        """Close the journal and the diagnostic. Idempotent, and never raises.
 
-        Une erreur fatale ne doit pas laisser de ligne non ecrite dans le tampon. Et le
-        nettoyage ne doit JAMAIS supplanter l'erreur en cours de propagation : une
-        exception levee dans un `finally` remplace celle qui remontait, c'est-a-dire le
-        message que l'operateur attend. Chaque `close()` est donc protege, et l'attribut
-        detache avant l'appel pour qu'un second passage ne le referme pas.
+        A fatal error must not leave an unwritten line in the buffer. And the cleanup
+        must NEVER supplant the error being propagated: an exception raised inside a
+        `finally` replaces the one that was travelling up, that is, the message the
+        operator is waiting for. Each `close()` is therefore guarded, and the attribute
+        detached before the call so that a second pass does not close it again.
         """
         writer, self._journal_writer = self._journal_writer, None
         if writer is not None:
@@ -500,51 +560,52 @@ class EditAclCommand(StreamingCommand):
             pass
 
     def _fatal_exit(self, exc):
-        """Interrompt la recherche **en marquant le job en echec** (§4.3, A-4).
+        """Interrupt the search **marking the job as failed** (section 4.3, A-4).
 
-        `error_exit()` du SDK ecrit le message puis leve `SystemExit`, que le SDK
-        convertit en `finish()` — un chunk final `finished: true` — suivi d'une sortie 1.
-        Ce chunk dit a splunkd que la commande s'est terminee normalement, et splunkd
-        ignore alors le code de retour. Mesure sur Splunk 9.4.6 : le job ressort
-        `dispatchState=DONE`, `isFailed=false`, `resultCount=0`. Un ordonnanceur ou une
-        alerte batie sur ce pipeline ne distingue donc pas une interruption d'un lot
-        vide — le `MSG[ERROR]` n'est visible que pour qui inspecte le job.
+        The SDK's `error_exit()` writes the message then raises `SystemExit`, which the
+        SDK turns into a `finish()` - a final chunk with `finished: true` - followed by
+        exit code 1. That chunk tells splunkd the command ended normally, and splunkd
+        then ignores the return code. Measured on Splunk 9.4.6: the job comes out with
+        `dispatchState=DONE`, `isFailed=false`, `resultCount=0`. A scheduler or an alert
+        built on that pipeline therefore cannot tell an interruption from an empty
+        batch - the `MSG[ERROR]` is only visible to whoever inspects the job.
 
-        Le message est donc emis dans un chunk **non final**, puis le processus quitte
-        avec un code non nul sans jamais envoyer `finished: true`. splunkd marque alors
-        `dispatchState=FAILED` / `isFailed=true` **et conserve le message** ; il ajoute
-        le sien, « External search command exited unexpectedly with non-zero error
-        code 1 », qui est exact.
+        The message is therefore emitted in a **non-final** chunk, then the process
+        exits with a non-zero code without ever sending `finished: true`. splunkd then
+        marks `dispatchState=FAILED` / `isFailed=true` **and keeps the message**; it
+        adds its own, "External search command exited unexpectedly with non-zero error
+        code 1", which is accurate.
 
-        `os._exit` court-circuite les `finally` : le nettoyage est fait par l'appelant
-        **avant** cet appel. Le journal ne perd rien pour autant — chaque ligne est
-        deja `flush()`ee a l'ecriture, et la ligne `intent` `fsync()`ee (§8.4).
+        `os._exit` short-circuits the `finally` blocks: the cleanup is done by the
+        caller **before** this call. The journal loses nothing for all that - each line
+        is already `flush()`ed on write, and the `intent` line `fsync()`ed
+        (section 8.4).
         """
         message = str(exc)
         try:
-            self.write_error(message)
+            self._error(message)
             record_writer = getattr(self, "_record_writer", None)
             write_chunk = getattr(record_writer, "write_chunk", None)
             if write_chunk is not None:
-                # Chunk **non final** : le message part, la fin de flux n'est pas
-                # annoncee. `_write_chunk` vide lui-meme le tampon de sortie.
+                # **Non-final** chunk: the message leaves, the end of stream is not
+                # announced. `_write_chunk` empties the output buffer itself.
                 write_chunk(finished=False)
             else:                                                    # pragma: no cover
-                # Protocole v1 : pas de chunk, le flush suffit a pousser l'en-tete de
-                # messages.
+                # Protocol v1: no chunk, the flush is enough to push the message
+                # header.
                 self.flush()
         except Exception:                                            # noqa: BLE001
-            # Aucune defaillance de la sortie ne doit empecher le marquage en echec :
-            # c'est la seule chose que cette methode doit garantir.
+            # No failure of the output must prevent the failure marking: that is the
+            # only thing this method must guarantee.
             pass
         _abort_process(1)
 
     def _handle(self, record):
-        # `record` est l'enregistrement brut du chunk : la presence d'une cle y est
-        # exactement la presence de la colonne dans le jeu de resultats (§3.2). C'est le
-        # seul endroit ou l'enregistrement est lu, et il est passe tel quel a
-        # `build_event` — aucun `get()` avec defaut ne vient effacer la distinction entre
-        # « colonne absente » et « cellule vide » avant que la regle ne l'ait tranchee.
+        # `record` is the raw record of the chunk: the presence of a key in it is
+        # exactly the presence of the column in the result set (section 3.2). This is
+        # the only place where the record is read, and it is passed as is to
+        # `build_event` - no `get()` with a default comes and erases the distinction
+        # between "column absent" and "cell empty" before the rule has settled it.
         event = build_event(record, self._params.names)
         result = self._processor.process(event)
 
@@ -553,7 +614,7 @@ class EditAclCommand(StreamingCommand):
             and not self._runtime_divergence_signaled
         ):
             self._runtime_divergence_signaled = True
-            self.write_warning(RUNTIME_DIVERGENCE_MESSAGE)
+            self._warn(RUNTIME_DIVERGENCE_MESSAGE)
 
         output = dict(record)
         output["acl_status"] = result.status
