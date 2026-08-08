@@ -756,8 +756,9 @@ class _OrderedJournal(object):
     It reproduces one behaviour of `JournalWriter` exactly, and it matters here: **a
     write after `close()` fails**. On the real writer the underlying file object raises
     `ValueError`, which `_write` catches and turns into `False`. A double that kept
-    accepting lines after being closed would hide what
-    `TheJournalDoesNotSurviveASecondChunkTest` measures.
+    accepting lines after being closed would make
+    `TheJournalSurvivesEveryChunkTest` pass on a journal closed too early - that is, it
+    would hide exactly the defect that class exists to keep out.
     """
 
     def __init__(self, fail_summary=False):
@@ -934,10 +935,9 @@ class EndOfRunLineTest(_AdapterRunHarness, unittest.TestCase):
         """The SDK calls `stream()` once per chunk and fills `_finished` from the chunk
         metadata: the counters are only complete on the last one.
 
-        The guard is exercised on its own, and not through two successive calls to
-        `stream()`, because of the defect pinned by
-        `TheJournalDoesNotSurviveASecondChunkTest`: today no chunk after the first has
-        a journal at all.
+        The guard is exercised here on the method alone - two successive calls to
+        `stream()` are the business of `TheJournalSurvivesEveryChunkTest`, which checks
+        the same deferral end to end.
         """
         command = self._command()
         list(command.stream(self._records(2)))
@@ -1040,64 +1040,236 @@ class EndOfRunLineTest(_AdapterRunHarness, unittest.TestCase):
         self.assertEqual(scopes, {"stream"})
 
 
-class TheJournalDoesNotSurviveASecondChunkTest(_AdapterRunHarness, unittest.TestCase):
-    """**This class pins a DEFECT, not a contract. Delete it when the defect is fixed.**
+class TheJournalSurvivesEveryChunkTest(_AdapterRunHarness, unittest.TestCase):
+    """The journal is closed at the end of the **run**, never at the end of a chunk.
 
-    Found while placing the end-of-run line, and it is older than that line.
+    The SDK calls `stream()` **once per chunk** and drains the generator each time
+    (`_execute_v2`, then `_execute_chunk_v2`: `write_records(process(records))`). A
+    cleanup placed unconditionally in the `finally` of `stream()` therefore fired at the
+    end of every chunk. `_ready` staying true, `_setup()` was not replayed and the
+    journal stayed closed for the rest of the batch: from the second chunk on every
+    object came out `error` / `journal_intent_failed` - section 8.4 cancels the POST
+    when the write-ahead line cannot be persisted - and **was not written**.
 
-    `stream()` closes the journal and the diagnostic in its `finally`. The SDK calls
-    `stream()` **once per chunk** and drains the generator each time
-    (`_execute_chunk_v2`: `write_records(process(records))`), so that `finally` fires at
-    the end of **every** chunk, not at the end of the run. `_ready` stays true, so
-    `_setup()` is not run again and `_journal_writer` stays `None` for the rest of the
-    run.
+    Measured on the platform before the fix, on a 150-object batch delivered in five
+    chunks: 74 objects written, 76 out in `error`, their ACLs verifiably untouched, no
+    journal line of any phase for them, and no end-of-run line at all.
 
-    Consequences, measured below and not deduced:
-
-    - every object of the second chunk onward comes out `acl_status = "error"` with
-      `acl_error = "journal_intent_failed"` - section 8.4 cancels the POST when the
-      write-ahead line cannot be persisted. **Nothing is written for those objects, and
-      the run reports errors that have no other cause than this;**
-    - the end-of-run line can therefore never be written on a run of more than one
-      chunk, since the guard that defers it to the last chunk lands on a run that no
-      longer has a journal.
-
-    Why it was never seen: a chunk holds tens of thousands of records, and the largest
-    lab job was 1 495 objects - one chunk. The `_finished` guard of `_signal_ceiling`
-    shows the multi-chunk case **was** in the author's mind; the cleanup in the
-    `finally` defeats it.
-
-    Fixing it means changing the lifecycle of the journal and the diagnostic on a run,
-    which touches the fatal error path. That is an arbitration, not a side effect of the
-    present change, so it is reported rather than improvised.
+    What follows is the contract, not the defect: the journal outlives every chunk but
+    the last, the objects of the later chunks are written like the others, and the
+    end-of-run line of D-46 - which this defect made unreachable by construction beyond
+    one chunk - is written.
     """
 
-    def test_the_journal_is_closed_at_the_end_of_the_first_chunk(self):
+    def test_the_journal_stays_open_at_the_end_of_a_chunk_that_is_not_the_last(self):
         command = self._command()
         command._finished = False
         list(command.stream(self._records(2)))
-        self.assertTrue(self.journal.closed)
-        self.assertIsNone(command._journal_writer)
+        self.assertFalse(self.journal.closed)
+        self.assertIsNotNone(command._journal_writer)
 
-    def test_the_objects_of_the_second_chunk_are_not_written_at_all(self):
+    def test_the_objects_of_the_second_chunk_are_written_like_the_others(self):
         command = self._command()
         command._finished = False
         first = list(command.stream(self._records(2, prefix="first")))
         self.assertEqual([r["acl_status"] for r in first], ["updated"] * 2)
         command._finished = True
         second = list(command.stream(self._records(2, prefix="second")))
-        self.assertEqual([r["acl_status"] for r in second], ["error"] * 2)
-        self.assertEqual(
-            [r["acl_error"] for r in second], ["journal_intent_failed"] * 2
-        )
+        self.assertEqual([r["acl_status"] for r in second], ["updated"] * 2)
+        self.assertEqual([r["acl_error"] for r in second], [""] * 2)
+        self.assertEqual([r["acl_journaled"] for r in second], ["true"] * 2)
 
-    def test_and_therefore_no_end_of_run_line_beyond_one_chunk(self):
+    def test_every_object_of_every_chunk_carries_its_two_lines(self):
+        command = self._command()
+        for index in range(3):
+            command._finished = index == 2
+            list(command.stream(self._records(2, prefix="chunk%d" % index)))
+        phases = self.journal.phases()
+        self.assertEqual(phases.count("intent"), 6)
+        self.assertEqual(phases.count("outcome"), 6)
+
+    def test_the_end_of_run_line_is_written_on_a_multi_chunk_run(self):
+        """The most direct control that the fix operates: that line could not be
+        written beyond one chunk, since the guard deferring it to the last chunk landed
+        on a run that no longer had a journal."""
+        from acltools.journal import SUMMARY_COUNT_PREFIX
+
+        command = self._command()
+        command._finished = False
+        list(command.stream(self._records(2, prefix="first")))
+        self.assertEqual(self._summaries(), [], "not before the last chunk")
+        command._finished = True
+        list(command.stream(self._records(3, prefix="second")))
+        summaries = self._summaries()
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0][SUMMARY_COUNT_PREFIX + "updated"], 5)
+        self.assertEqual(self.journal.phases()[-1], "summary")
+
+    def test_the_journal_is_closed_once_the_last_chunk_is_done(self):
         command = self._command()
         command._finished = False
         list(command.stream(self._records(2, prefix="first")))
         command._finished = True
         list(command.stream(self._records(2, prefix="second")))
+        self.assertTrue(self.journal.closed)
+        self.assertIsNone(command._journal_writer)
+
+    def test_an_empty_last_chunk_still_ends_the_run(self):
+        """Measured on the platform: splunkd does send a final chunk carrying **no
+        record at all**, and it is the one that bears `finished: true`. The end of the
+        run therefore has to happen on a chunk whose loop body never executes."""
+        command = self._command()
+        command._finished = False
+        list(command.stream(self._records(2)))
+        command._finished = True
+        self.assertEqual(list(command.stream([])), [])
+        self.assertEqual(len(self._summaries()), 1)
+        self.assertTrue(self.journal.closed)
+
+    def test_the_ceiling_warning_still_waits_for_the_last_chunk(self):
+        """The safeguard whose reasoning the fix borrows must keep behaving the same:
+        both now read the same predicate."""
+        command = self._command()
+        command._finished = False
+        self.assertFalse(command._is_last_chunk())
+        command._finished = True
+        self.assertTrue(command._is_last_chunk())
+
+
+class ProtocolV1StillCleansUpTest(_AdapterRunHarness, unittest.TestCase):
+    """Protocol v1 has no chunk, so `_finished` is **never** filled in.
+
+    This is the trap of the fix, and it is why the predicate reads `is not False` and
+    not `is True`. Tested the other way round, the cleanup would wait for a last chunk
+    that never comes: the end-of-run line would never be written and the journal never
+    closed - a silent regression on the older protocol, which no v2 test can catch.
+    """
+
+    def test_the_flag_is_absent_or_none_before_any_chunk(self):
+        command = self._command()
+        self.assertIsNone(getattr(command, "_finished", None))
+
+    def test_the_vendored_sdk_does_initialise_it_to_none(self):
+        """Read from the SDK **source**, never imported: the fake of this module must
+        not be the only witness of the value the fallback relies on."""
+        path = os.path.join(SDK_DIR, "search_command.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        assignments = [
+            ast.unparse(node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+                and target.attr == "_finished"
+                for target in node.targets
+            )
+        ]
+        self.assertIn("self._finished = None", assignments)
+
+    def test_a_run_with_no_flag_is_its_own_last_chunk(self):
+        command = self._command()
+        self.assertTrue(command._is_last_chunk())
+
+    def test_the_end_of_run_line_is_written_and_the_journal_closed(self):
+        command = self._command()          # `_finished` left at its initial value
+        list(command.stream(self._records(3)))
+        self.assertEqual(len(self._summaries()), 1)
+        self.assertTrue(self.journal.closed)
+        self.assertIsNone(command._journal_writer)
+
+
+class TheFatalPathIsUnchangedByTheChunkGuardTest(
+    _AdapterRunHarness, unittest.TestCase
+):
+    """The fatal error path calls the cleanup **explicitly**, and that call is not
+    guarded by the chunk.
+
+    `_fatal_exit()` leaves through `os._exit`, which runs no `finally` - by design, so
+    that the message goes out in a non-final chunk and splunkd marks the job failed
+    (section 4.3, A-4). The explicit cleanup that precedes it is therefore the last
+    chance to close the files, and that holds **on a chunk that is not the last one**
+    just as much as on the last one. Making it conditional would leave the journal open
+    on a process that is about to disappear.
+    """
+
+    def _command_failing_on(self, rank):
+        command = self._command()
+        handle = command._handle
+        state = {"seen": 0}
+
+        def _handle_then_fail(record):
+            from acltools.errors import FatalConfigError
+
+            state["seen"] += 1
+            if state["seen"] > rank:
+                raise FatalConfigError("a fatal error of section 9")
+            return handle(record)
+
+        command._handle = _handle_then_fail
+        return command
+
+    def test_the_journal_is_closed_on_a_chunk_that_is_not_the_last(self):
+        command = self._command_failing_on(2)
+        command._finished = False
+        with self.assertRaises(Abort):
+            list(command.stream(self._records(5)))
+        self.assertTrue(self.journal.closed)
+
+    def test_no_end_of_run_line_on_a_chunk_that_is_not_the_last(self):
+        command = self._command_failing_on(2)
+        command._finished = False
+        with self.assertRaises(Abort):
+            list(command.stream(self._records(5)))
         self.assertEqual(self._summaries(), [])
+        self.assertEqual(self.journal.phases(), ["intent", "outcome"] * 2)
+
+    def test_a_fatal_error_on_a_later_chunk_closes_what_earlier_chunks_opened(self):
+        """The case the fix creates: the journal now crosses a chunk boundary, so the
+        fatal path of chunk two closes a file opened during chunk one."""
+        command = self._command()
+        command._finished = False
+        list(command.stream(self._records(2, prefix="first")))
+        self.assertFalse(self.journal.closed)
+
+        def _handle_that_fails(record):
+            from acltools.errors import FatalConfigError
+
+            raise FatalConfigError("a fatal error of section 9")
+
+        command._handle = _handle_that_fails
+        with self.assertRaises(Abort):
+            list(command.stream(self._records(1, prefix="second")))
+        self.assertTrue(self.journal.closed)
+        self.assertEqual(self._summaries(), [])
+        self.assertEqual(self.journal.phases(), ["intent", "outcome"] * 2)
+
+    def test_the_explicit_cleanup_of_the_fatal_branch_is_not_conditional(self):
+        """Mechanical reading: the `except` branch of `stream()` calls `_cleanup()`
+        outside any `if`. A refactor that made it conditional on the chunk would leave
+        the files open on a process about to be killed."""
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        stream = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "stream"
+        )
+        handlers = [h for n in ast.walk(stream) if isinstance(n, ast.Try)
+                    for h in n.handlers]
+        self.assertTrue(handlers, "`stream()` has no exception handler")
+        direct = {
+            ast.unparse(call.func)
+            for handler in handlers
+            for statement in handler.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            for call in [statement.value]
+        }
+        self.assertIn("self._cleanup", direct)
+        self.assertIn("self._fatal_exit", direct)
 
 
 class DeclaredOutputFieldSetTest(unittest.TestCase):

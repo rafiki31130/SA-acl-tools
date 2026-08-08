@@ -511,11 +511,43 @@ class EditAclCommand(StreamingCommand):
             # called from within this `try`, so its errors pass through here. The
             # ceiling no longer appears there: since D-28 it does not raise, it
             # produces a status.
+            #
+            # The cleanup here is **unconditional**, and it is the only one that is:
+            # `_fatal_exit()` leaves through `os._exit`, which runs no `finally`. It is
+            # therefore the last chance to close the files, and that holds on a chunk
+            # that is not the last one just as much as on the last one.
             self._diag.fatal(str(exc))
             self._cleanup()
             self._fatal_exit(exc)
         finally:
-            self._cleanup()
+            # **Only at the end of the run, never at the end of a chunk.** The SDK
+            # calls `stream()` once per chunk and drains the generator each time
+            # (`_execute_v2`), so an unconditional cleanup here closed the journal at
+            # the end of the *first* chunk. `_ready` staying true, `_setup()` was not
+            # replayed and the journal stayed closed for the rest of the batch: from
+            # the second chunk on, every object came out `error` /
+            # `journal_intent_failed` and was **not** written, since section 8.4
+            # cancels the POST when the write-ahead line cannot be persisted.
+            if self._is_last_chunk():
+                self._cleanup()
+
+    def _is_last_chunk(self):
+        """Is the chunk being processed the last one of the run?
+
+        `self._finished` is filled in by the SDK from the metadata of each chunk of
+        protocol v2, **before** `stream()` is called. It is `False` while more chunks
+        are announced, `True` on the last one - and it stays at its initial `None`
+        under protocol v1, which has no chunk at all.
+
+        Hence the test on `is not False` rather than on `is True`, and that asymmetry
+        is the whole point: under v1 the run is always its own last chunk, so reading
+        the flag positively would defer the cleanup to a chunk that never comes - the
+        end-of-run line would never be written and the journal never closed.
+
+        The ceiling warning of section 4.3 already reasoned this way; the reasoning is
+        named here once, and the three places that need it read it from here.
+        """
+        return getattr(self, "_finished", None) is not False
 
     def _signal_ceiling(self):
         """Single ceiling warning, after the last record (section 4.3).
@@ -535,7 +567,7 @@ class EditAclCommand(StreamingCommand):
             return
         if processor.skipped_ceiling <= 0:
             return
-        if getattr(self, "_finished", None) is False:
+        if not self._is_last_chunk():
             return
         self._ceiling_signaled = True
         message = ceiling_message(
@@ -569,7 +601,7 @@ class EditAclCommand(StreamingCommand):
             return
         if self._journal_writer is None:
             return
-        if getattr(self, "_finished", None) is False:
+        if not self._is_last_chunk():
             return
         self._summary_written = True
         if not self._journal_writer.write_summary(self._processor.build_summary()):
