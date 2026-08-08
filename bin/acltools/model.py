@@ -214,11 +214,20 @@ class Params:
 
 @dataclass(frozen=True)
 class RunContext:
-    """Run constants, identical for every journal line."""
+    """Run constants, identical for every journal line.
+
+    `member` is the `serverName` of the search head member the run executes on. It is
+    deliberately **not** called `host` (D-46): the journal key derived from it used to
+    be `host`, which collides with the `host` metadata field Splunk stamps on every
+    event - measured in the lab, the field comes out **multivalued** at search time.
+    The journal key is now `member`, the term the diagnostic file already used for the
+    same thing, and the attribute carries the same name so that the datum and the key
+    cannot drift apart.
+    """
 
     sid: str
     user: str
-    host: str
+    member: str
     dryrun: bool
 
 

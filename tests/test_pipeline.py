@@ -4,6 +4,7 @@ deduplication (section 10.8)."""
 import unittest
 
 from acltools.endpoint import build_object_path
+from acltools.journal import SUMMARY_COUNT_PREFIX, dumps
 from acltools.model import ACL_STATUSES
 from acltools.pipeline import (
     PRIVATE_BY_ID_WARNING,
@@ -759,6 +760,27 @@ class JournalInvariantTest(unittest.TestCase):
             [o["phase"] for o in journal.outcomes], ["outcome"] * len(seen)
         )
 
+        # D-46 - no line produced holds a `null`, whatever the status. The check is
+        # made **on the serialized line**, which is what the indexer reads: a `null`
+        # value comes back out of `KV_MODE = json` as the four-character string
+        # "null", and the obvious predicate on it is then false on every line.
+        for line in journal.intents + journal.outcomes:
+            with self.subTest(phase=line["phase"], status=line.get("status")):
+                nulls = [f for f, value in line.items() if value is None]
+                self.assertEqual(nulls, [])
+                self.assertNotIn(":null", dumps(line))
+                self.assertNotIn("host", line)
+                self.assertIn("member", line)
+
+        # The tally is fed at the same single exit point as the `outcome` line: what
+        # is counted is exactly what came out.
+        self.assertEqual(
+            sum(proc.counts.values())
+            + sum(proc_ceiling.counts.values())
+            + sum(proc_dryrun.counts.values()),
+            len(seen),
+        )
+
     def test_invariant_2_one_intent_line_per_attempted_post(self):
         journal = FakeJournal()
         rest = FakeRest(
@@ -826,6 +848,90 @@ class JournalInvariantTest(unittest.TestCase):
         intent = journal.intents[0]
         self.assertEqual(intent["before_owner"], "an_owner")
         self.assertEqual(intent["after_owner"], "another_owner")
+
+
+class SummaryCountersTest(unittest.TestCase):
+    """The tally feeding the `summary` line (section 8.2, D-46).
+
+    It is fed from `_emit`, the exit point every event goes through without exception -
+    the same guarantee that holds invariant 1. The consequence is what makes the
+    counters usable: **the sum of the counters is the number of output events**, which
+    is what D-46 relies on to refuse an object identity in the journal. A simple count
+    already gives the exact total, per status included.
+    """
+
+    def test_the_tally_starts_empty(self):
+        self.assertEqual(processor(FakeRest()).counts, {})
+
+    def test_a_write_and_a_noop_are_counted_apart(self):
+        rest = FakeRest(
+            get_responses={
+                "/servicesNS/nobody/my_app/saved/searches/to_write":
+                    RestResponse(200, acl_body(write=("legacy_role",))),
+                "/servicesNS/nobody/my_app/saved/searches/already_right":
+                    RestResponse(200, acl_body(write=("new_role_admin",))),
+            }
+        )
+        proc = processor(rest, journal=FakeJournal())
+        proc.process(make_event(title="to_write", write="new_role_admin"))
+        proc.process(make_event(title="already_right", write="new_role_admin"))
+        self.assertEqual(proc.counts, {"updated": 1, "noop": 1})
+
+    def test_the_duplicates_are_counted_as_the_events_they_are(self):
+        """Section 5.7 - one output event per input event. Deduplication removes a
+        POST, never an event, so it must not remove a count either."""
+        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("legacy_role",))))
+        proc = processor(rest, journal=FakeJournal())
+        for _ in range(3):
+            proc.process(make_event(write="new_role_admin"))
+        self.assertEqual(sum(proc.counts.values()), 3)
+        self.assertEqual(len(rest.posts()), 1)
+
+    def test_the_summary_line_carries_the_tally(self):
+        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("legacy_role",))))
+        proc = processor(rest, journal=FakeJournal())
+        proc.process(make_event(write="new_role_admin"))
+        record = proc.build_summary()
+        self.assertEqual(record["phase"], "summary")
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "updated"], 1)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "error"], 0)
+
+    def test_the_sum_of_the_counters_is_the_number_of_outcome_lines(self):
+        """The property D-46 rests on to rule out an object identity in the journal."""
+        journal = FakeJournal()
+        rest = FakeRest(default_get=RestResponse(200, acl_body(write=("legacy_role",))))
+        proc = processor(rest, journal=journal, params=make_params(max_objects=2))
+        for index in range(5):
+            proc.process(make_event(title="object_%d" % index, write="new_role_admin"))
+        record = proc.build_summary()
+        total = sum(
+            value for field, value in record.items()
+            if field.startswith(SUMMARY_COUNT_PREFIX)
+        )
+        self.assertEqual(total, len(journal.outcomes))
+        self.assertEqual(total, 5)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "skipped_ceiling"], 3)
+
+    def test_the_summary_line_holds_no_null_and_no_host_key(self):
+        proc = processor(FakeRest(), journal=FakeJournal())
+        proc.process(make_event(write="new_role_admin"))
+        record = proc.build_summary()
+        self.assertEqual([f for f, v in record.items() if v is None], [])
+        self.assertNotIn(":null", dumps(record))
+        self.assertNotIn("host", record)
+        self.assertEqual(record["member"], "sh01")
+
+    def test_building_the_summary_writes_nothing(self):
+        """Building is pure and separate from writing, like the other two records: the
+        caller is the one that knows whether the run reached its normal end."""
+        journal = FakeJournal()
+        proc = processor(FakeRest(), journal=journal)
+        proc.process(make_event(write="new_role_admin"))
+        before = len(journal.outcomes)
+        proc.build_summary()
+        proc.build_summary()
+        self.assertEqual(journal.summaries, [])
+        self.assertEqual(len(journal.outcomes), before)
 
 
 class IntentFailureTest(unittest.TestCase):

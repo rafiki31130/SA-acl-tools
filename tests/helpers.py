@@ -135,11 +135,13 @@ class FakeJournal(object):
     sequence, which must cancel the POST (section 8.4).
     """
 
-    def __init__(self, fail_intent=False, fail_outcome=False):
+    def __init__(self, fail_intent=False, fail_outcome=False, fail_summary=False):
         self.intents = []
         self.outcomes = []
+        self.summaries = []
         self.fail_intent = fail_intent
         self.fail_outcome = fail_outcome
+        self.fail_summary = fail_summary
         self.closed = False
 
     def write_intent(self, record):
@@ -152,6 +154,12 @@ class FakeJournal(object):
         if self.fail_outcome:
             return False
         self.outcomes.append(record)
+        return True
+
+    def write_summary(self, record):
+        if self.fail_summary:
+            return False
+        self.summaries.append(record)
         return True
 
     def close(self):
@@ -189,8 +197,8 @@ def make_params(
     )
 
 
-def make_ctx(sid="test_sid", user="an_operator", host="sh01", dryrun=False):
-    return RunContext(sid=sid, user=user, host=host, dryrun=dryrun)
+def make_ctx(sid="test_sid", user="an_operator", member="sh01", dryrun=False):
+    return RunContext(sid=sid, user=user, member=member, dryrun=dryrun)
 
 
 def make_event(

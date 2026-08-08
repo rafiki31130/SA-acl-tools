@@ -21,7 +21,11 @@ from .endpoint import (
     resolve_handler_path,
 )
 from .errors import EventRejected
-from .journal import build_intent_record, build_outcome_record
+from .journal import (
+    build_intent_record,
+    build_outcome_record,
+    build_summary_record,
+)
 from .merge import is_noop, merge, validate_roles
 from .model import EventResult
 from .normalize import parse_acl_state
@@ -246,6 +250,16 @@ class EventProcessor(object):
         #: It feeds the single end-of-run warning; it is only zero if the ceiling never
         #: bit.
         self.skipped_ceiling = 0
+        #: Tally of the output events by `acl_status`, feeding the `summary` line
+        #: (section 8.2, D-46). It is fed from `_emit`, the exit point every event goes
+        #: through without exception - the same guarantee that holds invariant 1 - so
+        #: the sum of the counters is the number of output events of the run.
+        #:
+        #: It starts **empty** rather than pre-filled from the status enumeration: the
+        #: emission of every declared status, at zero included, is the job of
+        #: `build_summary_record`, which reads that enumeration at the moment it
+        #: builds the line. Two derivations of the same list would be one too many.
+        self.counts = {}
         #: endpoint -> state resulting from a **successful** POST.
         self._written = {}
         #: endpoint -> `_FailedPost` of a POST **sent and refused**.
@@ -553,12 +567,24 @@ class EventProcessor(object):
         self._platform_names[work.endpoint] = work.platform_name
         return parse_acl_state(acl_block)
 
+    def build_summary(self):
+        """End-of-run record (section 8.2, D-46), from the run's tally.
+
+        Building it is pure and separate from writing it, like the other two records:
+        the caller decides **whether** the run reached its normal end, and this method
+        knows nothing about that.
+        """
+        return build_summary_record(self._ctx, self.counts, self._clock())
+
     def _emit(self, result):
-        """Write the `outcome` line and return the final result.
+        """Write the `outcome` line, tally the status and return the final result.
 
         `write_outcome` is called on **every** exit, without exception: that is what
-        holds the invariant "one `outcome` line per output event".
+        holds the invariant "one `outcome` line per output event". The tally is fed
+        here for the same reason - it is the one place every event goes through, so no
+        exit can escape being counted.
         """
+        self.counts[result.status] = self.counts.get(result.status, 0) + 1
         if self._journal is not None:
             record = build_outcome_record(self._ctx, result, self._clock())
             if not self._journal.write_outcome(record):

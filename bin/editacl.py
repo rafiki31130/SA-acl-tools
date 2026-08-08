@@ -286,6 +286,11 @@ class EditAclCommand(StreamingCommand):
         # earlier, it could not carry that number; emitted per object, it would be
         # noise.
         self._ceiling_signaled = False
+        # The end-of-run journal line (section 8.2, D-46) is written **once**, after
+        # the last record of the run. Same reason as the ceiling warning: the command
+        # receives its input through successive chunks, and the counters are only
+        # complete on the last one.
+        self._summary_written = False
 
     # -- single emission point of the operator-facing messages -------------- #
 
@@ -453,12 +458,12 @@ class EditAclCommand(StreamingCommand):
         mapping = load_mapping(_MAP_JSON, _OVERRIDE_CSV, diag=self._diag)
         self._diag.mapping(mapping.coverage())
 
-        host = resolve_server_name(rest) or socket.gethostname()
-        self._diag.info("member: %s" % host)
+        member = resolve_server_name(rest) or socket.gethostname()
+        self._diag.info("member: %s" % member)
         ctx = RunContext(
             sid=sid,
             user=str(getattr(info, "username", "") or ""),
-            host=host,
+            member=member,
             dryrun=params.dryrun,
         )
 
@@ -500,6 +505,7 @@ class EditAclCommand(StreamingCommand):
                     self._setup()
                 yield self._handle(record)
             self._signal_ceiling()
+            self._write_summary()
         except FatalError as exc:
             # Single recording point of the fatal errors of section 9. `_setup()` is
             # called from within this `try`, so its errors pass through here. The
@@ -537,6 +543,40 @@ class EditAclCommand(StreamingCommand):
         )
         self._diag.warning(message)
         self._warn(message)
+
+    def _write_summary(self):
+        """Single `phase=summary` journal line, after the last record (8.2, D-46).
+
+        **Its position in the control flow is the whole point.** It sits inside the
+        `try` of `stream()`, after the loop over the records - therefore on the branch a
+        `FatalError` skips. That branch calls `_cleanup()` then `_fatal_exit()`, which
+        ends the process through `os._exit`: the `finally` never runs, and no line can
+        be appended afterwards. A run interrupted by a fatal error therefore leaves a
+        journal **with no summary line**, and it is that absence which distinguishes it
+        from a run that reached its end. Placing this write in `_cleanup()` would have
+        made the two indistinguishable again, since the fatal path does call the
+        cleanup.
+
+        Same two guards as the ceiling warning, for the same reason: the input arrives
+        in successive chunks, `self._finished` says whether this is the last one, and
+        `_summary_written` closes the case of protocol v1 where it is never filled in.
+
+        A failure to write is recorded in the diagnostic and nowhere else. There is no
+        output record left to carry an `acl_warning`, and the loss costs no write - only
+        the ability to tell a completed run from an interrupted one for this `sid`.
+        """
+        if self._summary_written or self._processor is None:
+            return
+        if self._journal_writer is None:
+            return
+        if getattr(self, "_finished", None) is False:
+            return
+        self._summary_written = True
+        if not self._journal_writer.write_summary(self._processor.build_summary()):
+            self._diag.warning(
+                "end-of-run journal line not written: this run will look interrupted "
+                "to any view built on the absence of that line."
+            )
 
     def _cleanup(self):
         """Close the journal and the diagnostic. Idempotent, and never raises.

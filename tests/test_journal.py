@@ -7,15 +7,19 @@ import tempfile
 import unittest
 
 from acltools.errors import FatalJournalError
+from acltools import journal as journal_module
+from acltools import model as model_module
 from acltools.journal import (
+    SUMMARY_COUNT_PREFIX,
     JournalWriter,
     build_intent_record,
     build_outcome_record,
+    build_summary_record,
     dumps,
     journal_filename,
 )
 from acltools.merge import merge
-from acltools.model import EventResult
+from acltools.model import ACL_STATUSES, EventResult
 
 from .helpers import ABSENT, FakeClock, make_ctx, make_event, state
 
@@ -35,7 +39,7 @@ ROLLBACK_FIELDS_FROM_INTENT = (
     "ts",
 )
 
-CTX = make_ctx(sid="1754483000.1", user="operator", host="sh01", dryrun=False)
+CTX = make_ctx(sid="1754483000.1", user="operator", member="sh01", dryrun=False)
 
 
 def result(status="updated", **kwargs):
@@ -57,7 +61,7 @@ class IntentRecordTest(unittest.TestCase):
     def test_common_and_specific_fields(self):
         record = build_intent_record(CTX, result(), "2026-01-01T00:00:00.000+01:00")
         for field in (
-            "ts", "phase", "sid", "user", "host", "dryrun", "endpoint", "app",
+            "ts", "phase", "sid", "user", "member", "dryrun", "endpoint", "app",
             "title", "eai_type",
         ):
             self.assertIn(field, record)
@@ -112,7 +116,7 @@ class OutcomeRecordTest(unittest.TestCase):
         self.assertEqual(record["phase"], "outcome")
         self.assertEqual(record["status"], "updated")
         self.assertEqual(record["http_code"], 200)
-        self.assertIsNone(record["error"])
+        self.assertEqual(record["error"], "")
 
     def test_updated_does_not_repeat_before_after_already_carried_by_intent(self):
         record = build_outcome_record(
@@ -159,12 +163,170 @@ class OutcomeRecordTest(unittest.TestCase):
         self.assertEqual(record["http_code"], 0)
         self.assertIsInstance(record["http_code"], int)
 
-    def test_error_is_the_only_field_that_may_be_null(self):
+    def test_no_field_is_ever_null_error_included(self):
+        """D-46 - `error` was the last exception, and the transport destroyed it.
+
+        `KV_MODE = json` extracts a JSON `null` as the four-character string `"null"`:
+        `isnull(error)` was false on every line and `isnotnull(error)` true on every
+        line. Measured in the lab, a panel counting objects in error the obvious way
+        displayed the whole job. The empty string carries the same meaning and survives
+        indexing.
+        """
+        for status, error in (
+            ("updated", None),
+            ("noop", None),
+            ("error", "post_failed:500:boom"),
+            ("rejected", "missing_field:title"),
+        ):
+            with self.subTest(status=status):
+                record = build_outcome_record(
+                    CTX,
+                    result(status=status, journaled=True, error=error),
+                    "2026-01-01T00:00:00.000+01:00",
+                )
+                nulls = [f for f, value in record.items() if value is None]
+                self.assertEqual(nulls, [])
+                self.assertIsInstance(record["error"], str)
+                self.assertNotIn(":null", dumps(record))
+
+    def test_an_absent_error_is_the_empty_string_and_not_the_word_null(self):
         record = build_outcome_record(
             CTX, result(journaled=True), "2026-01-01T00:00:00.000+01:00"
         )
-        nulls = [field for field, value in record.items() if value is None]
-        self.assertEqual(nulls, ["error"])
+        self.assertEqual(record["error"], "")
+        self.assertNotEqual(record["error"], "null")
+
+
+class SummaryRecordTest(unittest.TestCase):
+    """`phase=summary`, the end-of-run line (section 8.2, D-46).
+
+    A run interrupted - fatal error, ceiling, process killed - and a run that reached
+    its end used to be indistinguishable. This line is written once at the end of a
+    normal run, and it is its **absence** that signals the interruption; the control
+    over that placement lives in `tests/test_editacl_adapter.py`, which is where the
+    control flow is.
+    """
+
+    TS = "2026-01-01T00:00:00.000+01:00"
+
+    def test_phase_and_run_fields(self):
+        record = build_summary_record(CTX, {"updated": 3}, self.TS)
+        self.assertEqual(record["phase"], "summary")
+        for field in ("ts", "phase", "sid", "user", "member", "dryrun"):
+            self.assertIn(field, record)
+        self.assertEqual(record["sid"], "1754483000.1")
+        self.assertEqual(record["member"], "sh01")
+
+    def test_the_timestamp_is_the_first_key(self):
+        """`props.conf` reads the time with `TIME_PREFIX` and a 40-character
+        lookahead (section 8.3): a `ts` pushed further in would fall outside it."""
+        record = build_summary_record(CTX, {}, self.TS)
+        self.assertEqual(list(record)[0], "ts")
+
+    def test_it_designates_no_object(self):
+        """Section 8.5: the line carries no `endpoint`, therefore lands in an
+        aggregation group of its own. Emitting the object fields empty would enrol it
+        into the population of lines with an empty `endpoint`, which any `dc()` over
+        those fields would then count as one more object."""
+        record = build_summary_record(CTX, {"updated": 1}, self.TS)
+        for field in ("endpoint", "app", "title", "eai_type", "status", "http_code"):
+            self.assertNotIn(field, record)
+
+    def test_every_declared_status_is_emitted_zeros_included(self):
+        """A consumer must not have to deal with an absent field: a predicate on an
+        absence is a predicate nobody tests."""
+        record = build_summary_record(CTX, {"updated": 2, "noop": 1}, self.TS)
+        for status in ACL_STATUSES:
+            self.assertIn(SUMMARY_COUNT_PREFIX + status, record)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "updated"], 2)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "noop"], 1)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "forbidden"], 0)
+
+    def test_the_counters_are_exactly_the_declared_statuses(self):
+        record = build_summary_record(CTX, {}, self.TS)
+        counters = tuple(
+            field[len(SUMMARY_COUNT_PREFIX):]
+            for field in record
+            if field.startswith(SUMMARY_COUNT_PREFIX)
+        )
+        self.assertEqual(counters, tuple(ACL_STATUSES))
+
+    def test_the_enumeration_is_derived_from_the_single_source_of_the_statuses(self):
+        """D-35, and this is the mechanical proof of it.
+
+        A status added to `acltools.model.ACL_STATUSES` appears in the line **with no
+        enumeration edited anywhere**. The fictional status below exists for the
+        duration of this test only; if `build_summary_record` held a list of its own,
+        this test would be the one to fail.
+        """
+        invented = "invented_status_for_this_test"
+        original = model_module.ACL_STATUSES
+        try:
+            model_module.ACL_STATUSES = original + (invented,)
+            record = build_summary_record(CTX, {"updated": 1}, self.TS)
+        finally:
+            model_module.ACL_STATUSES = original
+        self.assertIn(SUMMARY_COUNT_PREFIX + invented, record)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + invented], 0)
+        self.assertNotIn(SUMMARY_COUNT_PREFIX + invented,
+                         build_summary_record(CTX, {}, self.TS))
+
+    def test_the_builder_reads_the_source_and_holds_no_copy_of_it(self):
+        """The complement of the test above: `journal.py` names no status."""
+        source = journal_module.build_summary_record.__code__.co_consts
+        literals = [c for c in source if isinstance(c, str)]
+        for status in ACL_STATUSES:
+            self.assertNotIn(status, literals)
+
+    def test_a_count_carried_by_an_undeclared_status_is_not_lost(self):
+        """Unreachable while `tests/test_statuses.py` holds, and emitted all the same:
+        losing a count in silence is the failure class this journal exists to close."""
+        record = build_summary_record(CTX, {"a_status_nobody_declared": 4}, self.TS)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "a_status_nobody_declared"], 4)
+
+    def test_no_field_name_contains_a_colon_and_no_value_is_null(self):
+        record = build_summary_record(CTX, {"updated": 1}, self.TS)
+        for field, value in record.items():
+            self.assertNotIn(":", field)
+            self.assertIsNotNone(value)
+        self.assertNotIn(":null", dumps(record))
+
+    def test_the_counters_are_integers(self):
+        record = build_summary_record(CTX, {"updated": "3"}, self.TS)
+        self.assertIsInstance(record[SUMMARY_COUNT_PREFIX + "updated"], int)
+        self.assertEqual(record[SUMMARY_COUNT_PREFIX + "updated"], 3)
+
+    def test_a_run_with_no_event_carries_only_zeros(self):
+        record = build_summary_record(CTX, {}, self.TS)
+        self.assertEqual(
+            sum(
+                value for field, value in record.items()
+                if field.startswith(SUMMARY_COUNT_PREFIX)
+            ),
+            0,
+        )
+
+
+class MemberKeyTest(unittest.TestCase):
+    """D-46 - the `host` key is gone, on every phase.
+
+    It collided with the `host` metadata Splunk stamps on every event, and the field
+    came out **multivalued** at search time. Nothing was visible in the file, which was
+    correct; the defect only existed where the journal is meant to be read.
+    """
+
+    TS = "2026-01-01T00:00:00.000+01:00"
+
+    def test_no_phase_carries_a_host_key(self):
+        records = (
+            build_intent_record(CTX, result(), self.TS),
+            build_outcome_record(CTX, result(journaled=True), self.TS),
+            build_summary_record(CTX, {"updated": 1}, self.TS),
+        )
+        for record in records:
+            with self.subTest(phase=record["phase"]):
+                self.assertNotIn("host", record)
+                self.assertEqual(record["member"], "sh01")
 
 
 class RollbackContractTest(unittest.TestCase):
@@ -324,10 +486,19 @@ class JournalWriterTest(unittest.TestCase):
         writer = JournalWriter(path)
         self.assertTrue(writer.write_intent({"phase": "intent", "a": 1}))
         self.assertTrue(writer.write_outcome({"phase": "outcome", "b": 2}))
+        self.assertTrue(writer.write_summary({"phase": "summary", "c": 3}))
         writer.close()
         with open(path, encoding="utf-8") as handle:
             lines = [json.loads(l) for l in handle if l.strip()]
-        self.assertEqual([l["phase"] for l in lines], ["intent", "outcome"])
+        self.assertEqual(
+            [l["phase"] for l in lines], ["intent", "outcome", "summary"]
+        )
+
+    def test_a_write_failure_is_reported_and_never_raised(self):
+        path = os.path.join(self.directory, journal_filename("closed_sid"))
+        writer = JournalWriter(path)
+        writer.close()
+        self.assertFalse(writer.write_summary({"phase": "summary"}))
 
     def test_an_impossible_opening_is_fatal(self):
         path = os.path.join(self.directory, "nonexistent-subdirectory", "j.log")

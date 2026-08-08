@@ -313,7 +313,8 @@ def load_roles_catalog(rest):
 
 
 def resolve_server_name(rest):
-    """`serverName` of the member, for the journal `host` field. `""` if unavailable."""
+    """`serverName` of the member, for the journal `member` field (D-46). `""` if
+    unavailable."""
     response = rest.get_json("/services/server/info", None)
     document = _decode(response)
     if document is None:
