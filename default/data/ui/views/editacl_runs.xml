@@ -1,0 +1,405 @@
+<form version="1.1">
+  <label>editacl - run monitor</label>
+  <description>Which editacl runs took place, and how the selected one went. An empty view does not prove that no run took place: read the entitlement check first.</description>
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="tr">
+      <label>Time range</label>
+      <default>
+        <earliest>-7d@d</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="sid_in" searchWhenChanged="true">
+      <label>Run (sid)</label>
+      <change>
+        <condition match="$value$ == &quot;&quot;">
+          <unset token="sid"/>
+        </condition>
+        <condition>
+          <set token="sid">$value$</set>
+        </condition>
+      </change>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>Entitlement check</title>
+      <table>
+        <search>
+          <query>`acl_journal_source`
+| stats count AS journal_events
+| appendcols
+    [| eventcount summarize=false index=* index=_*
+     | stats count AS searchable_index_count, values(index) AS searchable_indexes]
+| eval searchable_index_count = coalesce(searchable_index_count, 0)
+| eval state = case(
+      journal_events &gt; 0, "OK - the journal is readable and carries events in this window",
+      searchable_index_count == 0, "NO SEARCHABLE INDEX - your role has no index entitlement. Granting it is a deployment prerequisite, outside this app. An empty view does NOT mean that no run took place.",
+      1==1, "NO EVENT IN THIS WINDOW - either no run was recorded, or the journal does not land in an index you may search. Check that the index listed opposite is the one inputs.conf sends the journal to.")
+| table state, journal_events, searchable_index_count, searchable_indexes</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">5</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Legacy-format lines excluded</title>
+      <table>
+        <search>
+          <query>`acl_journal_source`
+| stats count AS journal_lines,
+        count(eval(isnull(member)))               AS legacy_lines,
+        dc(eval(if(isnull(member), sid, null()))) AS legacy_runs,
+        dc(sid)                                   AS runs
+| eval note = if(legacy_lines = 0,
+      "No legacy-format line in this window.",
+      "These lines were written before the current journal format. They are EXCLUDED from every other panel of this view: they carry no end-of-run line, so they would all be reported as interrupted, and their error field holds the literal string null, so they would all be reported as failed. Counting them alongside current lines would produce wrong figures.")
+| table legacy_lines, legacy_runs, journal_lines, runs, note</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">5</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Runs started with no journal line</title>
+      <table>
+        <search>
+          <query>search (`acl_journal_source`) OR (`acl_diag_source`)
+| stats count(eval(sourcetype="editacl:journal")) AS journal_lines,
+        count(eval(sourcetype="editacl:diag"))    AS diag_lines,
+        min(eval(if(sourcetype="editacl:diag", _time, null())))       AS started,
+        values(eval(if(sourcetype="editacl:diag", user, null())))     AS run_user,
+        values(eval(if(sourcetype="editacl:diag", journal, null())))  AS journal_param,
+        values(eval(if(sourcetype="editacl:diag", max_objects, null()))) AS max_objects,
+        count(eval(sourcetype="editacl:diag" AND match(_raw, "fatal error:"))) AS fatal_lines,
+        count(eval(sourcetype="editacl:diag" AND match(_raw, "rollback journal not openable"))) AS journal_open_failures
+  BY sid
+| where journal_lines = 0 AND diag_lines &gt; 0
+| eval reason = case(
+      journal_param="false", "journal=false - no journal file is produced, by design. Nothing about the objects of this run is recoverable.",
+      journal_open_failures &gt; 0, "the rollback journal could not be opened",
+      fatal_lines &gt; 0, "fatal error before the first journal line",
+      1==1, "no journal line - the run may have been killed before its first write")
+| sort - started
+| convert ctime(started)
+| table started, sid, run_user, journal_param, max_objects, reason, diag_lines</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">10</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Runs</title>
+      <table>
+        <search>
+          <query>`acl_journal_source`
+| where isnotnull(member)
+| stats min(_time) AS first_line, max(_time) AS last_line,
+        values(user) AS run_user, values(member) AS member,
+        values(dryrun) AS dryrun_values,
+        count AS journal_lines,
+        count(eval(phase="outcome")) AS output_events,
+        count(eval(phase="intent"))  AS writes_attempted,
+        count(eval(phase="summary")) AS end_of_run_lines,
+        count(eval(phase="outcome" AND status="updated"))         AS updated,
+        count(eval(phase="outcome" AND status="noop"))            AS noop,
+        count(eval(phase="outcome" AND status="dryrun"))          AS simulated,
+        count(eval(phase="outcome" AND status="error"))           AS errors,
+        count(eval(phase="outcome" AND like(status,"skipped_%"))) AS skipped,
+        dc(eval(if(phase="outcome", app, null()))) AS apps
+  BY sid
+| eval other = output_events - (updated + noop + simulated + errors + skipped)
+| eval mode = case(mvcount(dryrun_values) &gt; 1, "MIXED - inconsistent run",
+                   dryrun_values="true",  "simulation",
+                   dryrun_values="false", "real",
+                   1==1, "unknown")
+| eval run_state = case(end_of_run_lines &gt; 1, "ANOMALY - several end-of-run lines",
+                        end_of_run_lines = 1, "completed",
+                        1==1, "INTERRUPTED - no end-of-run line")
+| eval run_start = if(mvcount(split(sid,".")) = 2,
+                      tonumber(mvindex(split(sid,"."),0)), null())
+| eval inventory_wait_s = if(isnull(run_start), null(), round(first_line - run_start, 3))
+| eval write_span_s = round(last_line - first_line, 3)
+| eval started = coalesce(run_start, first_line)
+| sort - started
+| convert ctime(started)
+| table started, sid, run_user, member, mode, run_state, output_events,
+        updated, noop, simulated, skipped, errors, other, apps,
+        writes_attempted, inventory_wait_s, write_span_s, journal_lines</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">row</option>
+        <option name="wrap">false</option>
+        <option name="count">20</option>
+        <drilldown>
+          <set token="sid">$row.sid$</set>
+          <set token="sid_in">$row.sid$</set>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel rejects="$sid$">
+      <html>
+        <p>Select a run in the table above, or type its sid, to inspect it.</p>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Selected run</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$"
+| stats count AS journal_lines,
+        count(eval(isnull(member))) AS legacy_lines,
+        min(_time) AS first_line, max(_time) AS last_line,
+        values(eval(if(isnotnull(member), user, null())))   AS run_user,
+        values(member) AS member,
+        values(eval(if(isnotnull(member), dryrun, null()))) AS dryrun_values,
+        count(eval(phase="outcome" AND isnotnull(member)))  AS output_events,
+        count(eval(phase="intent"  AND isnotnull(member)))  AS writes_attempted,
+        count(eval(phase="summary"))                        AS end_of_run_lines,
+        dc(eval(if(phase="outcome" AND isnotnull(member), app, null()))) AS apps
+  BY sid
+| eval mode = case(mvcount(dryrun_values) &gt; 1, "MIXED - inconsistent run",
+                   dryrun_values="true",  "simulation",
+                   dryrun_values="false", "real",
+                   1==1, "unknown")
+| eval run_state = case(
+      journal_lines &gt; 0 AND legacy_lines = journal_lines, "LEGACY FORMAT - this run predates the current journal format. Its lines are excluded from every other panel: no end-of-run line, and an error field holding the literal string null.",
+      end_of_run_lines &gt; 1, "ANOMALY - several end-of-run lines",
+      end_of_run_lines = 1, "completed",
+      1==1, "INTERRUPTED - no end-of-run line")
+| eval run_start = if(mvcount(split(sid,".")) = 2,
+                      tonumber(mvindex(split(sid,"."),0)), null())
+| eval inventory_wait_s = if(isnull(run_start), null(), round(first_line - run_start, 3))
+| eval write_span_s = round(last_line - first_line, 3)
+| eval started = coalesce(run_start, first_line)
+| convert ctime(started)
+| table sid, started, run_user, member, mode, run_state, output_events,
+        writes_attempted, apps, inventory_wait_s, write_span_s,
+        journal_lines, legacy_lines</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">5</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Status breakdown - observed vs declared</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$" phase=outcome
+| where isnotnull(member)
+| stats count AS observed BY status
+| append
+    [search `acl_journal_source` sid="$sid$" phase=summary
+     | where isnotnull(member)
+     | fields count_*
+     | transpose 0 column_name="counter"
+     | rename "row 1" AS declared
+     | where substr(counter, 1, 6) = "count_"
+     | eval status = replace(counter, "^count_", "")
+     | fields status, declared]
+| stats sum(observed) AS observed, sum(declared) AS declared BY status
+| eval observed = coalesce(observed, 0), declared = coalesce(declared, 0)
+| eventstats sum(declared) AS declared_total
+| where observed &gt; 0 OR declared &gt; 0
+| eval consistency = case(declared_total = 0, "n/a - no end-of-run line",
+                          observed = declared, "=",
+                          1==1, "MISMATCH - lines are missing from the journal")
+| sort - observed, status
+| table status, observed, declared, consistency</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+    <panel depends="$sid$">
+      <title>HTTP code breakdown</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$" phase=outcome
+| where isnotnull(member)
+| eval http_result = if(http_code="0", "0 - no HTTP exchange took place", http_code)
+| stats count AS events, values(status) AS statuses BY http_result
+| sort http_result</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Breakdown by application and object type</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$" phase=outcome
+| where isnotnull(member)
+| eval application = if(coalesce(app,"")="", "(not journaled)", app)
+| eval object_type = if(coalesce(eai_type,"")="", "(not journaled)", eai_type)
+| stats count AS events, values(status) AS statuses BY application, object_type
+| sort - events, application, object_type</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <!-- The eight state columns are aggregated with earliest() and not with values(),
+         and that is the same discipline as the rollback macro of section 8.6, which
+         pairs `earliest(...) BY endpoint` too. An object presented twice in the same
+         batch produces two outcome lines (section 8.5): values() would merge the prior
+         state of the first pass with the state read back on the second, turn the
+         column multivalued, and report "=" on an object that did change. MEASURED, on
+         a batch carrying one deliberate duplicate. -->
+    <panel depends="$sid$">
+      <title>Objects whose endpoint was resolved</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$"
+| where isnotnull(member) AND coalesce(endpoint,"") != ""
+| stats values(eval(if(phase="outcome", status, null())))    AS status,
+        values(eval(if(phase="outcome", http_code, null()))) AS http_code,
+        values(eval(if(phase="outcome" AND error!="", error, null()))) AS error,
+        values(app) AS application, values(title) AS title,
+        values(eai_type) AS object_type,
+        earliest(before_owner)       AS before_owner,
+        earliest(after_owner)        AS after_owner,
+        earliest(before_perms_read)  AS before_read,
+        earliest(after_perms_read)   AS after_read,
+        earliest(before_perms_write) AS before_write,
+        earliest(after_perms_write)  AS after_write,
+        earliest(before_sharing)     AS before_sharing,
+        earliest(after_sharing)      AS after_sharing,
+        min(_time) AS first_seen
+  BY endpoint
+| eval object_type = if(coalesce(object_type,"")="", "(not journaled)", object_type)
+| eval read_change    = case(isnull(before_read)  OR isnull(after_read),  "n/a",
+                             before_read  = after_read,  "=", 1==1, "CHANGED")
+| eval write_change   = case(isnull(before_write) OR isnull(after_write), "n/a",
+                             before_write = after_write, "=", 1==1, "CHANGED")
+| eval owner_change   = case(isnull(before_owner) OR isnull(after_owner), "n/a",
+                             before_owner = after_owner, "=", 1==1, "CHANGED")
+| eval sharing_change = case(isnull(before_sharing) OR isnull(after_sharing), "n/a",
+                             before_sharing = after_sharing, "=", 1==1, "CHANGED")
+| sort first_seen
+| convert ctime(first_seen)
+| table first_seen, application, object_type, title, status, http_code,
+        read_change, before_read, after_read,
+        write_change, before_write, after_write,
+        owner_change, before_owner, after_owner,
+        sharing_change, before_sharing, after_sharing,
+        error, endpoint</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">false</option>
+        <option name="count">50</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Events refused before endpoint resolution</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$" phase=outcome
+| where isnotnull(member) AND coalesce(endpoint,"") = ""
+| eval application = if(coalesce(app,"")="", "(not journaled)", app)
+| eval object_type = if(coalesce(eai_type,"")="", "(not journaled)", eai_type)
+| eval error = if(error="", "(none)", error)
+| sort _time
+| table _time, application, object_type, title, status, http_code, error</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">50</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Errors</title>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$" phase=outcome
+| where isnotnull(member)
+| search NOT status IN (updated, noop, dryrun)
+| rex field=error "^(?&lt;error_class&gt;[a-z_]+(?::\d+)?)"
+| eval error_class = coalesce(error_class, "(no message)")
+| eval object_type = if(coalesce(eai_type,"")="", "(not journaled)", eai_type)
+| stats count AS events, values(status) AS statuses,
+        values(title) AS titles, values(error) AS messages
+  BY error_class, object_type
+| sort - events</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">true</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>What this view cannot show</title>
+      <html>
+        <ul>
+          <li>Objects filtered out <b>upstream</b> of editacl by the calling search never reached the command and appear nowhere: neither a candidate volume nor a selection rate.</li>
+          <li><b>acl_warning is not journaled</b>: the output warnings, including the cascade warning on a derived object and the write-ceiling warning, cannot be recovered after the fact.</li>
+          <li>The calling search is not in the journal. It is in the platform audit index, out of reach of the read role of this view.</li>
+          <li>The <b>direction</b> of a batch - outbound change or rollback - is not journaled: both look like writes.</li>
+          <li>An empty view does not prove that no run took place. Read the entitlement check panel first.</li>
+        </ul>
+      </html>
+    </panel>
+  </row>
+
+</form>

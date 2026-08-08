@@ -35,6 +35,7 @@ class LayoutTest(unittest.TestCase):
         ("default", "inputs.conf"),
         ("default", "props.conf"),
         ("default", "data", "ui", "nav", "default.xml"),
+        ("default", "data", "ui", "views", "editacl_runs.xml"),
         ("metadata", "default.meta"),
         ("bin", "editacl.py"),
         ("bin", "acl_endpoint_map.json"),

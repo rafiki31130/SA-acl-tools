@@ -58,3 +58,25 @@ export = system
 [savedsearches]
 access = read : [ * ], write : [ admin ]
 export = none
+
+# Run monitoring view (specification section 15). Exported to the system so it opens
+# from any app context: the app carries `is_visible = 0`, and a view that could only be
+# reached from a hidden app would be unreachable in practice. MEASURED, with the
+# negative control that makes the measurement conclusive: the same view declared
+# `export = none` answers 404 from another app, while this one answers 200 - including
+# from the context of the hidden app itself. `is_visible = 0` restricts the app
+# selector and nothing else.
+#
+# Read is restricted to the single role the app declares (D-44). Two facts that no
+# declaration here can change, both measured: an account holding `admin_all_objects`
+# reads the view anyway, and an account WITHOUT the role gets a 404, not a 403.
+#
+# `export = system` reads back as `sharing = global` in the ACL API, never as `system`.
+# An operational check written on `sharing="system"` would find nothing.
+#
+# No class-wide `[views]` stanza is added: the per-object stanza is enough, and a
+# class-wide one would export every future view of this app without anyone deciding it.
+
+[views/editacl_runs]
+access = read : [ editacl_auditor ], write : [ admin ]
+export = system

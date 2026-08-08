@@ -240,8 +240,15 @@ class MacrosTest(unittest.TestCase):
     def test_the_rollback_is_invocable_in_generating_position(self):
         # Invoked as `| `editacl_rollback(...)``, the definition must start with a
         # command. Section 8.6 writes the SPL without its leading `search`.
+        #
+        # The source that follows is the `acl_journal_source` macro and no longer a
+        # written-out index (D-51, section 8.3.bis): a redirection of the journal index
+        # would otherwise have left this macro - the only safety net of an irreversible
+        # operation - returning an EMPTY rollback set, reported as a success.
         self.assertTrue(
-            self.conf["editacl_rollback(1)"]["definition"].startswith("search index=")
+            self.conf["editacl_rollback(1)"]["definition"].startswith(
+                "search `acl_journal_source`"
+            )
         )
 
 
