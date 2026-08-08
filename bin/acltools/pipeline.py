@@ -14,7 +14,12 @@ from dataclasses import replace
 from datetime import datetime
 
 from .derived import CarrierProbe
-from .endpoint import build_object_path, resolve_handler_path
+from .endpoint import (
+    build_object_path,
+    is_fixed_context,
+    namespace_owner_from_id,
+    resolve_handler_path,
+)
 from .errors import EventRejected
 from .journal import build_intent_record, build_outcome_record
 from .merge import is_noop, merge, validate_roles
@@ -27,6 +32,19 @@ MAX_ERROR_LEN = 512
 #: n'est visible que de son proprietaire et des administrateurs : les permissions qu'il
 #: porterait n'accordent rien a personne, elles sont **inertes**.
 PRIVATE_SHARING = "user"
+
+#: Motif d'ecartement d'un objet prive (§3.5). **Identique par les deux voies de
+#: detection** : c'est le meme fait — l'objet est hors perimetre — et l'operateur qui
+#: filtre sur ce motif ne doit pas avoir a en connaitre deux.
+PRIVATE_ERROR = "private_object_out_of_scope"
+
+#: Avertissement porte par `acl_warning` quand l'objet a ete ecarte par la **seconde**
+#: voie du §3.5 (D-34) : namespace nominatif porte par `id`, colonne de portee absente
+#: du jeu de resultats. Il ne change ni le statut ni le motif ; il dit a l'operateur que
+#: son pipeline n'emet pas la portee courante et que l'ecartement repose donc sur `id`
+#: seul. Le remede est le meme que partout ailleurs : batir le pipeline sur la macro
+#: d'inventaire, qui emet toujours les deux.
+PRIVATE_BY_ID_WARNING = "private_detected_by_id_namespace"
 
 #: Contexte applicatif hors perimetre (§1.3, §4.2). Refus **par evenement** : le §9
 #: enumere limitativement les erreurs fatales et ne l'y fait pas figurer.
@@ -268,15 +286,44 @@ class EventProcessor(object):
         work.source = source
         work.endpoint = build_object_path(event.app, handler_path, event.title)
 
-        # Rang -1 (§3.5, D-26) — objets prives, ecartes **sans GET ni POST**, sur la
-        # seule portee courante lue dans l'evenement. Si la colonne de portee est absente
-        # du jeu de resultats, `current_sharing` vaut `None` : la commande ne peut pas
-        # les ecarter en amont, le GET par contexte fixe repond `404` et l'objet ressort
-        # en `not_found`. C'est honnete, mais moins informatif — d'ou la recommandation
-        # du README de batir le pipeline sur la macro d'inventaire, qui emet toujours la
-        # portee.
-        if (event.current_sharing or "").strip().lower() == PRIVATE_SHARING:
-            raise EventRejected("skipped_private", "private_object_out_of_scope")
+        # Rang -1 (§3.5, D-26, D-34) — objets prives, ecartes **sans GET ni POST**.
+        #
+        # DEUX voies de detection, et la seconde n'est pas un confort. Toutes deux
+        # s'appuient sur une donnee **emise par la plateforme** : la portee courante que
+        # le jeu de resultats porte, ou le namespace que la plateforme a inscrit dans
+        # l'`id` de l'objet. Rien n'est reconstruit, rien n'est suppose.
+        #
+        #  1. La portee courante vaut `user`. Voie principale, exacte, sans ambiguite.
+        #
+        #  2. La portee courante est **indisponible** — colonne absente du jeu de
+        #     resultats, ou presente et vide, ce qui ne renseigne pas davantage — et
+        #     l'`id` porte un namespace **nominatif**. Splunkd emet `/servicesNS/nobody/`
+        #     pour un objet partage et `/servicesNS/<proprietaire>/` pour un prive : un
+        #     namespace autre que le contexte fixe designe donc un objet prive.
+        #
+        # Sans la voie 2, le repli annonce jusqu'ici — « le GET par contexte fixe repond
+        # 404 et l'objet ressort en not_found » — **est faux des qu'un homonyme partage
+        # existe** : l'adressage fixe atteint alors le partage, et la commande lit puis
+        # ecrirait un objet **autre que celui designe en entree**. C'est la meme classe
+        # de defaut que celui de la v1 que le §5.2 declare clos, reintroduite par le
+        # repli.
+        #
+        # Erreur possible et son sens : un objet partage dont l'`id` aurait ete moissonne
+        # dans un contexte nominatif ressortirait `skipped_private` a tort. Comme au
+        # rang 0, **l'erreur est une abstention, jamais une ecriture fautive**.
+        #
+        # Si ni la portee ni un `id` exploitable ne sont disponibles, l'objet suit son
+        # cours et ressortira en `not_found` faute de toute designation permettant de
+        # faire mieux — d'ou la recommandation du README de batir le pipeline sur la
+        # macro d'inventaire, qui emet toujours les deux.
+        current_scope = (event.current_sharing or "").strip().lower()
+        if current_scope == PRIVATE_SHARING:
+            raise EventRejected("skipped_private", PRIVATE_ERROR)
+        if not current_scope:
+            namespace_owner = namespace_owner_from_id(event.id_value)
+            if namespace_owner is not None and not is_fixed_context(namespace_owner):
+                work.warn(PRIVATE_BY_ID_WARNING)
+                raise EventRejected("skipped_private", PRIVATE_ERROR)
 
         before = self._read_state(work)
 
@@ -306,10 +353,10 @@ class EventProcessor(object):
         for warning in merged.warnings:
             work.warn(warning)
 
-        if merged.rejection is not None:                              # rangs 1 a 5
+        if merged.rejection is not None:                              # rangs 1 a 4
             raise merged.rejection
 
-        if self._params.validate_roles:                               # rang 6
+        if self._params.validate_roles:                               # rang 5
             unknown_added, stale_preserved = validate_roles(
                 merged.before, merged.after, self._roles
             )
@@ -320,14 +367,14 @@ class EventProcessor(object):
                     "invalid_role", "invalid_role:%s" % ",".join(unknown_added)
                 )
 
-        if is_noop(merged.before, merged.after):                      # rang 7
-            # Le rang 7 precede le rang 8 : un objet deja conforme est un `noop` meme
+        if is_noop(merged.before, merged.after):                      # rang 6
+            # Le rang 6 precede le rang 7 : un objet deja conforme est un `noop` meme
             # en simulation. C'est ce qui permet de mesurer la convergence d'un lot
             # sans ecrire.
             work.status = "noop"
             return
 
-        if self._params.dryrun:                                       # rang 8
+        if self._params.dryrun:                                       # rang 7
             work.status = "dryrun"
             return
 

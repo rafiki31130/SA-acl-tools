@@ -60,13 +60,56 @@ class _FakeOption(object):
 
 class _FakeRecordWriter(object):
     """Ecrivain de chunks factice. Enregistre l'etat `finished` de chaque chunk : c'est
-    lui qui decide si splunkd marque le job en echec (§4.3, A-4)."""
+    lui qui decide si splunkd marque le job en echec (§4.3, A-4).
+
+    Il reproduit par ailleurs **une seule autre chose, mais exactement** : la regle par
+    laquelle `RecordWriter._write_record` construit l'en-tete du flux
+    (`splunklib/searchcommands/internals.py`).
+
+        fieldnames = self._fieldnames
+        if fieldnames is None:
+            self._fieldnames = fieldnames = list(record.keys())
+            self._fieldnames.extend(
+                [i for i in self.custom_fields if i not in self._fieldnames]
+            )
+        for fieldname in fieldnames:
+            value = get_value(fieldname, None)
+
+    Deux consequences, et ce sont elles que les tests exercent : l'en-tete est fige sur
+    les cles du **premier** enregistrement emis, et les noms declares dans
+    `custom_fields` y sont ajoutes **quel que soit** le contenu de ce premier
+    enregistrement. `LeDoubleReproduitLeSdkTest` adosse cette double a la source du SDK
+    vendorise, que la suite ne charge pas (§11.1).
+    """
 
     def __init__(self):
         self.chunks = []
+        self.custom_fields = set()
+        self._fieldnames = None
+        self.rows = []
 
     def write_chunk(self, finished=None):
         self.chunks.append(finished)
+
+    def write_record(self, record):
+        fieldnames = self._fieldnames
+        if fieldnames is None:
+            self._fieldnames = fieldnames = list(record.keys())
+            self._fieldnames.extend(
+                [i for i in self.custom_fields if i not in self._fieldnames]
+            )
+        self.rows.append(
+            dict((nom, record.get(nom, None)) for nom in fieldnames)
+        )
+
+    def write_records(self, records):
+        for record in records:
+            self.write_record(record)
+
+    @property
+    def header(self):
+        """Jeu de colonnes du flux, c'est-a-dire ce que l'operateur voit."""
+        return list(self._fieldnames or [])
 
 
 class _FakeSearchCommand(object):
@@ -77,6 +120,9 @@ class _FakeSearchCommand(object):
         self.errors = []
         self.flushes = 0
         self.finishes = 0
+
+    def prepare(self):
+        """Point d'extension du SDK, invoque avant toute execution. Inerte ici."""
 
     def write_warning(self, message):
         self.warnings.append(message)
@@ -691,6 +737,227 @@ class AvertissementDeSimulationTest(unittest.TestCase):
         commande = self._commande(dryrun=False)
         self._executer(commande, 10)
         self.assertNotIn(self.attendu, commande.warnings)
+
+
+class JeuDeChampsDeSortieDeclareTest(unittest.TestCase):
+    """§5.7, D-33 — le jeu de champs de sortie est **declare, jamais infere**.
+
+    L'anomalie que ces tests figent n'est pas dans le code de l'app : elle est dans le
+    transport. Le writer du SDK construit l'en-tete du flux a partir des cles du
+    **premier** enregistrement emis, puis y projette tous les suivants. Les huit champs
+    `acl_before_*` / `acl_after_*` n'etant portes que par les enregistrements dont la
+    fusion a ete calculee, un lot dont la premiere ligne est un `skipped_private` prive
+    l'operateur de **tout** ce que la simulation existe pour montrer — sans erreur, sans
+    avertissement, et sans que le journal en porte la moindre trace.
+
+    **Un seul degre de liberte separe les deux mesures : l'ordre du lot.** Memes objets,
+    memes statuts, meme commande. Un test qui n'inverserait pas l'ordre ne prouverait
+    rien.
+    """
+
+    def setUp(self):
+        from acltools.model import ACL_OUTPUT_FIELDS, ACL_STATE_FIELDS, AclState, EventResult
+
+        self.champs_declares = ACL_OUTPUT_FIELDS
+        self.champs_detat = ACL_STATE_FIELDS
+        self.module = _charger_editacl()
+        _intercepter_labandon(self.module)
+
+        avant = AclState(owner="nobody", sharing="app",
+                         perms_read=("*",), perms_write=("ancien_role",))
+        apres = AclState(owner="nobody", sharing="app",
+                         perms_read=("*",), perms_write=("nouveau_role_admin",))
+
+        #: Un statut **sans** etat — l'objet est ecarte avant la fusion — et un statut
+        #: qui en porte un. C'est exactement le lot que la macro d'inventaire produit :
+        #: elle liste les objets prives au meme titre que les autres.
+        resultats = {
+            "objet_prive": EventResult(
+                status="skipped_private",
+                title="objet_prive",
+                error="private_object_out_of_scope",
+            ),
+            "objet_partage": EventResult(
+                status="dryrun",
+                title="objet_partage",
+                http_code=200,
+                before=avant,
+                after=apres,
+            ),
+        }
+
+        class _ProcesseurParTitre(object):
+            skipped_ceiling = 0
+
+            def process(self, event):
+                return resultats[event.title]
+
+        self.module.RestClient = lambda *a, **k: object()
+        self.module.check_capability = lambda rest: None
+        self.module.check_realtime = lambda rest, sid: "batch"
+        self.module.load_roles_catalog = lambda rest: frozenset()
+        self.module.resolve_server_name = lambda rest: "sh01"
+        self.module.AppStateCache = lambda rest: types.SimpleNamespace(
+            is_app_disabled=lambda app: False
+        )
+        self.module.EventProcessor = lambda **kwargs: _ProcesseurParTitre()
+
+    def _flux(self, titres, declarer=True):
+        """Deroule un lot et rend l'ecrivain, en-tete figee comme le ferait le SDK."""
+        commande = self.module.EditAclCommand()
+        commande.dryrun = True
+        commande.validate_roles = False
+        commande.journal = False
+        commande.max_objects = 10
+        commande._metadata = types.SimpleNamespace(
+            searchinfo=types.SimpleNamespace(
+                sid="1700000000.1",
+                username="un_operateur",
+                splunkd_uri="https://127.0.0.1:8089",
+                session_key="clef-de-session-factice",
+            )
+        )
+        sorties = list(commande.stream([{"title": titre} for titre in titres]))
+        if not declarer:
+            # Temoin : on retire la declaration juste avant l'ecriture, pour eprouver
+            # que la double reproduit bien l'anomalie qu'elle est censee reproduire.
+            commande._record_writer.custom_fields.clear()
+        commande._record_writer.write_records(sorties)
+        return commande._record_writer
+
+    # -- la preuve, dans les deux ordres ------------------------------------ #
+
+    def test_le_lot_commencant_par_un_statut_sans_etat_porte_tous_les_champs(self):
+        writer = self._flux(["objet_prive", "objet_partage"])
+        for champ in self.champs_declares:
+            self.assertIn(champ, writer.header, champ)
+
+    def test_le_lot_commencant_par_un_statut_avec_etat_porte_tous_les_champs(self):
+        writer = self._flux(["objet_partage", "objet_prive"])
+        for champ in self.champs_declares:
+            self.assertIn(champ, writer.header, champ)
+
+    def test_len_tete_est_la_meme_dans_les_deux_ordres(self):
+        """La propriete qui compte : la sortie ne depend plus de l'ordre du lot."""
+        direct = self._flux(["objet_prive", "objet_partage"]).header
+        inverse = self._flux(["objet_partage", "objet_prive"]).header
+        self.assertEqual(sorted(direct), sorted(inverse))
+
+    def test_la_valeur_utile_est_bien_portee_quand_le_prive_est_en_tete(self):
+        """Presence de la colonne ne suffit pas : la valeur doit y etre."""
+        writer = self._flux(["objet_prive", "objet_partage"])
+        self.assertEqual(writer.rows[1]["acl_before_perms_write"], "ancien_role")
+        self.assertEqual(writer.rows[1]["acl_after_perms_write"], "nouveau_role_admin")
+
+    def test_le_statut_sans_etat_ne_porte_aucune_valeur_detat(self):
+        """La declaration ajoute la colonne, elle n'invente pas de contenu (§8.2)."""
+        writer = self._flux(["objet_prive", "objet_partage"])
+        for champ in self.champs_detat:
+            self.assertIsNone(writer.rows[0][champ], champ)
+
+    # -- temoin : sans declaration, l'anomalie est bien reproduite ---------- #
+
+    def test_sans_declaration_les_huit_champs_disparaissent(self):
+        """Ce que mesurait l'auditeur sur `191d5e8`, et ce qui ferme le controle.
+
+        Si ce test cessait de passer, la double ne reproduirait plus l'anomalie et les
+        cinq tests ci-dessus ne prouveraient plus rien.
+        """
+        writer = self._flux(["objet_prive", "objet_partage"], declarer=False)
+        for champ in self.champs_detat:
+            self.assertNotIn(champ, writer.header, champ)
+
+    def test_sans_declaration_lordre_inverse_les_conserve(self):
+        writer = self._flux(["objet_partage", "objet_prive"], declarer=False)
+        for champ in self.champs_detat:
+            self.assertIn(champ, writer.header, champ)
+
+    # -- la declaration ne peut pas deriver de la projection ---------------- #
+
+    def test_la_declaration_couvre_exactement_ce_que_ladaptateur_projette(self):
+        """Deux listes qui divergeraient rendraient la correction muette.
+
+        Les noms projetes sont releves dans la source de `_handle`, ceux declares dans
+        `ACL_OUTPUT_FIELDS`. L'egalite des deux jeux est la seule chose qui garantit
+        qu'aucun champ ajoute demain ne retombera dans le defaut d'aujourd'hui.
+        """
+        source = os.path.join(BIN_DIR, "editacl.py")
+        with open(source, encoding="utf-8") as handle:
+            arbre = ast.parse(handle.read())
+
+        projetes = set()
+        for noeud in ast.walk(arbre):
+            if not isinstance(noeud, ast.FunctionDef) or noeud.name != "_handle":
+                continue
+            for interne in ast.walk(noeud):
+                if not isinstance(interne, ast.Assign):
+                    continue
+                for cible in interne.targets:
+                    if (
+                        isinstance(cible, ast.Subscript)
+                        and isinstance(cible.value, ast.Name)
+                        and cible.value.id == "output"
+                        and isinstance(cible.slice, ast.Constant)
+                    ):
+                        projetes.add(cible.slice.value)
+
+        self.assertEqual(projetes, set(self.champs_declares))
+
+    def test_la_declaration_est_faite_des_le_point_dextension_du_sdk(self):
+        """`prepare()` est invoque par le SDK avant toute execution.
+
+        `_setup()` la refait — il s'execute avant le premier `yield` — mais s'appuyer
+        sur lui seul ferait dependre la sortie d'un chemin qui n'est pas celui que le
+        SDK documente.
+        """
+        commande = self.module.EditAclCommand()
+        commande.prepare()
+        self.assertEqual(
+            set(self.champs_declares) - commande._record_writer.custom_fields, set()
+        )
+
+
+class LeDoubleReproduitLeSdkTest(unittest.TestCase):
+    """Adosse `_FakeRecordWriter` a la source du SDK vendorise, sans la charger.
+
+    La suite ne met pas `bin/lib` dans `sys.path` (§11.1) : les tests d'A-1 s'appuient
+    donc sur une double. Une double qui aurait derive du SDK prouverait quelque chose
+    d'autre que ce qu'elle pretend. Ces trois controles lisent la source du SDK et
+    figent les trois faits sur lesquels la double — et la correction — reposent.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        chemin = os.path.join(SDK_DIR, "internals.py")
+        with open(chemin, encoding="utf-8") as handle:
+            cls.source = handle.read()
+        cls.arbre = ast.parse(cls.source)
+
+    def test_len_tete_est_figee_sur_les_cles_du_premier_enregistrement(self):
+        self.assertIn(
+            "self._fieldnames = fieldnames = list(record.keys())", self.source
+        )
+
+    def test_len_tete_est_etendue_par_custom_fields(self):
+        self.assertIn(
+            "[i for i in self.custom_fields if i not in self._fieldnames]", self.source
+        )
+
+    def test_custom_fields_survit_a_la_fin_de_chunk(self):
+        """`_clear()` remet l'en-tete a zero, jamais la declaration.
+
+        C'est ce qui rend une declaration **unique** valable pour tous les chunks d'une
+        execution — sans quoi il faudrait la refaire a chaque chunk.
+        """
+        clears = [
+            noeud
+            for noeud in ast.walk(self.arbre)
+            if isinstance(noeud, ast.FunctionDef) and noeud.name == "_clear"
+        ]
+        self.assertTrue(clears)
+        for noeud in clears:
+            corps = ast.dump(noeud)
+            self.assertNotIn("custom_fields", corps)
 
 
 if __name__ == "__main__":

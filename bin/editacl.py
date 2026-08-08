@@ -46,7 +46,11 @@ from acltools.diag import NullDiagnostics, open_diagnostics  # noqa: E402
 from acltools.errors import FatalError  # noqa: E402
 from acltools.journal import JournalWriter, journal_path  # noqa: E402
 from acltools.mapping import load_mapping  # noqa: E402
-from acltools.model import DEFAULT_FIELD_NAMES, RunContext  # noqa: E402
+from acltools.model import (  # noqa: E402
+    ACL_OUTPUT_FIELDS,
+    DEFAULT_FIELD_NAMES,
+    RunContext,
+)
 from acltools.normalize import serialize_roles  # noqa: E402
 from acltools.pipeline import (  # noqa: E402
     RUNTIME_DIVERGENCE_MESSAGE,
@@ -258,9 +262,51 @@ class EditAclCommand(StreamingCommand):
         # atteinte, il ne pourrait pas le porter ; emis par objet, il serait du bruit.
         self._ceiling_signaled = False
 
+    # -- declaration du jeu de champs de sortie (§5.7, D-33) ---------------- #
+
+    def _declare_output_fields(self):
+        """Declare au writer l'integralite du jeu de champs du §5.7.
+
+        Le writer du SDK construit l'en-tete du flux a partir des **cles du premier
+        enregistrement emis** (`RecordWriter._write_record`), puis y projette tous les
+        suivants : un champ absent de ce premier enregistrement disparait de la sortie
+        entiere, **sans erreur ni avertissement**. Les huit champs `acl_before_*` /
+        `acl_after_*` n'etant portes que par les enregistrements dont la fusion a ete
+        calculee, un lot commencant par un `skipped_private` prive l'operateur de tout
+        ce que la simulation existe pour montrer — et la macro d'inventaire, qui liste
+        les objets prives au meme titre que les autres, produit couramment de tels lots.
+
+        Le SDK expose `RecordWriter.custom_fields` pour exactement cet usage : les noms
+        qui y figurent sont ajoutes a l'en-tete quel que soit le contenu du premier
+        enregistrement. **Le SDK vendorise n'est donc pas modifie** ; la declaration se
+        fait depuis l'app, et `custom_fields` survit au `_clear()` de fin de chunk, ce
+        qui la rend valable pour tous les chunks de l'execution.
+
+        Appelee par `prepare()` — le point d'extension prevu par le SDK, invoque avant
+        toute execution — **et** par `_setup()`, qui s'execute avant le premier `yield`
+        et couvre donc le cas d'un protocole ou `prepare()` ne serait pas atteint. La
+        declaration est idempotente.
+
+        Aucune defaillance de cette declaration ne doit interrompre la commande : elle
+        ameliore la sortie, elle ne conditionne aucune ecriture.
+        """
+        writer = getattr(self, "_record_writer", None)
+        declared = getattr(writer, "custom_fields", None)
+        if declared is None:                                         # pragma: no cover
+            return
+        try:
+            declared.update(ACL_OUTPUT_FIELDS)
+        except AttributeError:                                       # pragma: no cover
+            pass
+
+    def prepare(self):
+        super(EditAclCommand, self).prepare()
+        self._declare_output_fields()
+
     # -- cablage ----------------------------------------------------------- #
 
     def _setup(self):
+        self._declare_output_fields()
         info = self._metadata.searchinfo
         sid = str(getattr(info, "sid", "") or "")
         splunk_home = os.environ.get("SPLUNK_HOME")

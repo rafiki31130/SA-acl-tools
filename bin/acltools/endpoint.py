@@ -10,7 +10,7 @@ Dans les deux cas l'URI est **reconstruite**, jamais reprise telle quelle : le c
 n'est donc pas reutilisable comme URI.
 """
 
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .errors import EventRejected
 from .mapping import is_valid_handler_path
@@ -104,6 +104,55 @@ def handler_path_from_id(id_value):
     if not is_valid_handler_path(handler_path):
         return None
     return handler_path
+
+
+def namespace_owner_from_id(id_value):
+    """Proprietaire du namespace porte par `id`, ou `None` si `id` n'en porte pas.
+
+    **C'est une donnee emise par la plateforme, pas une convention** (§3.5, D-34, et
+    la propriete 3 du §3.4 dont c'est l'application litterale). Splunkd emet
+    `/servicesNS/nobody/…` pour un objet partage et `/servicesNS/<proprietaire>/…` pour
+    un objet prive : le segment lu ici est celui que la plateforme a inscrit dans l'URI
+    de l'objet, jamais un nom reconstruit ni une regle que nous poserions.
+
+    Le champ `id` est aussi la seule chose dont dispose la commande lorsque la colonne
+    de portee est absente du jeu de resultats. Le repli annonce jusqu'ici — le GET par
+    contexte fixe repond `404` et l'objet ressort en `not_found` — **est faux des qu'un
+    homonyme partage existe** : l'adressage fixe atteint alors le partage, et la
+    commande lit puis ecrirait un objet **autre que celui designe en entree**.
+
+    La forme attendue est exactement celle qu'exige `handler_path_from_id` :
+    `<owner>/<app>/<handler_path...>/<nom d'objet>`, soit quatre segments au moins. Un
+    `id` d'une autre forme — `/services/…` sans namespace, chemin tronque — ne porte
+    pas la donnee et rend `None` : la commande n'invente alors rien.
+    """
+    if not id_value:
+        return None
+    raw = str(id_value).strip()
+    if not raw:
+        return None
+
+    path = urlsplit(raw).path if "://" in raw else raw
+    marker = path.find(NAMESPACE_MARKER)
+    if marker < 0:
+        return None
+
+    remainder = path[marker + len(NAMESPACE_MARKER):]
+    segments = [seg for seg in remainder.split("/") if seg != ""]
+    if len(segments) < 4:
+        return None
+
+    owner = unquote(segments[0]).strip()
+    return owner or None
+
+
+def is_fixed_context(owner):
+    """Vrai si `owner` designe le contexte d'adressage fixe, donc un objet partage.
+
+    Point d'injection unique de la comparaison : elle ne peut pas deriver ailleurs, et
+    la casse n'a pas a etre decidee par chaque appelant.
+    """
+    return str(owner or "").strip().lower() == FIXED_CONTEXT
 
 
 def resolve_handler_path(id_value, eai_type, mapping):

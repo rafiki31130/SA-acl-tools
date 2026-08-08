@@ -675,16 +675,16 @@ sont réunies.
 | 1 | `can_change_perms = 0` dans la réponse du GET | `skipped_immutable` | non |
 | 2 | Colonne de `new_sharing` présente, cellule vide | `rejected` / `sharing_empty_not_allowed` | non |
 | 3 | Portée cible hors `{user, app, global}` | `rejected` / `invalid_sharing:<valeur>` | non |
-| 4 | Colonne de `new_owner` présente, cellule vide | `rejected` / `owner_empty_not_allowed` | non |
-| 5 | Portée cible = `user` et propriétaire cible = `nobody` | `rejected` / `sharing_user_requires_named_owner` | non |
-| 6 | `validate_roles=true` et rôle **ajouté** absent du référentiel | `invalid_role` | non |
-| 7 | État fusionné == état lu, après normalisation | `noop` | non |
-| 8 | `dryrun=true` | `dryrun` | non |
+| 3bis | Colonne de `new_owner` présente, cellule vide | `rejected` / `owner_empty_not_allowed` | non |
+| 4 | Portée cible = `user` et propriétaire cible = `nobody` | `rejected` / `sharing_user_requires_named_owner` | non |
+| 5 | `validate_roles=true` et rôle **ajouté** absent du référentiel | `invalid_role` | non |
+| 6 | État fusionné == état lu, après normalisation | `noop` | non |
+| 7 | `dryrun=true` | `dryrun` | non |
 
 Le plafond `max_objects` précède l'ensemble : une fois atteint, l'objet ressort en
 `skipped_ceiling` sans même un GET.
 
-**Le rang 7 précède le rang 8** : un objet déjà conforme est un `noop` **même en
+**Le rang 6 précède le rang 7** : un objet déjà conforme est un `noop` **même en
 simulation**. C'est l'information utile, et c'est ce qui permet de mesurer la
 convergence d'un lot sans écrire.
 
@@ -918,11 +918,11 @@ stateDiagram-v2
   Fusion --> skipped_immutable : rang 1 can_change_perms = 0
   Fusion --> rejected : rang 2 sharing vide
   Fusion --> rejected : rang 3 sharing hors user app global
-  Fusion --> rejected : rang 4 owner vide
-  Fusion --> rejected : rang 5 sharing user sur owner cible nobody
-  Fusion --> invalid_role : rang 6 role AJOUTE inconnu
-  Fusion --> noop : rang 7 etat cible egal a etat lu
-  Fusion --> dryrun : rang 8 dryrun = true
+  Fusion --> rejected : rang 3bis owner vide
+  Fusion --> rejected : rang 4 sharing user sur owner cible nobody
+  Fusion --> invalid_role : rang 5 role AJOUTE inconnu
+  Fusion --> noop : rang 6 etat cible egal a etat lu
+  Fusion --> dryrun : rang 7 dryrun = true
   Fusion --> Intention : ecriture requise
 
   Intention --> error : echec write + flush + fsync, POST ANNULE
@@ -934,7 +934,7 @@ stateDiagram-v2
   Fatal --> [*] : erreur fatale, recherche interrompue
 ```
 
-**L'ordre des rangs −1 à 8 est normatif** : il détermine quel statut l'emporte quand
+**L'ordre des rangs −1 à 7 est normatif** : il détermine quel statut l'emporte quand
 plusieurs conditions sont réunies. Quatre conséquences à connaître :
 
 - le plafond précède tout, y compris le GET : une fois atteint, chaque objet suivant
@@ -947,7 +947,7 @@ plusieurs conditions sont réunies. Quatre conséquences à connaître :
 - `can_change_perms` est lu **dans la réponse du GET**, jamais dans l'événement
   d'entrée — s'en remettre à l'événement rendrait le garde-fou contournable par un
   `eval` en amont ;
-- le rang 7 précède le rang 8 : **un objet déjà conforme est un `noop` même en
+- le rang 6 précède le rang 7 : **un objet déjà conforme est un `noop` même en
   simulation.** C'est l'information utile, et c'est ce qui permet de mesurer la
   convergence d'un lot sans écrire.
 

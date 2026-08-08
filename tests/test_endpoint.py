@@ -16,6 +16,8 @@ from acltools.endpoint import (
     encode_namespace_segment,
     encode_title_segment,
     handler_path_from_id,
+    is_fixed_context,
+    namespace_owner_from_id,
     resolve_handler_path,
 )
 from acltools.errors import EventRejected
@@ -255,6 +257,91 @@ class ResolveHandlerPathTest(unittest.TestCase):
             FIXTURE_MAPPING,
         )
         self.assertEqual((handler, source), ("data/lookup-table-files", "id"))
+
+
+class NamespacePorteParIdTest(unittest.TestCase):
+    """§3.5, D-34 — le namespace porte par `id` est une donnee de plateforme.
+
+    Splunkd emet `/servicesNS/nobody/…` pour un objet partage et
+    `/servicesNS/<proprietaire>/…` pour un objet prive. C'est la seule designation dont
+    la commande dispose quand le jeu de resultats ne porte pas la portee courante, et
+    elle est **emise**, jamais reconstruite : rien ici ne suppose une convention de
+    nommage que nous poserions.
+    """
+
+    PARTAGE = (
+        "https://base.invalid:0/servicesNS/nobody/mon_app/saved/searches/"
+        "objet_temoin"
+    )
+    PRIVE = (
+        "https://base.invalid:0/servicesNS/un_operateur/mon_app/saved/searches/"
+        "objet_temoin"
+    )
+
+    def test_un_objet_partage_porte_le_contexte_fixe(self):
+        self.assertEqual(namespace_owner_from_id(self.PARTAGE), FIXED_CONTEXT)
+        self.assertTrue(is_fixed_context(namespace_owner_from_id(self.PARTAGE)))
+
+    def test_un_objet_prive_porte_un_namespace_nominatif(self):
+        self.assertEqual(namespace_owner_from_id(self.PRIVE), "un_operateur")
+        self.assertFalse(is_fixed_context(namespace_owner_from_id(self.PRIVE)))
+
+    def test_les_deux_homonymes_ne_different_que_par_ce_segment(self):
+        """Le point de fond : meme titre, meme app, meme famille — seul le namespace
+        distingue le prive du partage, et c'est la plateforme qui l'ecrit."""
+        self.assertEqual(
+            handler_path_from_id(self.PRIVE), handler_path_from_id(self.PARTAGE)
+        )
+        self.assertNotEqual(
+            namespace_owner_from_id(self.PRIVE),
+            namespace_owner_from_id(self.PARTAGE),
+        )
+
+    def test_un_chemin_relatif_est_accepte(self):
+        self.assertEqual(
+            namespace_owner_from_id(
+                "/servicesNS/un_operateur/mon_app/saved/searches/objet_temoin"
+            ),
+            "un_operateur",
+        )
+
+    def test_le_segment_est_decode(self):
+        self.assertEqual(
+            namespace_owner_from_id(
+                "/servicesNS/un%20operateur/mon_app/saved/searches/objet_temoin"
+            ),
+            "un operateur",
+        )
+
+    def test_absence_de_donnee_rend_none(self):
+        """Sans namespace, la commande n'invente rien — elle n'a pas la donnee."""
+        for valeur in (
+            None,
+            "",
+            "   ",
+            "https://base.invalid:0/services/saved/searches/objet_temoin",
+            "/servicesNS/un_operateur/mon_app/objet_temoin",   # chemin trop court
+        ):
+            with self.subTest(valeur=valeur):
+                self.assertIsNone(namespace_owner_from_id(valeur))
+
+    def test_la_comparaison_au_contexte_fixe_est_insensible_a_la_casse(self):
+        for valeur in ("nobody", "NOBODY", " Nobody "):
+            with self.subTest(valeur=valeur):
+                self.assertTrue(is_fixed_context(valeur))
+        for valeur in (None, "", "un_operateur"):
+            with self.subTest(valeur=valeur):
+                self.assertFalse(is_fixed_context(valeur))
+
+    def test_le_nom_de_lobjet_nest_pas_confondu_avec_le_proprietaire(self):
+        """Le dernier segment est le nom, le premier le proprietaire. Un `id` dont le
+        nom d'objet vaudrait `nobody` ne doit pas passer pour partage."""
+        self.assertEqual(
+            namespace_owner_from_id(
+                "/servicesNS/un_operateur/mon_app/saved/searches/nobody"
+            ),
+            "un_operateur",
+        )
 
 
 if __name__ == "__main__":

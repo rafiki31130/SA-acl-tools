@@ -55,9 +55,9 @@ def _merged_roles(current_value, event, attribute, raw):
 
 
 def merge(current, event):
-    """Calcule l'etat cible et les refus des rangs 1 a 5 du §5.4.
+    """Calcule l'etat cible et les refus des rangs 1 a 4 du §5.4.
 
-    Les rangs 6 (`validate_roles`), 7 (`noop`) et 8 (`dryrun`) sont appliques par le
+    Les rangs 5 (`validate_roles`), 6 (`noop`) et 7 (`dryrun`) sont appliques par le
     pipeline, qui seul dispose du referentiel de roles et des parametres. Les rangs -1
     (`skipped_private`) et 0 (`skipped_derived`) le sont aussi : ils precedent la
     fusion et n'ont pas d'etat cible.
@@ -114,10 +114,10 @@ def merge(current, event):
         rejection = EventRejected("skipped_immutable", "can_change_perms=0")
     elif sharing_rejection is not None:                                  # rangs 2 et 3
         rejection = sharing_rejection
-    elif owner_rejection is not None:                                    # rang 4
+    elif owner_rejection is not None:                                    # rang 3bis
         rejection = owner_rejection
     elif after.sharing == "user" and (after.owner or "").lower() == NOBODY:
-        rejection = EventRejected(                                       # rang 5
+        rejection = EventRejected(                                       # rang 4
             "rejected", "sharing_user_requires_named_owner"
         )
 
@@ -189,7 +189,7 @@ def is_noop(current, target):
 
 
 def validate_roles(before, after, catalog):
-    """Controle du §5.4 rang 6, restreint aux **roles ajoutes** (D-4).
+    """Controle du §5.4 rang 5, restreint aux **roles ajoutes** (D-4).
 
     Renvoie `(inconnus_ajoutes, morts_conserves)`, deux tuples tries.
 

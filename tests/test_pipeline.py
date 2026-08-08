@@ -3,6 +3,7 @@
 import unittest
 
 from acltools.pipeline import (
+    PRIVATE_BY_ID_WARNING,
     RUNTIME_DIVERGENCE_MESSAGE,
     RUNTIME_DIVERGENCE_WARNING,
     EventProcessor,
@@ -65,7 +66,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(rest.posts(), [])
 
     def test_noop_lemporte_sur_dryrun(self):
-        """Rang 7 avant rang 8 : un objet deja conforme est un `noop` meme en simulation."""
+        """Rang 6 avant rang 7 : un objet deja conforme est un `noop` meme en simulation."""
         rest = FakeRest(
             default_get=RestResponse(200, acl_body(read=("role_a",), write=("w",)))
         )
@@ -224,15 +225,19 @@ class SkippedPrivateTest(unittest.TestCase):
         result = processor().process(make_event(current_sharing=" User "))
         self.assertEqual(result.status, "skipped_private")
 
-    def test_portee_courante_non_fournie_repli_en_not_found(self):
-        """§3.5 — sans colonne de portee, la commande ne peut pas ecarter en amont.
+    def test_ni_portee_ni_id_exploitable_repli_en_not_found(self):
+        """§3.5 — ni portee courante, ni `id` : l'objet ressort en `not_found`.
 
-        Le GET par contexte fixe repond alors `404` et l'objet ressort en `not_found`.
-        C'est honnete, mais moins informatif : d'ou la recommandation de batir le
-        pipeline sur la macro d'inventaire, qui emet toujours la portee.
+        C'est le seul cas ou le repli annonce tient, et il tient **parce qu'aucune
+        designation ne permet de faire mieux**. Des qu'un `id` est disponible, la
+        seconde voie du §3.5 s'applique et ce chemin n'est plus emprunte — d'ou la
+        recommandation de batir le pipeline sur la macro d'inventaire, qui emet
+        toujours les deux.
         """
         rest = FakeRest(default_get=RestResponse(404, b"{}"))
-        result = processor(rest).process(make_event(current_sharing=None))
+        result = processor(rest).process(
+            make_event(current_sharing=None, id_value=None)
+        )
         self.assertEqual(result.status, "not_found")
         self.assertEqual(len(rest.gets()), 1)
 
@@ -243,6 +248,104 @@ class SkippedPrivateTest(unittest.TestCase):
                     make_event(current_sharing=portee, write="nouveau_role_admin")
                 )
                 self.assertEqual(result.status, "updated")
+
+
+class PriveDetecteParLeNamespaceDeIdTest(unittest.TestCase):
+    """§3.5, D-34 — seconde voie de detection, et elle est **necessaire**.
+
+    Le repli annonce jusqu'a la v2.4 — « colonne de portee absente, le GET par contexte
+    fixe repond 404, l'objet ressort en `not_found` » — **est faux des qu'un homonyme
+    partage existe**. L'adressage par contexte fixe atteint alors le partage : la
+    commande lit, et en ecriture reelle ecrirait, **un objet autre que celui designe en
+    entree**. C'est la classe de defaut que le §5.2 declare close, reintroduite par le
+    repli.
+
+    Le montage reproduit exactement cette configuration : la ligne d'entree designe le
+    prive par son `id` (`/servicesNS/un_operateur/…`), l'homonyme partage existe et
+    repond `200` sur le chemin en contexte fixe — c'est le defaut de `FakeRest`. La
+    seule chose qui doit se produire est **rien** : ni GET, ni POST.
+    """
+
+    ID_PRIVE = (
+        "https://base.invalid:0/servicesNS/un_operateur/mon_app/saved/searches/"
+        "Ma%2520recherche"
+    )
+    ID_PARTAGE = (
+        "https://base.invalid:0/servicesNS/nobody/mon_app/saved/searches/"
+        "Ma%2520recherche"
+    )
+
+    def _evenement(self, id_value, current_sharing=None):
+        return make_event(
+            id_value=id_value,
+            current_sharing=current_sharing,
+            write="nouveau_role_admin",
+        )
+
+    def test_le_prive_designe_par_son_id_ressort_skipped_private(self):
+        result = processor().process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(result.status, "skipped_private")
+        self.assertEqual(result.error, "private_object_out_of_scope")
+
+    def test_lhomonyme_partage_nest_pas_touche(self):
+        """Le critere qui compte : **aucun** echange HTTP, donc aucune lecture et
+        aucune ecriture sur l'objet partage que l'adressage fixe aurait atteint."""
+        rest = FakeRest()
+        result = processor(rest).process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(result.status, "skipped_private")
+        self.assertEqual(rest.calls, [])
+        self.assertEqual(result.http_code, 0)
+
+    def test_le_meme_lot_sans_la_correction_atteindrait_le_partage(self):
+        """Temoin explicite du defaut : l'endpoint que la commande aurait cible est
+        bien celui du partage, pas celui du prive. C'est ce que l'auditeur a mesure."""
+        result = processor().process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(
+            result.endpoint, "/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche"
+        )
+
+    def test_lecartement_est_signale_a_loperateur(self):
+        """Le statut ne dit pas par quelle voie l'objet a ete ecarte ; l'avertissement
+        le dit, et nomme du meme coup ce qui manque au pipeline."""
+        result = processor().process(self._evenement(self.ID_PRIVE))
+        self.assertIn(PRIVATE_BY_ID_WARNING, result.warnings)
+
+    def test_un_id_en_contexte_fixe_nest_pas_ecarte(self):
+        """La detection porte sur un namespace **nominatif**, pas sur la presence d'un
+        `id`. Un objet partage garde son traitement nominal."""
+        result = processor().process(self._evenement(self.ID_PARTAGE))
+        self.assertEqual(result.status, "updated")
+
+    def test_la_portee_courante_prime_sur_le_namespace(self):
+        """La voie 2 est un **complement**, pas une surcharge : quand le jeu de
+        resultats porte la portee, c'est elle qui tranche."""
+        result = processor().process(
+            self._evenement(self.ID_PRIVE, current_sharing="app")
+        )
+        self.assertEqual(result.status, "updated")
+        self.assertNotIn(PRIVATE_BY_ID_WARNING, result.warnings)
+
+    def test_une_portee_presente_mais_vide_ne_renseigne_pas_davantage(self):
+        """Une cellule vide ne dit pas que l'objet est partage : elle ne dit rien. La
+        seconde voie s'applique donc, comme si la colonne etait absente."""
+        result = processor().process(
+            self._evenement(self.ID_PRIVE, current_sharing="  ")
+        )
+        self.assertEqual(result.status, "skipped_private")
+
+    def test_lecartement_precede_le_plafond_dans_ses_effets(self):
+        proc = processor(params=make_params(max_objects=1))
+        proc.process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(proc.counter, 0)
+        self.assertEqual(proc.skipped_ceiling, 0)
+
+    def test_lobjet_ecarte_porte_sa_ligne_de_journal(self):
+        journal = FakeJournal()
+        proc = processor(journal=journal)
+        proc.process(self._evenement(self.ID_PRIVE))
+        self.assertEqual(len(journal.outcomes), 1)
+        self.assertEqual(journal.outcomes[0]["status"], "skipped_private")
+        self.assertEqual(journal.intents, [])
 
 
 class AdressageSansProprietaireTest(unittest.TestCase):

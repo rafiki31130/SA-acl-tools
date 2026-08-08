@@ -23,6 +23,62 @@ TARGET_ATTRIBUTES = (
     TARGET_OWNER,
 )
 
+#: Champs de sortie portes par **tout** enregistrement, quel que soit `acl_status`
+#: (§5.7). Ils entrent dans l'en-tete du flux par le premier enregistrement venu.
+ACL_UNCONDITIONAL_FIELDS = (
+    "acl_status",
+    "acl_endpoint",
+    "acl_http_code",
+    "acl_error",
+    "acl_warning",
+    "acl_journaled",
+)
+
+#: Les huit champs d'etat du §5.7. Ils ne sont portes que par les enregistrements dont
+#: la fusion a ete calculee : un `skipped_private`, un `skipped_derived`, un
+#: `skipped_ceiling`, un `not_found`, un `forbidden` ou un rejet **amont** de la fusion
+#: n'en porte aucun.
+ACL_STATE_FIELDS = (
+    "acl_before_owner",
+    "acl_after_owner",
+    "acl_before_perms_read",
+    "acl_before_perms_write",
+    "acl_before_sharing",
+    "acl_after_perms_read",
+    "acl_after_perms_write",
+    "acl_after_sharing",
+)
+
+#: **Jeu de champs de sortie declare** (§5.7, D-33), dans l'ordre du tableau normatif.
+#:
+#: Le writer du SDK fige l'en-tete du flux sur les cles du **premier** enregistrement
+#: emis, puis y projette tous les suivants : un champ absent de ce premier
+#: enregistrement disparait de la sortie entiere, sans erreur ni avertissement. Les
+#: huit champs de `ACL_STATE_FIELDS` n'etant pas portes par tous les statuts, un lot
+#: commencant par un `skipped_private` — ce que la macro d'inventaire produit
+#: couramment — priverait l'operateur de tout ce que la simulation existe pour montrer.
+#:
+#: La declaration est donc **explicite** et vit ici, hors de l'adaptateur, pour que la
+#: liste declaree et la liste projetee soient la meme donnee et ne puissent pas
+#: diverger. Le SDK vendorise n'est pas modifie : il expose `RecordWriter.custom_fields`
+#: pour exactement cet usage.
+ACL_OUTPUT_FIELDS = (
+    "acl_status",
+    "acl_endpoint",
+    "acl_http_code",
+    "acl_error",
+    "acl_warning",
+    "acl_before_owner",
+    "acl_after_owner",
+    "acl_before_perms_read",
+    "acl_before_perms_write",
+    "acl_before_sharing",
+    "acl_after_perms_read",
+    "acl_after_perms_write",
+    "acl_after_sharing",
+    "acl_journaled",
+)
+
 
 @dataclass(frozen=True)
 class FieldNames:
