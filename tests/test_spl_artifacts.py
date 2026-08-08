@@ -245,6 +245,239 @@ class MacrosTest(unittest.TestCase):
         )
 
 
+#: Sentinel standing for **the absence of the by-field** in the `eventstats` model
+#: below. It is not the empty string: Splunk tells a missing field from a field holding
+#: `""`, and the whole point of the `summary` line carrying no `endpoint` (section 8.5)
+#: is that it lands in a group of its own.
+_NO_ENDPOINT = object()
+
+
+def _group_key(line):
+    return line["endpoint"] if "endpoint" in line else _NO_ENDPOINT
+
+
+def run_rollback_macro(lines, sid):
+    """Model of `editacl_rollback(1)` applied to a set of journal lines.
+
+    It follows the SPL of `macros.conf` step by step, and nothing else - the point is
+    to be able to say what the macro produces from a given journal **without a Splunk
+    instance**, in order to compare two journals that differ only by the presence of
+    the end-of-run line.
+
+    What is modelled, and where the fidelity lies:
+
+    - `eventstats max(_restorable) AS restorable BY endpoint` - a line that carries no
+      `endpoint` forms a group of its own, it does not join the group of the lines
+      whose `endpoint` is the empty string;
+    - `search phase="intent" restorable=1` - a line whose `restorable` is null is
+      dropped, as `restorable=1` is false on a missing field;
+    - `earliest(<field>)` - the value carried by the earliest line of the group **that
+      carries that field**; a line where the field is missing does not contribute.
+      A field holding the empty string does contribute (D-32, measured on 9.4.6);
+    - the `coalesce(..., "")` on the two permission columns, and the final `fields`.
+    """
+    selected = [line for line in lines if line.get("sid") == sid]
+
+    for line in selected:
+        line["_restorable"] = (
+            1 if line.get("phase") == "outcome" and line.get("status") == "updated"
+            else 0
+        )
+
+    groups = {}
+    for line in selected:
+        groups.setdefault(_group_key(line), []).append(line)
+    for key, members in groups.items():
+        top = max(member["_restorable"] for member in members)
+        for member in members:
+            member["restorable"] = top
+
+    intents = [
+        line for line in selected
+        if line.get("phase") == "intent" and line.get("restorable") == 1
+    ]
+
+    restorable_groups = {}
+    for line in intents:
+        restorable_groups.setdefault(_group_key(line), []).append(line)
+
+    emitted = {}
+    for key, members in restorable_groups.items():
+        ordered = sorted(members, key=lambda line: line["ts"])
+        row = {}
+        for journal_field, output_field in (
+            ("before_perms_read", "eai:acl.perms.read"),
+            ("before_perms_write", "eai:acl.perms.write"),
+            ("before_sharing", "eai:acl.sharing"),
+            ("before_owner", "eai:acl.owner"),
+            ("app", "eai:acl.app"),
+            ("title", "title"),
+            ("eai_type", "eai:type"),
+        ):
+            for line in ordered:
+                if line.get(journal_field) is not None and journal_field in line:
+                    row[output_field] = line[journal_field]
+                    break
+        row["eai:acl.perms.read"] = row.get("eai:acl.perms.read", "")
+        row["eai:acl.perms.write"] = row.get("eai:acl.perms.write", "")
+        emitted[key] = {
+            name: value for name, value in row.items()
+            if name == "title" or name.startswith("eai:acl.") or name == "eai:type"
+        }
+    return emitted
+
+
+class RollbackMacroIsUnaffectedByTheEndOfRunLineTest(unittest.TestCase):
+    """D-46 - the rollback set is **identical** with and without the `summary` line.
+
+    The macro is the only way to undo an irreversible operation. The analysis says it
+    reads neither `error` nor the renamed member field, and that a third value of
+    `phase` crosses it without effect. This class does not take that analysis at its
+    word: it runs a real batch through the state machine, collects the journal it
+    produces, then compares the rollback set obtained with and without the end-of-run
+    line appended.
+    """
+
+    def setUp(self):
+        from acltools.pipeline import EventProcessor
+        from acltools.rest import RestResponse
+
+        from .helpers import (
+            FIXTURE_MAPPING,
+            FakeClock,
+            FakeJournal,
+            FakeRest,
+            acl_body,
+            make_ctx,
+            make_event,
+            make_params,
+        )
+
+        def path(title):
+            return "/servicesNS/nobody/my_app/saved/searches/" + title
+
+        self.journal = FakeJournal()
+        rest = FakeRest(
+            get_responses={
+                path("written_one"): RestResponse(
+                    200, acl_body(write=("legacy_role",))
+                ),
+                path("written_two"): RestResponse(
+                    200, acl_body(write=("legacy_role",), read=())
+                ),
+                path("refused"): RestResponse(200, acl_body(write=("legacy_role",))),
+                path("already_right"): RestResponse(
+                    200, acl_body(write=("new_role_admin",))
+                ),
+                path("absent"): RestResponse(404, b"{}"),
+            },
+            post_responses={path("refused"): RestResponse(500, b"boom")},
+            default_post=RestResponse(200, b"{}"),
+        )
+        self.processor = EventProcessor(
+            params=make_params(max_objects=10),
+            ctx=make_ctx(sid="1700000000.1"),
+            rest=rest,
+            journal=self.journal,
+            mapping=FIXTURE_MAPPING,
+            clock=FakeClock(),
+        )
+        for title in (
+            "written_one", "written_two", "refused", "already_right", "absent",
+        ):
+            self.processor.process(make_event(title=title, write="new_role_admin"))
+        self.processor.process(
+            make_event(title="a_private_one", current_sharing="user")
+        )
+
+    def _journal_lines(self):
+        lines = self.journal.intents + self.journal.outcomes
+        return [dict(line) for line in sorted(lines, key=lambda line: line["ts"])]
+
+    def _summary_line(self):
+        return dict(self.processor.build_summary())
+
+    # -- the demonstration -------------------------------------------------- #
+
+    def test_the_batch_does_produce_a_rollback_set(self):
+        """Guard rail: a dead instrument produces reassuring zeros."""
+        restored = run_rollback_macro(self._journal_lines(), "1700000000.1")
+        self.assertEqual(len(restored), 2)
+        for row in restored.values():
+            self.assertEqual(row["eai:acl.perms.write"], "legacy_role")
+            self.assertEqual(row["eai:type"], "savedsearch")
+
+    def test_the_rollback_set_is_identical_with_and_without_the_summary_line(self):
+        without = run_rollback_macro(self._journal_lines(), "1700000000.1")
+        with_summary = run_rollback_macro(
+            self._journal_lines() + [self._summary_line()], "1700000000.1"
+        )
+        self.assertEqual(with_summary, without)
+
+    def test_the_refused_write_stays_out_of_the_rollback_set_either_way(self):
+        """The heart of the pairing: an object whose POST failed was not modified."""
+        with_summary = run_rollback_macro(
+            self._journal_lines() + [self._summary_line()], "1700000000.1"
+        )
+        self.assertNotIn(
+            "/servicesNS/nobody/my_app/saved/searches/refused", with_summary
+        )
+
+    def test_the_summary_line_lands_in_a_group_of_its_own(self):
+        """Section 8.5. It carries no `endpoint`, so it cannot raise the
+        `max(_restorable)` of a group that holds an `intent` line."""
+        lines = self._journal_lines() + [self._summary_line()]
+        summary = lines[-1]
+        self.assertNotIn("endpoint", summary)
+        self.assertEqual(_group_key(summary), _NO_ENDPOINT)
+        self.assertEqual(
+            [line for line in lines if _group_key(line) is _NO_ENDPOINT], [summary]
+        )
+
+    def test_even_a_summary_line_carrying_an_empty_endpoint_would_change_nothing(self):
+        """The property does not rest on the absence of the field alone.
+
+        `_restorable` is zero on a `summary` line - `phase` is not `outcome` - so it
+        can only lower a maximum, which no maximum reads; and `phase="intent"` drops it
+        before the aggregation. This test makes that reasoning falsifiable rather than
+        assumed.
+        """
+        forced = self._summary_line()
+        forced["endpoint"] = ""
+        self.assertEqual(
+            run_rollback_macro(self._journal_lines() + [forced], "1700000000.1"),
+            run_rollback_macro(self._journal_lines(), "1700000000.1"),
+        )
+
+    def test_a_summary_line_from_another_run_is_filtered_out_by_the_sid(self):
+        other = self._summary_line()
+        other["sid"] = "1700000000.2"
+        self.assertEqual(
+            run_rollback_macro(self._journal_lines() + [other], "1700000000.1"),
+            run_rollback_macro(self._journal_lines(), "1700000000.1"),
+        )
+
+    def test_the_two_renamed_or_retyped_fields_are_not_read_by_the_macro(self):
+        """`error` and the member field: the macro consumes neither, so neither the
+        end of the `null` nor the rename can reach it."""
+        definition = read_splunk_conf("default", "macros.conf")[
+            "editacl_rollback(1)"
+        ]["definition"]
+        for absent in ("error", "host", "member"):
+            self.assertNotIn(absent, definition)
+
+    def test_the_macro_filters_on_the_phases_it_knows(self):
+        """A third value of `phase` crosses it because the macro **names** the phases
+        it wants, instead of excluding those it does not."""
+        definition = read_splunk_conf("default", "macros.conf")[
+            "editacl_rollback(1)"
+        ]["definition"]
+        self.assertIn('phase="outcome"', definition)
+        self.assertIn('search phase="intent"', definition)
+        self.assertNotIn("phase!=", definition)
+        self.assertNotIn("summary", definition)
+
+
 class TableAndLookupConsistencyTest(unittest.TestCase):
     """The table is read by the Python code, the lookup by the macro. A divergence
     between the two only shows up at run time, and with no message."""
