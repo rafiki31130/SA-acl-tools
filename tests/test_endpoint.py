@@ -1,8 +1,8 @@
-"""Resolution et reconstruction d'URI (§5.2, §10.4).
+"""URI resolution and reconstruction (sections 5.2, 10.4).
 
-La reconstruction est obligatoire et non negociable : le champ `id` natif double-encode
-la barre oblique mais pas les autres caracteres speciaux, il n'est donc pas reutilisable
-tel quel comme URI.
+Reconstruction is mandatory and not negotiable: the native `id` field double-encodes
+the slash but not the other special characters, so it is not reusable as a URI as it
+stands.
 """
 
 import inspect
@@ -26,171 +26,170 @@ from .helpers import FIXTURE_MAPPING
 
 
 class TitleEncodingTest(unittest.TestCase):
-    """Regle unique, tranchee empiriquement : simple `%`-encodage, `safe=''`.
+    """One rule, settled empirically: plain `%`-encoding, `safe=''`.
 
-    Les quatre classes de caracteres du §10.4 sont couvertes une par une. Le double
-    encodage est un piege asymetrique : il fonctionne pour `/` seul et casse espace,
-    accent et pourcent.
+    The four character classes of section 10.4 are covered one by one. Double encoding
+    is an asymmetric trap: it works for `/` alone and breaks space, accent and percent.
     """
 
-    def test_mode_retenu_est_le_simple_encodage(self):
+    def test_the_mode_retained_is_single_encoding(self):
         self.assertEqual(TITLE_ENCODING_MODE, "single")
 
-    def test_classe_espace(self):
-        self.assertEqual(encode_title_segment("Ma recherche"), "Ma%20recherche")
+    def test_space_class(self):
+        self.assertEqual(encode_title_segment("My search"), "My%20search")
 
-    def test_classe_barre_oblique_sans_traitement_special(self):
+    def test_slash_class_with_no_special_treatment(self):
         self.assertEqual(
-            encode_title_segment("Rapport/Mensuel"), "Rapport%2FMensuel"
+            encode_title_segment("Report/Monthly"), "Report%2FMonthly"
         )
 
-    def test_classe_caractere_accentue_utf8_par_octets(self):
+    def test_accented_character_class_encoded_utf8_byte_by_byte(self):
         self.assertEqual(
-            encode_title_segment("Resume ete"), "Resume%20ete"
+            encode_title_segment("Summary report"), "Summary%20report"
         )
         self.assertEqual(
             encode_title_segment("éàü"), "%C3%A9%C3%A0%C3%BC"
         )
 
-    def test_classe_pourcent(self):
-        self.assertEqual(encode_title_segment("Taux 100%"), "Taux%20100%25")
+    def test_percent_class(self):
+        self.assertEqual(encode_title_segment("Rate 100%"), "Rate%20100%25")
 
-    def test_autres_caracteres_reserves_encodes(self):
+    def test_other_reserved_characters_encoded(self):
         self.assertEqual(encode_title_segment("a+b&c=d"), "a%2Bb%26c%3Dd")
 
-    def test_segment_de_namespace_encode_de_la_meme_facon(self):
-        self.assertEqual(encode_namespace_segment("mon app"), "mon%20app")
+    def test_namespace_segment_encoded_the_same_way(self):
+        self.assertEqual(encode_namespace_segment("my app"), "my%20app")
 
 
 class BuildObjectPathTest(unittest.TestCase):
 
-    def test_chemin_reconstruit_sans_suffixe_acl(self):
-        path = build_object_path("mon_app", "saved/searches", "Ma recherche")
+    def test_reconstructed_path_without_the_acl_suffix(self):
+        path = build_object_path("my_app", "saved/searches", "My search")
         self.assertEqual(
-            path, "/servicesNS/nobody/mon_app/saved/searches/Ma%20recherche"
+            path, "/servicesNS/nobody/my_app/saved/searches/My%20search"
         )
         self.assertFalse(path.endswith("/acl"))
         self.assertNotIn("/acl", path)
 
-    def test_handler_path_nest_pas_reencode(self):
-        path = build_object_path("mon_app", "saved/searches", "objet")
+    def test_handler_path_is_not_reencoded(self):
+        path = build_object_path("my_app", "saved/searches", "object")
         self.assertIn("saved/searches", path)
         self.assertNotIn("saved%2Fsearches", path)
 
-    def test_url_prefixee_par_la_base_splunkd_sans_hote_en_dur(self):
-        path = build_object_path("mon_app", "saved/searches", "objet")
+    def test_url_prefixed_by_the_splunkd_base_with_no_hardcoded_host(self):
+        path = build_object_path("my_app", "saved/searches", "object")
         url = build_object_url("https://base.invalid:0/", path)
         self.assertEqual(url, "https://base.invalid:0" + path)
 
 
-class AdressageParContexteFixeTest(unittest.TestCase):
-    """§5.2, D-25 — l'adressage ne porte **jamais** de proprietaire.
+class FixedContextAddressingTest(unittest.TestCase):
+    """Section 5.2, D-25: addressing **never** carries an owner.
 
-    Ce que le contexte fixe corrige : la v1 adressait par `eai:acl.owner`, or un objet
-    prive **masque** un objet partage homonyme dans le namespace de son detenteur. Si le
-    proprietaire d'un objet partage possedait aussi un objet prive de meme nom dans la
-    meme application, la commande atteignait le **prive** et ecrivait son ACL — `200` au
-    GET, fusion calculee, POST abouti, ligne rapportee `updated`. Une ecriture
-    silencieuse sur la mauvaise cible, que ni la recette ni deux audits n'avaient
-    detectee faute d'avoir mesure la resolution de namespace.
+    What the fixed context corrects: v1 addressed by `eai:acl.owner`, yet a private
+    object **masks** a homonymous shared object in the namespace of its holder. If the
+    owner of a shared object also held a private object of the same name in the same
+    application, the command reached the **private** one and wrote its ACL: `200` on
+    the GET, merge computed, POST completed, line reported as `updated`. A silent write
+    on the wrong target, which neither acceptance testing nor two audits had detected,
+    for want of having measured namespace resolution.
     """
 
-    def test_le_contexte_est_toujours_nobody(self):
+    def test_the_context_is_always_nobody(self):
         self.assertEqual(FIXED_CONTEXT, "nobody")
-        path = build_object_path("mon_app", "saved/searches", "objet")
-        self.assertTrue(path.startswith("/servicesNS/nobody/mon_app/"))
+        path = build_object_path("my_app", "saved/searches", "object")
+        self.assertTrue(path.startswith("/servicesNS/nobody/my_app/"))
 
-    def test_la_signature_nexpose_aucun_proprietaire(self):
-        """Garantie **structurelle** : il n'y a pas de parametre a mal alimenter.
+    def test_the_signature_exposes_no_owner(self):
+        """A **structural** guarantee: there is no parameter to fill in wrongly.
 
-        Un futur appelant ne peut donc pas reintroduire le defaut de la v1 par
-        inadvertance — la fonction refuserait l'argument.
+        A future caller therefore cannot reintroduce the v1 defect by inadvertence:
+        the function would refuse the argument.
         """
-        parametres = list(
+        parameters = list(
             inspect.signature(build_object_path).parameters
         )
-        self.assertEqual(parametres, ["app", "handler_path", "title"])
-        for nom in parametres:
-            self.assertNotIn("owner", nom)
+        self.assertEqual(parameters, ["app", "handler_path", "title"])
+        for name in parameters:
+            self.assertNotIn("owner", name)
 
-    def test_deux_objets_homonymes_de_proprietaires_differents_ont_la_meme_uri(self):
-        """Le corollaire du contexte fixe : l'adresse ne depend que de l'application et
-        du nom. C'est ce qui garantit qu'on atteint l'objet **partage**, quel qu'en soit
-        le detenteur, et jamais l'homonyme prive de qui que ce soit."""
-        premiere = build_object_path("mon_app", "saved/searches", "objet_homonyme")
-        seconde = build_object_path("mon_app", "saved/searches", "objet_homonyme")
-        self.assertEqual(premiere, seconde)
-        self.assertNotIn("un_proprietaire", premiere)
+    def test_two_homonymous_objects_of_different_owners_have_the_same_uri(self):
+        """The corollary of the fixed context: the address depends only on the
+        application and on the name. That is what guarantees the **shared** object is
+        reached, whoever holds it, and never anybody's private homonym."""
+        first = build_object_path("my_app", "saved/searches", "homonymous_object")
+        second = build_object_path("my_app", "saved/searches", "homonymous_object")
+        self.assertEqual(first, second)
+        self.assertNotIn("an_owner", first)
 
-    def test_le_contexte_joker_nest_pas_le_contexte_retenu(self):
-        """Le joker refuse l'ecriture, et sur deux objets homonymes il renvoie deux
-        entrees sur un chemin mono-objet — un client lisant la premiere choisirait a
-        l'aveugle."""
+    def test_the_wildcard_context_is_not_the_one_retained(self):
+        """The wildcard refuses the write, and on two homonymous objects it returns two
+        entries on a single-object path: a client reading the first would choose
+        blindly."""
         self.assertNotEqual(FIXED_CONTEXT, "-")
         self.assertNotIn(
             "/servicesNS/-/",
-            build_object_path("mon_app", "saved/searches", "objet"),
+            build_object_path("my_app", "saved/searches", "object"),
         )
 
 
 class HandlerPathFromIdTest(unittest.TestCase):
 
-    def test_id_natif_exploitable(self):
+    def test_usable_native_id(self):
         self.assertEqual(
             handler_path_from_id(
-                "https://base.invalid:0/servicesNS/nobody/mon_app/saved/searches/"
-                "Ma%20recherche"
+                "https://base.invalid:0/servicesNS/nobody/my_app/saved/searches/"
+                "My%20search"
             ),
             "saved/searches",
         )
 
-    def test_id_pointant_sur_admin_directory_est_ecarte(self):
+    def test_id_pointing_at_admin_directory_is_discarded(self):
         self.assertIsNone(
             handler_path_from_id(
-                "https://base.invalid:0/servicesNS/-/-/admin/directory/Ma%20recherche"
+                "https://base.invalid:0/servicesNS/-/-/admin/directory/My%20search"
             )
         )
 
-    def test_id_malforme_est_ecarte(self):
-        self.assertIsNone(handler_path_from_id("pas-une-uri"))
+    def test_malformed_id_is_discarded(self):
+        self.assertIsNone(handler_path_from_id("not-a-uri"))
 
-    def test_id_sans_marqueur_servicesns_est_ecarte(self):
+    def test_id_without_the_servicesns_marker_is_discarded(self):
         self.assertIsNone(
-            handler_path_from_id("https://base.invalid:0/services/saved/searches/objet")
+            handler_path_from_id("https://base.invalid:0/services/saved/searches/object")
         )
 
-    def test_id_absent_ou_vide(self):
+    def test_id_absent_or_empty(self):
         self.assertIsNone(handler_path_from_id(None))
         self.assertIsNone(handler_path_from_id("   "))
 
-    def test_dernier_segment_jete_le_nom_vient_de_title(self):
-        """Le titre double-encode par `id` ne doit jamais servir de nom d'objet."""
+    def test_last_segment_dropped_the_name_comes_from_title(self):
+        """The title double-encoded by `id` must never serve as an object name."""
         self.assertEqual(
             handler_path_from_id(
-                "https://base.invalid:0/servicesNS/nobody/mon_app/saved/searches/"
-                "Rapport%252FMensuel"
+                "https://base.invalid:0/servicesNS/nobody/my_app/saved/searches/"
+                "Report%252FMonthly"
             ),
             "saved/searches",
         )
 
-    def test_hote_et_port_de_id_sont_ecartes(self):
+    def test_host_and_port_of_id_are_discarded(self):
         path = handler_path_from_id(
-            "https://autre-membre.invalid:0/servicesNS/nobody/mon_app/data/ui/views/v"
+            "https://other-member.invalid:0/servicesNS/nobody/my_app/data/ui/views/v"
         )
         self.assertEqual(path, "data/ui/views")
 
-    def test_id_portant_une_traversee_est_ecarte(self):
-        """A-5 — un `id` forge ne doit pas sortir du namespace reconstruit.
+    def test_an_id_carrying_a_traversal_is_discarded(self):
+        """A-5: a forged `id` must not step out of the reconstructed namespace.
 
-        Sur Splunk 9.4.6 la requete aboutissait a un 404 emis par splunkd, qui traite
-        `..` comme une action de handler inconnue. Le confinement est desormais porte
-        par l'outil : le `handler_path` est ecarte a la source.
+        On Splunk 9.4.6 the request ended in a 404 emitted by splunkd, which treats
+        `..` as an unknown handler action. Containment is now carried by the tool
+        itself: the `handler_path` is discarded at the source.
         """
         for id_value in (
-            "https://base.invalid:0/servicesNS/nobody/mon_app/"
-            "a/../../../services/authentication/users/objet",
-            "https://base.invalid:0/servicesNS/nobody/mon_app/"
-            "saved/../admin/directory/objet",
+            "https://base.invalid:0/servicesNS/nobody/my_app/"
+            "a/../../../services/authentication/users/object",
+            "https://base.invalid:0/servicesNS/nobody/my_app/"
+            "saved/../admin/directory/object",
         ):
             with self.subTest(id_value=id_value):
                 self.assertIsNone(handler_path_from_id(id_value))
@@ -198,60 +197,60 @@ class HandlerPathFromIdTest(unittest.TestCase):
 
 class ResolveHandlerPathTest(unittest.TestCase):
 
-    def test_voie_id_prioritaire(self):
+    def test_the_id_route_has_priority(self):
         handler, source = resolve_handler_path(
-            "https://base.invalid:0/servicesNS/nobody/mon_app/saved/searches/objet",
+            "https://base.invalid:0/servicesNS/nobody/my_app/saved/searches/object",
             "views",
             FIXTURE_MAPPING,
         )
         self.assertEqual((handler, source), ("saved/searches", "id"))
 
-    def test_id_sur_admin_directory_bascule_sur_la_table(self):
+    def test_id_on_admin_directory_falls_back_to_the_table(self):
         handler, source = resolve_handler_path(
-            "https://base.invalid:0/servicesNS/-/-/admin/directory/objet",
+            "https://base.invalid:0/servicesNS/-/-/admin/directory/object",
             "savedsearch",
             FIXTURE_MAPPING,
         )
         self.assertEqual((handler, source), ("saved/searches", "eai:type"))
 
-    def test_id_absent_bascule_sur_la_table(self):
+    def test_absent_id_falls_back_to_the_table(self):
         handler, source = resolve_handler_path(None, "views", FIXTURE_MAPPING)
         self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
 
-    def test_id_malforme_bascule_sur_la_table(self):
+    def test_malformed_id_falls_back_to_the_table(self):
         handler, source = resolve_handler_path(
-            "pas-une-uri", "views", FIXTURE_MAPPING
+            "not-a-uri", "views", FIXTURE_MAPPING
         )
         self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
 
-    def test_id_a_traversee_bascule_sur_la_table(self):
-        """A-5 — le refus n'ouvre pas un trou fonctionnel : la table prend le relais."""
+    def test_id_with_a_traversal_falls_back_to_the_table(self):
+        """A-5: the refusal does not open a functional hole - the table takes over."""
         handler, source = resolve_handler_path(
-            "https://base.invalid:0/servicesNS/nobody/mon_app/"
-            "saved/../../services/authentication/users/objet",
+            "https://base.invalid:0/servicesNS/nobody/my_app/"
+            "saved/../../services/authentication/users/object",
             "views",
             FIXTURE_MAPPING,
         )
         self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
 
-    def test_eai_type_inconnu_rejette_sans_heuristique(self):
+    def test_unknown_eai_type_rejects_with_no_heuristic(self):
         with self.assertRaises(EventRejected) as raised:
-            resolve_handler_path(None, "type_inexistant", FIXTURE_MAPPING)
+            resolve_handler_path(None, "nonexistent_type", FIXTURE_MAPPING)
         self.assertEqual(raised.exception.status, "rejected")
         self.assertEqual(
-            raised.exception.error, "unresolved_endpoint:type_inexistant"
+            raised.exception.error, "unresolved_endpoint:nonexistent_type"
         )
 
-    def test_ni_id_ni_eai_type(self):
+    def test_neither_id_nor_eai_type(self):
         with self.assertRaises(EventRejected) as raised:
             resolve_handler_path(None, None, FIXTURE_MAPPING)
         self.assertEqual(raised.exception.error, "unresolved_endpoint:")
 
-    def test_famille_sans_eai_type_natif_resolue_par_id(self):
-        """Les sept familles absentes de `admin/directory` n'emettent pas d'`eai:type`
-        sur leur endpoint natif : `id` y est la seule voie possible."""
+    def test_family_without_a_native_eai_type_resolved_by_id(self):
+        """The seven families missing from `admin/directory` emit no `eai:type` on
+        their native endpoint: `id` is the only route available there."""
         handler, source = resolve_handler_path(
-            "https://base.invalid:0/servicesNS/nobody/mon_app/data/lookup-table-files/"
+            "https://base.invalid:0/servicesNS/nobody/my_app/data/lookup-table-files/"
             "table.csv",
             None,
             FIXTURE_MAPPING,
@@ -259,88 +258,90 @@ class ResolveHandlerPathTest(unittest.TestCase):
         self.assertEqual((handler, source), ("data/lookup-table-files", "id"))
 
 
-class NamespacePorteParIdTest(unittest.TestCase):
-    """§3.5, D-34 — le namespace porte par `id` est une donnee de plateforme.
+class NamespaceCarriedByIdTest(unittest.TestCase):
+    """Section 3.5, D-34: the namespace carried by `id` is a platform datum.
 
-    Splunkd emet `/servicesNS/nobody/…` pour un objet partage et
-    `/servicesNS/<proprietaire>/…` pour un objet prive. C'est la seule designation dont
-    la commande dispose quand le jeu de resultats ne porte pas la portee courante, et
-    elle est **emise**, jamais reconstruite : rien ici ne suppose une convention de
-    nommage que nous poserions.
+    Splunkd emits `/servicesNS/nobody/...` for a shared object and
+    `/servicesNS/<owner>/...` for a private one. It is the only designation the command
+    has when the result set does not carry the current sharing scope, and it is
+    **emitted**, never reconstructed: nothing here assumes a naming convention that we
+    would be laying down.
     """
 
-    PARTAGE = (
-        "https://base.invalid:0/servicesNS/nobody/mon_app/saved/searches/"
-        "objet_temoin"
+    SHARED = (
+        "https://base.invalid:0/servicesNS/nobody/my_app/saved/searches/"
+        "witness_object"
     )
-    PRIVE = (
-        "https://base.invalid:0/servicesNS/un_operateur/mon_app/saved/searches/"
-        "objet_temoin"
+    PRIVATE = (
+        "https://base.invalid:0/servicesNS/an_operator/my_app/saved/searches/"
+        "witness_object"
     )
 
-    def test_un_objet_partage_porte_le_contexte_fixe(self):
-        self.assertEqual(namespace_owner_from_id(self.PARTAGE), FIXED_CONTEXT)
-        self.assertTrue(is_fixed_context(namespace_owner_from_id(self.PARTAGE)))
+    def test_a_shared_object_carries_the_fixed_context(self):
+        self.assertEqual(namespace_owner_from_id(self.SHARED), FIXED_CONTEXT)
+        self.assertTrue(is_fixed_context(namespace_owner_from_id(self.SHARED)))
 
-    def test_un_objet_prive_porte_un_namespace_nominatif(self):
-        self.assertEqual(namespace_owner_from_id(self.PRIVE), "un_operateur")
-        self.assertFalse(is_fixed_context(namespace_owner_from_id(self.PRIVE)))
+    def test_a_private_object_carries_a_nominative_namespace(self):
+        self.assertEqual(namespace_owner_from_id(self.PRIVATE), "an_operator")
+        self.assertFalse(is_fixed_context(namespace_owner_from_id(self.PRIVATE)))
 
-    def test_les_deux_homonymes_ne_different_que_par_ce_segment(self):
-        """Le point de fond : meme titre, meme app, meme famille — seul le namespace
-        distingue le prive du partage, et c'est la plateforme qui l'ecrit."""
+    def test_the_two_homonyms_differ_only_by_that_segment(self):
+        """The substantive point: same title, same app, same family - only the
+        namespace tells the private object from the shared one, and it is the platform
+        that writes it."""
         self.assertEqual(
-            handler_path_from_id(self.PRIVE), handler_path_from_id(self.PARTAGE)
+            handler_path_from_id(self.PRIVATE), handler_path_from_id(self.SHARED)
         )
         self.assertNotEqual(
-            namespace_owner_from_id(self.PRIVE),
-            namespace_owner_from_id(self.PARTAGE),
+            namespace_owner_from_id(self.PRIVATE),
+            namespace_owner_from_id(self.SHARED),
         )
 
-    def test_un_chemin_relatif_est_accepte(self):
+    def test_a_relative_path_is_accepted(self):
         self.assertEqual(
             namespace_owner_from_id(
-                "/servicesNS/un_operateur/mon_app/saved/searches/objet_temoin"
+                "/servicesNS/an_operator/my_app/saved/searches/witness_object"
             ),
-            "un_operateur",
+            "an_operator",
         )
 
-    def test_le_segment_est_decode(self):
+    def test_the_segment_is_decoded(self):
         self.assertEqual(
             namespace_owner_from_id(
-                "/servicesNS/un%20operateur/mon_app/saved/searches/objet_temoin"
+                "/servicesNS/an%20operator/my_app/saved/searches/witness_object"
             ),
-            "un operateur",
+            "an operator",
         )
 
-    def test_absence_de_donnee_rend_none(self):
-        """Sans namespace, la commande n'invente rien — elle n'a pas la donnee."""
-        for valeur in (
+    def test_absence_of_data_yields_none(self):
+        """With no namespace, the command invents nothing: it does not have the
+        datum."""
+        for value in (
             None,
             "",
             "   ",
-            "https://base.invalid:0/services/saved/searches/objet_temoin",
-            "/servicesNS/un_operateur/mon_app/objet_temoin",   # chemin trop court
+            "https://base.invalid:0/services/saved/searches/witness_object",
+            "/servicesNS/an_operator/my_app/witness_object",   # path too short
         ):
-            with self.subTest(valeur=valeur):
-                self.assertIsNone(namespace_owner_from_id(valeur))
+            with self.subTest(value=value):
+                self.assertIsNone(namespace_owner_from_id(value))
 
-    def test_la_comparaison_au_contexte_fixe_est_insensible_a_la_casse(self):
-        for valeur in ("nobody", "NOBODY", " Nobody "):
-            with self.subTest(valeur=valeur):
-                self.assertTrue(is_fixed_context(valeur))
-        for valeur in (None, "", "un_operateur"):
-            with self.subTest(valeur=valeur):
-                self.assertFalse(is_fixed_context(valeur))
+    def test_the_comparison_to_the_fixed_context_is_case_insensitive(self):
+        for value in ("nobody", "NOBODY", " Nobody "):
+            with self.subTest(value=value):
+                self.assertTrue(is_fixed_context(value))
+        for value in (None, "", "an_operator"):
+            with self.subTest(value=value):
+                self.assertFalse(is_fixed_context(value))
 
-    def test_le_nom_de_lobjet_nest_pas_confondu_avec_le_proprietaire(self):
-        """Le dernier segment est le nom, le premier le proprietaire. Un `id` dont le
-        nom d'objet vaudrait `nobody` ne doit pas passer pour partage."""
+    def test_the_object_name_is_not_confused_with_the_owner(self):
+        """The last segment is the name, the first is the owner. An `id` whose object
+        name happened to be `nobody` must not pass for shared."""
         self.assertEqual(
             namespace_owner_from_id(
-                "/servicesNS/un_operateur/mon_app/saved/searches/nobody"
+                "/servicesNS/an_operator/my_app/saved/searches/nobody"
             ),
-            "un_operateur",
+            "an_operator",
         )
 
 

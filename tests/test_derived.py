@@ -1,11 +1,12 @@
-"""Abstention sur les objets derives d'un `eventtype` (§3.4, §5.4 rang 0, D-18).
+"""Abstention on objects derived from an `eventtype` (sections 3.4, 5.4 rank 0, D-18).
 
-Deux niveaux :
+Two levels:
 
-- l'identification elle-meme (`acltools.derived`), et surtout la preuve qu'elle est
-  **decouverte** et non construite — c'est la troisieme propriete normative du §3.4 ;
-- son insertion au rang 0 de l'ordre du §5.4, avec les invariants qui l'accompagnent :
-  aucun POST, compteur non incremente, ligne `outcome` presente.
+- the identification itself (`acltools.derived`), and above all the proof that it is
+  **discovered** and not constructed - that is the third normative property of
+  section 3.4;
+- its insertion at rank 0 of the order of section 5.4, with the invariants that come
+  with it: no POST, counter not incremented, `outcome` line present.
 """
 
 import unittest
@@ -28,28 +29,42 @@ from .helpers import (
     make_params,
 )
 
-#: Chemin du derive temoin, tel que `build_object_path` le produit.
-DERIVE_PATH = "/servicesNS/nobody/mon_app/saved/fvtags/eventtype%3Dmon_eventtype"
+#: Application of the witness objects, and role held before the write. Both are set
+#: explicitly below so the paths and the idempotence case do not silently depend on
+#: the defaults of `make_event` and `acl_body`.
+APP = "my_app"
+CURRENT_WRITE_ROLE = "legacy_role"
 
-#: Chemin du GET de confirmation du porteur. C'est l'appel qui rend la relation
-#: **observee** : sans lui, elle serait supposee.
-PORTEUR_PATH = "/servicesNS/nobody/mon_app/saved/eventtypes/mon_eventtype"
+#: Path of the witness derived object, as `build_object_path` produces it.
+DERIVED_PATH = "/servicesNS/nobody/my_app/saved/fvtags/eventtype%3Dmy_eventtype"
+
+#: Path of the confirmation GET on the carrier. This is the call that makes the
+#: relation **observed**: without it, it would merely be assumed.
+CARRIER_PATH = "/servicesNS/nobody/my_app/saved/eventtypes/my_eventtype"
 
 
-def derive_rest(carrier_status=200, **kwargs):
-    """`FakeRest` servant un objet `fvtags` dont splunkd nomme l'identite."""
+def derived_rest(carrier_status=200, **kwargs):
+    """`FakeRest` serving an `fvtags` object whose identity splunkd names."""
     return FakeRest(
-        default_get=RestResponse(200, acl_body(name="eventtype=mon_eventtype")),
-        json_responses={PORTEUR_PATH: RestResponse(carrier_status, b'{"entry":[]}')},
+        default_get=RestResponse(
+            200,
+            acl_body(
+                app=APP,
+                name="eventtype=my_eventtype",
+                write=(CURRENT_WRITE_ROLE,),
+            ),
+        ),
+        json_responses={CARRIER_PATH: RestResponse(carrier_status, b'{"entry":[]}')},
         default_json=RestResponse(404, b"{}"),
         **kwargs
     )
 
 
-def derive_event(**kwargs):
-    kwargs.setdefault("title", "eventtype=mon_eventtype")
+def derived_event(**kwargs):
+    kwargs.setdefault("title", "eventtype=my_eventtype")
+    kwargs.setdefault("app", APP)
     kwargs.setdefault("eai_type", "fvtags")
-    kwargs.setdefault("write", "nouveau_role_admin")
+    kwargs.setdefault("write", "new_role_admin")
     return make_event(**kwargs)
 
 
@@ -64,272 +79,279 @@ def run(rest, event, params=None, journal=None):
     return processor.process(event), processor
 
 
-class TestCleComposite(unittest.TestCase):
-    """Grammaire `<champ>=<valeur>` de la famille `fvtags`."""
+class CompositeKeyTest(unittest.TestCase):
+    """The `<field>=<value>` grammar of the `fvtags` family."""
 
-    def test_decoupage_sur_le_premier_signe_egal(self):
+    def test_split_on_the_first_equals_sign(self):
         self.assertEqual(
-            split_composite_key("eventtype=mon_eventtype"),
-            ("eventtype", "mon_eventtype"),
+            split_composite_key("eventtype=my_eventtype"),
+            ("eventtype", "my_eventtype"),
         )
 
-    def test_une_valeur_peut_contenir_un_signe_egal(self):
-        """Mesure sur le socle de reference : la cascade suit cette lecture.
+    def test_a_value_may_contain_an_equals_sign(self):
+        """Measured on the reference platform: the cascade follows this reading.
 
-        Un `eventtype` nomme `a=b` engendre un derive nomme `eventtype=a=b`, et le POST
-        d'ACL sur le porteur cascade bien vers lui. Un decoupage sur le **dernier**
-        signe egal, ou un rejet des noms a plusieurs signes egal, manquerait ce cas.
+        An `eventtype` named `a=b` gives rise to a derived object named
+        `eventtype=a=b`, and the ACL POST on the carrier does cascade to it. A split on
+        the **last** equals sign, or a rejection of names holding several equals signs,
+        would miss this case.
         """
         self.assertEqual(split_composite_key("eventtype=a=b"), ("eventtype", "a=b"))
 
-    def test_formes_hors_grammaire(self):
-        for nom in (None, "", "sans_signe_egal", "=valeur_sans_champ", "champ_sans_valeur="):
-            with self.subTest(nom=nom):
-                self.assertIsNone(split_composite_key(nom))
+    def test_forms_outside_the_grammar(self):
+        for name in (None, "", "no_equals_sign", "=value_without_field",
+                     "field_without_value="):
+            with self.subTest(name=name):
+                self.assertIsNone(split_composite_key(name))
 
 
-class TestDesignationDuPorteur(unittest.TestCase):
-    """`designated_carrier` lit une designation, elle ne conclut pas a l'existence."""
+class CarrierDesignationTest(unittest.TestCase):
+    """`designated_carrier` reads a designation; it concludes nothing about
+    existence."""
 
-    def test_derive_d_eventtype_designe_son_porteur(self):
+    def test_an_eventtype_derived_object_designates_its_carrier(self):
         self.assertEqual(
-            designated_carrier("saved/fvtags", "eventtype=mon_eventtype"),
-            "mon_eventtype",
+            designated_carrier("saved/fvtags", "eventtype=my_eventtype"),
+            "my_eventtype",
         )
 
-    def test_le_handler_d_administration_est_reconnu(self):
+    def test_the_administration_handler_is_recognized(self):
         self.assertEqual(
-            designated_carrier("admin/fvtags", "eventtype=mon_eventtype"),
-            "mon_eventtype",
+            designated_carrier("admin/fvtags", "eventtype=my_eventtype"),
+            "my_eventtype",
         )
 
-    def test_un_tag_champ_valeur_ordinaire_ne_designe_aucun_eventtype(self):
-        """`mon_champ=ma_valeur` est un tag de champ, pas un derive d'`eventtype`."""
+    def test_an_ordinary_field_value_tag_designates_no_eventtype(self):
+        """`my_field=my_value` is a field tag, not an object derived from an
+        `eventtype`."""
         self.assertIsNone(
-            designated_carrier("saved/fvtags", "mon_champ=ma_valeur")
+            designated_carrier("saved/fvtags", "my_field=my_value")
         )
 
-    def test_la_famille_est_un_prealable(self):
-        """Un objet d'une autre famille nomme `eventtype=...` n'est pas un derive.
+    def test_the_family_is_a_precondition(self):
+        """An object of another family named `eventtype=...` is not a derived object.
 
-        Sans ce garde-fou, une recherche sauvegardee dont l'operateur aurait choisi ce
-        nom serait ecartee de toute modification. La famille vient du chemin de handler
-        resolu (§5.2), donnee de plateforme et non du nom.
+        Without this guard rail, a saved search for which the operator had picked that
+        name would be skipped from any modification. The family comes from the resolved
+        handler path (section 5.2), a platform datum and not the name.
         """
         for handler in ("saved/searches", "data/ui/views", "admin/tags"):
             with self.subTest(handler=handler):
                 self.assertIsNone(
-                    designated_carrier(handler, "eventtype=mon_eventtype")
+                    designated_carrier(handler, "eventtype=my_eventtype")
                 )
 
 
-class TestSondeDuPorteur(unittest.TestCase):
-    """La relation est **confirmee par la plateforme**, jamais supposee."""
+class CarrierProbeTest(unittest.TestCase):
+    """The relation is **confirmed by the platform**, never assumed."""
 
-    def test_le_porteur_est_confirme_par_un_get_reel(self):
-        rest = derive_rest()
-        porteur, avertissement = CarrierProbe(rest).carrier_of(
-            "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+    def test_the_carrier_is_confirmed_by_a_real_get(self):
+        rest = derived_rest()
+        carrier, warning = CarrierProbe(rest).carrier_of(
+            APP, "saved/fvtags", "eventtype=my_eventtype"
         )
-        self.assertEqual(porteur, "mon_eventtype")
-        self.assertIsNone(avertissement)
+        self.assertEqual(carrier, "my_eventtype")
+        self.assertIsNone(warning)
         self.assertIn(
-            ("JSON", PORTEUR_PATH, None),
+            ("JSON", CARRIER_PATH, None),
             rest.calls,
-            "l'existence du porteur doit etre demandee a la plateforme",
+            "the existence of the carrier must be asked of the platform",
         )
 
-    def test_derive_orphelin_le_porteur_n_existe_pas(self):
-        """HTTP 404 : aucun porteur ne peut cascader, l'objet reste modifiable.
+    def test_orphan_derived_object_the_carrier_does_not_exist(self):
+        """HTTP 404: no carrier can cascade, the object stays modifiable.
 
-        C'est la contrepartie qui fait de l'identification une decouverte : une
-        heuristique de nommage repondrait « derive » ici aussi.
+        This is the counterpart that makes the identification a discovery: a naming
+        heuristic would answer "derived" here as well.
         """
-        rest = derive_rest(carrier_status=404)
-        porteur, avertissement = CarrierProbe(rest).carrier_of(
-            "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+        rest = derived_rest(carrier_status=404)
+        carrier, warning = CarrierProbe(rest).carrier_of(
+            APP, "saved/fvtags", "eventtype=my_eventtype"
         )
-        self.assertIsNone(porteur)
-        self.assertIsNone(avertissement)
+        self.assertIsNone(carrier)
+        self.assertIsNone(warning)
 
-    def test_reponse_non_concluante_abstention_conservatrice_et_tracee(self):
+    def test_inconclusive_response_conservative_abstention_and_traced(self):
         for code in (403, 500, 503, 0):
             with self.subTest(code=code):
-                rest = derive_rest(carrier_status=code)
-                porteur, avertissement = CarrierProbe(rest).carrier_of(
-                    "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+                rest = derived_rest(carrier_status=code)
+                carrier, warning = CarrierProbe(rest).carrier_of(
+                    APP, "saved/fvtags", "eventtype=my_eventtype"
                 )
-                self.assertEqual(porteur, "mon_eventtype")
+                self.assertEqual(carrier, "my_eventtype")
                 self.assertEqual(
-                    avertissement, "carrier_probe_inconclusive:%d" % code
+                    warning, "carrier_probe_inconclusive:%d" % code
                 )
 
-    def test_un_seul_appel_par_porteur_distinct(self):
-        rest = derive_rest()
-        sonde = CarrierProbe(rest)
+    def test_a_single_call_per_distinct_carrier(self):
+        rest = derived_rest()
+        probe = CarrierProbe(rest)
         for _ in range(3):
-            sonde.carrier_of(
-                "mon_app", "saved/fvtags", "eventtype=mon_eventtype"
+            probe.carrier_of(
+                APP, "saved/fvtags", "eventtype=my_eventtype"
             )
         self.assertEqual(rest.count("JSON"), 1)
 
-    def test_aucun_appel_hors_de_la_famille_fvtags(self):
-        rest = derive_rest()
+    def test_no_call_outside_the_fvtags_family(self):
+        rest = derived_rest()
         CarrierProbe(rest).carrier_of(
-            "mon_app", "saved/searches", "eventtype=mon_eventtype"
+            APP, "saved/searches", "eventtype=my_eventtype"
         )
         self.assertEqual(rest.count("JSON"), 0)
 
 
-class TestRang0(unittest.TestCase):
-    """Insertion du controle au rang 0 de l'ordre normatif du §5.4."""
+class Rank0Test(unittest.TestCase):
+    """Insertion of the check at rank 0 of the normative order of section 5.4."""
 
-    def test_statut_et_erreur(self):
-        resultat, _ = run(derive_rest(), derive_event())
-        self.assertEqual(resultat.status, "skipped_derived")
-        self.assertEqual(resultat.error, "derived_object:mon_eventtype")
+    def test_status_and_error(self):
+        result, _ = run(derived_rest(), derived_event())
+        self.assertEqual(result.status, "skipped_derived")
+        self.assertEqual(result.error, "derived_object:my_eventtype")
 
-    def test_aucun_post_et_compteur_non_incremente(self):
-        rest = derive_rest()
-        _, processor = run(rest, derive_event())
+    def test_no_post_and_counter_not_incremented(self):
+        rest = derived_rest()
+        _, processor = run(rest, derived_event())
         self.assertEqual(rest.posts(), [])
         self.assertEqual(processor.counter, 0)
         self.assertFalse(processor._written)
 
-    def test_ligne_outcome_presente_et_aucune_ligne_intent(self):
+    def test_outcome_line_present_and_no_intent_line(self):
         journal = FakeJournal()
-        resultat, _ = run(derive_rest(), derive_event(), journal=journal)
+        result, _ = run(derived_rest(), derived_event(), journal=journal)
         self.assertEqual(len(journal.outcomes), 1)
         self.assertEqual(journal.intents, [])
         self.assertEqual(journal.outcomes[0]["status"], "skipped_derived")
-        self.assertEqual(journal.outcomes[0]["endpoint"], DERIVE_PATH)
-        self.assertFalse(resultat.journaled)
+        self.assertEqual(journal.outcomes[0]["endpoint"], DERIVED_PATH)
+        self.assertFalse(result.journaled)
 
-    def test_la_ligne_outcome_ne_porte_pas_d_etat(self):
-        """La fusion n'a pas ete calculee : le §8.2 exclut donc `before_*` / `after_*`."""
+    def test_the_outcome_line_carries_no_state(self):
+        """The merge was not computed: section 8.2 therefore excludes
+        `before_*` / `after_*`."""
         journal = FakeJournal()
-        run(derive_rest(), derive_event(), journal=journal)
-        for cle in journal.outcomes[0]:
+        run(derived_rest(), derived_event(), journal=journal)
+        for key in journal.outcomes[0]:
             self.assertFalse(
-                cle.startswith("before_") or cle.startswith("after_"), cle
+                key.startswith("before_") or key.startswith("after_"), key
             )
 
-    def test_le_rang_0_precede_can_change_perms(self):
-        rest = derive_rest()
+    def test_rank_0_precedes_can_change_perms(self):
+        rest = derived_rest()
         rest.default_get = RestResponse(
-            200, acl_body(name="eventtype=mon_eventtype", can_change_perms=False)
+            200, acl_body(name="eventtype=my_eventtype", can_change_perms=False)
         )
-        resultat, _ = run(rest, derive_event())
-        self.assertEqual(resultat.status, "skipped_derived")
+        result, _ = run(rest, derived_event())
+        self.assertEqual(result.status, "skipped_derived")
 
-    def test_le_rang_0_precede_le_refus_de_sharing_vide(self):
-        resultat, _ = run(
-            derive_rest(),
-            derive_event(sharing=""),
+    def test_rank_0_precedes_the_refusal_of_an_empty_sharing(self):
+        result, _ = run(
+            derived_rest(),
+            derived_event(sharing=""),
             params=make_params(),
         )
-        self.assertEqual(resultat.status, "skipped_derived")
+        self.assertEqual(result.status, "skipped_derived")
 
-    def test_le_rang_0_precede_dryrun(self):
-        resultat, _ = run(
-            derive_rest(), derive_event(), params=make_params(dryrun=True)
+    def test_rank_0_precedes_dryrun(self):
+        result, _ = run(
+            derived_rest(), derived_event(), params=make_params(dryrun=True)
         )
-        self.assertEqual(resultat.status, "skipped_derived")
+        self.assertEqual(result.status, "skipped_derived")
 
-    def test_le_rang_0_precede_noop(self):
-        """Un derive deja conforme sort en `skipped_derived`, pas en `noop`.
+    def test_rank_0_precedes_noop(self):
+        """An already-conforming derived object exits as `skipped_derived`, not as
+        `noop`.
 
-        L'information utile est que l'objet n'entre pas dans le perimetre d'ecriture.
+        The useful information is that the object is out of the write perimeter.
         """
-        resultat, _ = run(derive_rest(), derive_event(write="ancien_role"))
-        self.assertEqual(resultat.status, "skipped_derived")
+        result, _ = run(derived_rest(), derived_event(write=CURRENT_WRITE_ROLE))
+        self.assertEqual(result.status, "skipped_derived")
 
-    def test_un_derive_orphelin_est_traite_normalement(self):
-        rest = derive_rest(carrier_status=404)
-        resultat, _ = run(rest, derive_event())
-        self.assertEqual(resultat.status, "updated")
+    def test_an_orphan_derived_object_is_processed_normally(self):
+        rest = derived_rest(carrier_status=404)
+        result, _ = run(rest, derived_event())
+        self.assertEqual(result.status, "updated")
         self.assertEqual(len(rest.posts()), 1)
 
-    def test_l_identite_vient_du_get_pas_du_titre(self):
-        """Le §5.3 pose que le GET fait autorite.
+    def test_the_identity_comes_from_the_get_not_from_the_title(self):
+        """Section 5.3 lays down that the GET is authoritative.
 
-        Le `title` de l'evenement designe un `eventtype`, mais splunkd renvoie une autre
-        identite : l'objet n'est pas un derive. Se fier au `title` rendrait le rang 0
-        contournable — et surtout declenchable — par un `eval` en amont.
+        The `title` of the event designates an `eventtype`, but splunkd returns another
+        identity: the object is not a derived one. Relying on the `title` would make
+        rank 0 bypassable, and above all triggerable, by an upstream `eval`.
         """
-        rest = derive_rest()
-        rest.default_get = RestResponse(200, acl_body(name="mon_champ=ma_valeur"))
-        resultat, _ = run(rest, derive_event())
-        self.assertEqual(resultat.status, "updated")
+        rest = derived_rest()
+        rest.default_get = RestResponse(200, acl_body(name="my_field=my_value"))
+        result, _ = run(rest, derived_event())
+        self.assertEqual(result.status, "updated")
 
-    def test_avertissement_de_sonde_non_concluante_expose_en_sortie(self):
-        rest = derive_rest(carrier_status=503)
-        resultat, _ = run(rest, derive_event())
-        self.assertEqual(resultat.status, "skipped_derived")
-        self.assertIn("carrier_probe_inconclusive:503", resultat.warnings)
+    def test_the_inconclusive_probe_warning_is_exposed_in_the_output(self):
+        rest = derived_rest(carrier_status=503)
+        result, _ = run(rest, derived_event())
+        self.assertEqual(result.status, "skipped_derived")
+        self.assertIn("carrier_probe_inconclusive:503", result.warnings)
 
-    def test_aucun_cout_sur_un_lot_sans_derive(self):
-        """Le rang 0 n'emet aucun appel sur les familles qui ne sont pas concernees."""
-        rest = derive_rest()
-        run(rest, make_event(eai_type="savedsearch", write="nouveau_role_admin"))
+    def test_no_cost_on_a_batch_without_derived_objects(self):
+        """Rank 0 emits no call on the families that are not concerned."""
+        rest = derived_rest()
+        run(rest, make_event(eai_type="savedsearch", write="new_role_admin"))
         self.assertEqual(rest.count("JSON"), 0)
 
 
-class RangZeroEtDeduplicationTest(unittest.TestCase):
-    """A-11 — le rang 0 ne doit pas dependre d'une propriete du §10.8.
+class RankZeroAndDeduplicationTest(unittest.TestCase):
+    """A-11: rank 0 must not depend on a property of section 10.8.
 
-    Le court-circuit de deduplication rend la main sans emettre de GET. Il doit donc
-    restituer lui-meme l'identite de plateforme, faute de quoi `designated_carrier`
-    recevrait `None` et le rang 0 serait inoperant sur une seconde occurrence du meme
-    endpoint.
+    The deduplication short circuit hands back without emitting a GET. It must
+    therefore restore the platform identity itself, failing which `designated_carrier`
+    would receive `None` and rank 0 would be ineffective on a second occurrence of the
+    same endpoint.
 
-    Le chemin **n'est pas atteignable** dans l'etat livre : un derive est ecarte au
-    rang 0, il n'emet pas de POST, il n'entre donc ni dans `_written` ni dans
-    `_failed`. La coherence tient, mais elle tient par une propriete d'un **autre**
-    mecanisme. Ces deux tests atteignent le chemin deliberement, en injectant la
-    memoire d'execution qu'une evolution de la deduplication produirait, et figent la
-    garantie **locale** qui la remplace.
+    The path **is not reachable** in the delivered state: a derived object is skipped
+    at rank 0, it emits no POST, so it enters neither `_written` nor `_failed`. The
+    consistency holds, but it holds by a property of **another** mechanism. These two
+    tests reach the path deliberately, by injecting the run memory that an evolution of
+    the deduplication would produce, and freeze the **local** guarantee that replaces
+    it.
     """
 
-    def _processeur(self, rest):
+    def _processor(self, rest):
         return EventProcessor(
             make_params(), make_ctx(), rest, mapping=FIXTURE_MAPPING
         )
 
-    def test_le_court_circuit_restitue_lidentite_renvoyee_par_splunkd(self):
-        """Invariant de `_read_state` : meme `platform_name` par les deux chemins."""
-        rest = derive_rest()
-        processeur = self._processeur(rest)
+    def test_the_short_circuit_restores_the_identity_returned_by_splunkd(self):
+        """Invariant of `_read_state`: the same `platform_name` by both paths."""
+        rest = derived_rest()
+        processor = self._processor(rest)
 
-        premier = _Work(derive_event())
-        premier.endpoint = DERIVE_PATH
-        etat = processeur._read_state(premier)
-        self.assertEqual(premier.platform_name, "eventtype=mon_eventtype")
+        first = _Work(derived_event())
+        first.endpoint = DERIVED_PATH
+        state = processor._read_state(first)
+        self.assertEqual(first.platform_name, "eventtype=my_eventtype")
 
-        # Memoire que laisserait un POST abouti sur cet endpoint.
-        processeur._written[DERIVE_PATH] = etat
+        # Memory that a completed POST on this endpoint would leave behind.
+        processor._written[DERIVED_PATH] = state
 
-        second = _Work(derive_event())
-        second.endpoint = DERIVE_PATH
-        processeur._read_state(second)
-        self.assertEqual(len(rest.gets()), 1)                # le court-circuit a joue
-        self.assertEqual(second.platform_name, premier.platform_name)
+        second = _Work(derived_event())
+        second.endpoint = DERIVED_PATH
+        processor._read_state(second)
+        self.assertEqual(len(rest.gets()), 1)          # the short circuit did its work
+        self.assertEqual(second.platform_name, first.platform_name)
 
-    def test_un_derive_deja_memorise_reste_ecarte_au_rang_0(self):
-        """La consequence : l'abstention survit a la deduplication.
+    def test_an_already_memorized_derived_object_stays_skipped_at_rank_0(self):
+        """The consequence: the abstention survives deduplication.
 
-        Sans la restitution, ce second passage ressortirait `updated` avec un POST.
+        Without the restoration, this second pass would come out `updated`, with a
+        POST.
         """
-        rest = derive_rest()
-        processeur = self._processeur(rest)
+        rest = derived_rest()
+        processor = self._processor(rest)
 
-        amorce = _Work(derive_event())
-        amorce.endpoint = DERIVE_PATH
-        processeur._written[DERIVE_PATH] = processeur._read_state(amorce)
+        seed = _Work(derived_event())
+        seed.endpoint = DERIVED_PATH
+        processor._written[DERIVED_PATH] = processor._read_state(seed)
 
-        resultat = processeur.process(derive_event(write="encore_un_autre_role"))
-        self.assertEqual(resultat.status, "skipped_derived")
-        self.assertEqual(resultat.error, "derived_object:mon_eventtype")
+        result = processor.process(derived_event(write="yet_another_role"))
+        self.assertEqual(result.status, "skipped_derived")
+        self.assertEqual(result.error, "derived_object:my_eventtype")
         self.assertEqual(len(rest.posts()), 0)
 
 

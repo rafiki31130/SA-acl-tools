@@ -1,68 +1,68 @@
-"""L'enumeration des `acl_status` est **derivee du code**, jamais recopiee (§5.7, §8.2).
+"""The `acl_status` enumeration is **derived from the code**, never copied out
+(section 5.7, section 8.2).
 
-Quatre redactions successives de cette liste ont ete fausses : trois dans le cahier des
-charges, puis une dans le jeu de tests auquel D-35 l'avait confiee — `DOUZE_STATUTS`
-annoncait douze valeurs et en portait onze, `skipped_derived` manquant. Le defaut n'est
-pas l'oubli : c'est qu'une enumeration ecrite a la main n'a **aucun lien mecanique** avec
-ce que le code produit, et derive donc a chaque evolution.
+Four successive writings of this list were wrong: three in the specification, then one
+in the test suite to which D-35 had entrusted it - `DOUZE_STATUTS` announced twelve
+values and carried eleven, `skipped_derived` missing. The flaw is not forgetfulness: it
+is that a hand-written enumeration has **no mechanical link** with what the code
+produces, and therefore drifts at every evolution.
 
-Ce module pose ce lien. Il extrait de l'arbre syntaxique du noyau tout statut litteral
-effectivement produit, et exige l'egalite avec `acltools.model.ACL_STATUSES`. Combine a
-l'invariant 1 du §8.2 — qui exige d'observer chacune de ces valeurs sur un cas reel —,
-il attaque la classe d'erreur par les deux bouts :
+This module establishes that link. It extracts from the syntax tree of the core every
+literal status actually produced, and requires equality with
+`acltools.model.ACL_STATUSES`. Combined with invariant 1 of section 8.2 - which requires
+observing each of those values on a real case - it attacks the error class from both
+ends:
 
-- statut ajoute au code, absent de `ACL_STATUSES` -> ce module echoue ;
-- statut ajoute a `ACL_STATUSES`, sans cas de test -> l'invariant 1 echoue.
+- a status added to the code and absent from `ACL_STATUSES` -> this module fails;
+- a status added to `ACL_STATUSES` with no test case -> invariant 1 fails.
 
-**Ce que la premiere version de ce module manquait, et pourquoi la correction porte
-ailleurs qu'on ne l'attend.** L'extracteur reconnaissait deux formes d'ecriture et
-**ignorait tout le reste**. Un statut passe en argument nomme (`EventRejected(status=…)`)
-ou par indirection (`work.status = _CONSTANTE`) entrait dans le noyau sans etre vu, et la
-suite restait verte — mesure a l'audit de cloture, deux statuts furtifs, `501 passed`.
-Ajouter ces deux formes a l'extracteur aurait reproduit le defaut d'un cran plus loin :
-la forme suivante, non prevue, aurait echappe a son tour, en silence.
+**What the first version of this module missed, and why the fix lands somewhere other
+than expected.** The extractor recognized two written forms and **ignored everything
+else**. A status passed as a keyword argument (`EventRejected(status=...)`) or by
+indirection (`work.status = _CONSTANT`) entered the core unseen, and the suite stayed
+green - measured at the closing audit, two stealth statuses, `501 passed`. Adding those
+two forms to the extractor would have reproduced the flaw one notch further out: the
+next form, unforeseen, would have escaped in its turn, silently.
 
-La correction est donc un **renversement de la valeur par defaut**. L'extracteur ne
-classe plus « ce qu'il reconnait » contre « le reste » : il classe **toute** construction
-qui touche a un statut en trois categories exhaustives —
+The fix is therefore a **reversal of the default**. The extractor no longer classifies
+"what it recognizes" against "the rest": it classifies **every** construct that touches
+a status into three exhaustive categories -
 
-1. **canonique** : le statut est un litteral, il est collecte
-   (`EventRejected("<statut>", …)`, `<obj>.status = "<statut>"`) ;
-2. **propagation reconnue** : la valeur est un statut ne ailleurs, deja collecte a sa
-   naissance — un **parametre** nomme `status` de la fonction englobante, ou une
-   expression `<…>.status` (`self.status = status`, `work.status = exc.status`) ;
-3. **opaque** : tout le reste. **Opaque fait echouer la suite**, en nommant le module, la
-   ligne, la portee et le fragment de source en cause.
+1. **canonical**: the status is a literal, it gets collected
+   (`EventRejected("<status>", ...)`, `<obj>.status = "<status>"`);
+2. **recognized propagation**: the value is a status born elsewhere, already collected
+   at its birth - a **parameter** named `status` of the enclosing function, or an
+   expression `<...>.status` (`self.status = status`, `work.status = exc.status`);
+3. **opaque**: everything else. **Opaque fails the suite**, naming the module, the line,
+   the scope and the offending source fragment.
 
-Un angle mort bruyant vaut infiniment mieux qu'un angle mort silencieux. Qui introduit
-une forme opaque a deux issues, toutes deux explicites : ecrire la forme canonique, ou
-etendre l'extracteur — donc en connaissance de cause, jamais par inadvertance.
+A noisy blind spot is infinitely better than a silent one. Whoever introduces an opaque
+form has two ways out, both explicit: write the canonical form, or extend the extractor
+- therefore knowingly, never by inadvertence.
 
-**Ce que ce controle ne garantit pas.** Il est **statique**, et sa portee s'arrete ou
-s'arrete la lecture d'un arbre syntaxique :
+**What this control does not guarantee.** It is **static**, and its reach stops where
+the reading of a syntax tree stops:
 
-- il couvre les modules de `SOURCES` — le paquet metier et l'adaptateur de commande. Un
-  statut ne dans un module ajoute hors de cette liste, ou dans `bin/lib/` (SDK
-  vendorise), n'est pas vu ; `tests/test_layering.py` borne les dependances du noyau,
-  il ne borne pas l'endroit ou un statut peut naitre ;
-- il ne suit aucune valeur a l'execution : un statut fabrique par `exec`, par
-  `importlib`, par une metaclasse ou par un decorateur qui reecrit un attribut echappe a
-  toute lecture de source ;
-- les categories 1 et 2 reposent sur des **noms** (`status`, `acl_status`,
-  `EventRejected`). Un statut ecrit dans un attribut portant un autre nom, puis recopie
-  vers `status` par un chemin non textuel, n'est pas vu ;
-- une propagation `<expr>.status` est acceptee **sans remonter a l'origine** de la
-  valeur. Si cette origine n'est pas elle-meme un site canonique du noyau — un objet
-  construit ailleurs, une constante de module portant un attribut `status` —, le statut
-  qu'elle porte n'est pas collecte. La propagation depuis un **nom** est plus etroite :
-  seul un parametre de la fonction englobante est admis, une variable locale nommee
-  `status` est refusee ;
-- les **exemptions declarees** (`EXEMPTIONS`) sont des trous ouverts a la main. Chacune
-  porte sa justification, aucune n'est implicite, et une exemption qui ne correspond plus
-  a rien fait echouer la suite — mais tant qu'elle vaut, elle vaut.
+- it covers the modules of `SOURCES` - the business package and the command adapter. A
+  status born in a module added outside that list, or in `bin/lib/` (vendored SDK), is
+  not seen; `tests/test_layering.py` bounds the dependencies of the core, it does not
+  bound the place where a status may be born;
+- it follows no value at run time: a status built by `exec`, by `importlib`, by a
+  metaclass or by a decorator that rewrites an attribute escapes any reading of source;
+- categories 1 and 2 rest on **names** (`status`, `acl_status`, `EventRejected`). A
+  status written into an attribute carrying another name, then copied over to `status`
+  by a non-textual path, is not seen;
+- a propagation `<expr>.status` is accepted **without tracing back to the origin** of
+  the value. If that origin is not itself a canonical site of the core - an object built
+  elsewhere, a module constant carrying a `status` attribute - the status it carries is
+  not collected. Propagation from a **name** is narrower: only a parameter of the
+  enclosing function is admitted, a local variable named `status` is refused;
+- the **declared exemptions** (`EXEMPTIONS`) are holes opened by hand. Each one carries
+  its justification, none is implicit, and an exemption that no longer matches anything
+  fails the suite - but as long as it holds, it holds.
 
-Ces limites sont la raison d'etre du garde-fou `test_lextraction_nest_pas_vide` et des
-auto-tests de l'extracteur : un instrument mort produit des zeros rassurants.
+These limits are the reason for the `test_the_extraction_is_not_empty` guard rail and
+for the self-tests of the extractor: a dead instrument produces reassuring zeros.
 """
 
 import ast
@@ -74,652 +74,658 @@ from acltools.model import ACL_STATUSES
 
 from . import BIN_DIR, REPO_ROOT
 
-#: Modules balayes : le paquet metier et l'adaptateur de commande. `bin/lib/` — SDK
-#: vendorise, non modifie — en est exclu. C'est une **frontiere declaree**, pas une
-#: preuve : voir les limites en tete de module.
-_PAQUET = os.path.join(BIN_DIR, "acltools")
+#: Modules scanned: the business package and the command adapter. `bin/lib/` - vendored
+#: SDK, left unmodified - is out of scope. This is a **declared boundary**, not a
+#: proof: see the limits at the top of the module.
+_PACKAGE = os.path.join(BIN_DIR, "acltools")
 SOURCES = tuple(
     sorted(
-        os.path.join(_PAQUET, nom)
-        for nom in os.listdir(_PAQUET)
-        if nom.endswith(".py")
+        os.path.join(_PACKAGE, name)
+        for name in os.listdir(_PACKAGE)
+        if name.endswith(".py")
     )
 ) + (os.path.join(BIN_DIR, "editacl.py"),)
 
-#: Noms d'attribut qui portent un `acl_status`. Une ecriture sur l'un d'eux est un
-#: **site de statut** : elle est canonique, propagee, ou opaque — jamais ignoree.
-ATTRIBUTS_DE_STATUT = ("status",)
+#: Attribute names that carry an `acl_status`. A write to one of them is a **status
+#: site**: it is canonical, propagated, or opaque - never ignored.
+STATUS_ATTRIBUTES = ("status",)
 
-#: Memes noms, cote cle de dictionnaire (`output["acl_status"] = …`, le puits du §5.7).
-CLES_DE_STATUT = ("status", "acl_status")
+#: Same names, on the dictionary-key side (`output["acl_status"] = ...`, the sink of
+#: section 5.7).
+STATUS_KEYS = ("status", "acl_status")
 
-#: Memes noms, cote argument nomme (`EventResult(status=…)`).
-ARGUMENTS_DE_STATUT = ("status", "acl_status")
+#: Same names, on the keyword-argument side (`EventResult(status=...)`).
+STATUS_ARGUMENTS = ("status", "acl_status")
 
-#: Exception par evenement : son premier argument positionnel **est** le statut.
-CONSTRUCTEURS_DE_REJET = ("EventRejected",)
+#: Per-event exception: its first positional argument **is** the status.
+REJECTION_CONSTRUCTORS = ("EventRejected",)
 
-#: Enveloppes qui ne peuvent pas changer la valeur d'un statut deja etabli. Elles sont
-#: **deballees** avant classification, jamais acceptees en bloc : `str(<expr>)` renvoie
-#: la classification a `<expr>`, qui reste canonique, propagee, ou opaque.
-ENVELOPPES_TRANSPARENTES = ("str",)
+#: Wrappers that cannot change the value of an already established status. They are
+#: **unwrapped** before classification, never accepted wholesale: `str(<expr>)` sends
+#: the classification back to `<expr>`, which stays canonical, propagated, or opaque.
+TRANSPARENT_WRAPPERS = ("str",)
 
 
 # --------------------------------------------------------------------------- #
-# Exemptions declarees
+# Declared exemptions
 # --------------------------------------------------------------------------- #
 
-#: Sites qui portent le nom `status` **sans** porter un `acl_status`. Chaque entree est
-#: un trou ouvert a la main dans le controle : elle est nommee, justifiee, et verifiee
-#: vivante (`test_les_exemptions_declarees_correspondent_toutes_a_une_construction`).
-#: Cle : `(module, portee, source normalisee)` — deplacer ou reecrire le site fait
-#: tomber l'exemption, donc echouer la suite, donc redecider.
+#: Sites that carry the name `status` **without** carrying an `acl_status`. Each entry
+#: is a hole opened by hand in the control: it is named, justified, and checked alive
+#: (`test_every_declared_exemption_matches_a_construct`).
+#: Key: `(module, scope, normalized source)` - moving or rewriting the site drops the
+#: exemption, therefore fails the suite, therefore forces a fresh decision.
 EXEMPTIONS = (
     (
         "rest.py",
         "RestResponse.__init__",
         "self.status = int(status)",
-        "Code HTTP de la reponse de transport, pas un `acl_status` : `RestResponse` "
-        "porte `status = 0` pour un echec de transport et `2xx`/`4xx`/`5xx` sinon "
-        "(§10.4). L'homonymie est dans le domaine, pas dans le controle.",
+        "HTTP code of the transport response, not an `acl_status`: `RestResponse` "
+        "carries `status = 0` for a transport failure and `2xx`/`4xx`/`5xx` otherwise "
+        "(section 10.4). The homonymy is in the domain, not in the control.",
     ),
 )
 
 
 # --------------------------------------------------------------------------- #
-# Balayage
+# Scanning
 # --------------------------------------------------------------------------- #
 
-class SiteOpaque(object):
-    """Construction touchant un statut que l'extracteur ne sait pas interpreter."""
+class OpaqueSite(object):
+    """Construct touching a status that the extractor cannot interpret."""
 
-    __slots__ = ("module", "ligne", "portee", "source", "motif")
+    __slots__ = ("module", "line", "scope", "source", "reason")
 
-    def __init__(self, module, ligne, portee, source, motif):
+    def __init__(self, module, line, scope, source, reason):
         self.module = module
-        self.ligne = ligne
-        self.portee = portee
+        self.line = line
+        self.scope = scope
         self.source = source
-        self.motif = motif
+        self.reason = reason
 
-    def cle(self):
-        """Identite stable d'un site, insensible au numero de ligne."""
-        return (self.module, self.portee, self.source)
+    def key(self):
+        """Stable identity of a site, insensitive to the line number."""
+        return (self.module, self.scope, self.source)
 
     def __repr__(self):
-        return "%s:%d dans %s -- %s\n        source : %s" % (
-            self.module, self.ligne, self.portee, self.motif, self.source,
+        return "%s:%d in %s -- %s\n        source: %s" % (
+            self.module, self.line, self.scope, self.reason, self.source,
         )
 
 
-class _Balayeur(ast.NodeVisitor):
-    """Classe chaque site de statut d'un module en canonique / propage / opaque."""
+class _Scanner(ast.NodeVisitor):
+    """Classifies every status site of a module as canonical / propagated / opaque."""
 
-    def __init__(self, module, texte):
+    def __init__(self, module, text):
         self.module = module
-        self._lignes = texte.splitlines()
-        self._pile = []
-        self._parametres = []
-        self.statuts = set()
-        self.opaques = []
+        self._lines = text.splitlines()
+        self._stack = []
+        self._parameters = []
+        self.statuses = set()
+        self.opaque_sites = []
 
-    # -- outillage ---------------------------------------------------------- #
+    # -- tooling ------------------------------------------------------------ #
 
-    def _portee(self):
-        return ".".join(self._pile) or "<module>"
+    def _scope(self):
+        return ".".join(self._stack) or "<module>"
 
     def _source(self, node):
-        debut = max(node.lineno - 1, 0)
-        fin = getattr(node, "end_lineno", None) or node.lineno
-        brut = " ".join(ligne.strip() for ligne in self._lignes[debut:fin])
-        return re.sub(r"\s+", " ", brut).strip()
+        start = max(node.lineno - 1, 0)
+        end = getattr(node, "end_lineno", None) or node.lineno
+        raw = " ".join(line.strip() for line in self._lines[start:end])
+        return re.sub(r"\s+", " ", raw).strip()
 
-    def _opaque(self, node, motif):
-        self.opaques.append(
-            SiteOpaque(
-                self.module, node.lineno, self._portee(), self._source(node), motif
+    def _opaque(self, node, reason):
+        self.opaque_sites.append(
+            OpaqueSite(
+                self.module, node.lineno, self._scope(), self._source(node), reason
             )
         )
 
-    # -- pile des portees --------------------------------------------------- #
+    # -- scope stack -------------------------------------------------------- #
 
     @staticmethod
-    def _noms_de_parametres(node):
+    def _parameter_names(node):
         args = getattr(node, "args", None)
         if args is None or not isinstance(args, ast.arguments):
-            return frozenset()                     # ClassDef : pas de parametres
-        noms = set()
-        for groupe in (
+            return frozenset()                     # ClassDef: no parameters
+        names = set()
+        for group in (
             getattr(args, "posonlyargs", []), args.args, args.kwonlyargs,
         ):
-            noms.update(arg.arg for arg in groupe)
-        for solitaire in (args.vararg, args.kwarg):
-            if solitaire is not None:
-                noms.add(solitaire.arg)
-        return frozenset(noms)
+            names.update(arg.arg for arg in group)
+        for lone in (args.vararg, args.kwarg):
+            if lone is not None:
+                names.add(lone.arg)
+        return frozenset(names)
 
-    def _descendre(self, node):
-        self._pile.append(getattr(node, "name", "<lambda>"))
-        self._parametres.append(self._noms_de_parametres(node))
+    def _descend(self, node):
+        self._stack.append(getattr(node, "name", "<lambda>"))
+        self._parameters.append(self._parameter_names(node))
         self.generic_visit(node)
-        self._parametres.pop()
-        self._pile.pop()
+        self._parameters.pop()
+        self._stack.pop()
 
-    visit_ClassDef = _descendre
-    visit_FunctionDef = _descendre
-    visit_AsyncFunctionDef = _descendre
-    visit_Lambda = _descendre
+    visit_ClassDef = _descend
+    visit_FunctionDef = _descend
+    visit_AsyncFunctionDef = _descend
+    visit_Lambda = _descend
 
-    def _est_un_parametre(self, nom):
-        """Une variable **locale** nommee `status` n'est pas une propagation : c'est
-        une indirection, et l'indirection est precisement ce que C-1 refuse."""
-        return bool(self._parametres) and nom in self._parametres[-1]
+    def _is_a_parameter(self, name):
+        """A **local** variable named `status` is not a propagation: it is an
+        indirection, and indirection is precisely what C-1 refuses."""
+        return bool(self._parameters) and name in self._parameters[-1]
 
-    # -- classification d'une valeur affectee a un statut -------------------- #
+    # -- classification of a value assigned to a status --------------------- #
 
     @classmethod
-    def _deballer(cls, valeur):
-        """Retire les enveloppes **transparentes** : `str(<valeur>)`.
+    def _unwrap(cls, value):
+        """Strips the **transparent** wrappers: `str(<value>)`.
 
-        Ce n'est pas une forme reconnue de plus, c'est une reecriture : ce qui est
-        dedans redescend dans les trois memes categories. `str(_TABLE["cle"])` reste
-        donc opaque, `str(result.status)` reste une propagation.
+        This is not one more recognized form, it is a rewrite: what sits inside falls
+        back through the same three categories. `str(_TABLE["key"])` therefore stays
+        opaque, `str(result.status)` stays a propagation.
         """
         if (
-            isinstance(valeur, ast.Call)
-            and getattr(valeur.func, "id", None) in ENVELOPPES_TRANSPARENTES
-            and len(valeur.args) == 1
-            and not valeur.keywords
-            and not isinstance(valeur.args[0], ast.Starred)
+            isinstance(value, ast.Call)
+            and getattr(value.func, "id", None) in TRANSPARENT_WRAPPERS
+            and len(value.args) == 1
+            and not value.keywords
+            and not isinstance(value.args[0], ast.Starred)
         ):
-            return cls._deballer(valeur.args[0])
-        return valeur
+            return cls._unwrap(value.args[0])
+        return value
 
-    def _classer_valeur(self, stmt, valeur, motif):
-        valeur = self._deballer(valeur)
-        if isinstance(valeur, ast.Constant):
-            if isinstance(valeur.value, str):
-                self.statuts.add(valeur.value)     # (1) canonique
-            return                                 # constante non textuelle : hors sujet
+    def _classify_value(self, stmt, value, reason):
+        value = self._unwrap(value)
+        if isinstance(value, ast.Constant):
+            if isinstance(value.value, str):
+                self.statuses.add(value.value)     # (1) canonical
+            return                                 # non-text constant: off topic
         if (
-            isinstance(valeur, ast.Name)
-            and valeur.id in ATTRIBUTS_DE_STATUT
-            and self._est_un_parametre(valeur.id)
+            isinstance(value, ast.Name)
+            and value.id in STATUS_ATTRIBUTES
+            and self._is_a_parameter(value.id)
         ):
-            return                                 # (2) `self.status = status`
-        if isinstance(valeur, ast.Attribute) and valeur.attr in ATTRIBUTS_DE_STATUT:
-            return                                 # (2) `work.status = exc.status`
-        self._opaque(stmt, motif)                  # (3) opaque
+            return                                 # (2) self.status = status
+        if isinstance(value, ast.Attribute) and value.attr in STATUS_ATTRIBUTES:
+            return                                 # (2) work.status = exc.status
+        self._opaque(stmt, reason)                 # (3) opaque
 
-    # -- reconnaissance des cibles ------------------------------------------ #
+    # -- target recognition ------------------------------------------------- #
 
     @staticmethod
-    def _cle_de_souscription(cible):
-        cle = cible.slice
-        if cle.__class__.__name__ == "Index":      # Python < 3.9
-            cle = cle.value                        # pragma: no cover
-        return cle
+    def _subscript_key(target):
+        key = target.slice
+        if key.__class__.__name__ == "Index":      # Python < 3.9
+            key = key.value                        # pragma: no cover
+        return key
 
     @classmethod
-    def _designe_un_statut(cls, cible):
-        if isinstance(cible, ast.Starred):
-            cible = cible.value
-        if isinstance(cible, ast.Attribute):
-            return cible.attr in ATTRIBUTS_DE_STATUT
-        if isinstance(cible, ast.Subscript):
-            cle = cls._cle_de_souscription(cible)
+    def _designates_a_status(cls, target):
+        if isinstance(target, ast.Starred):
+            target = target.value
+        if isinstance(target, ast.Attribute):
+            return target.attr in STATUS_ATTRIBUTES
+        if isinstance(target, ast.Subscript):
+            key = cls._subscript_key(target)
             return (
-                isinstance(cle, ast.Constant)
-                and isinstance(cle.value, str)
-                and cle.value in CLES_DE_STATUT
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and key.value in STATUS_KEYS
             )
-        if isinstance(cible, (ast.Tuple, ast.List)):
-            return any(cls._designe_un_statut(sous) for sous in cible.elts)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(cls._designates_a_status(sub) for sub in target.elts)
         return False
 
-    def _cible_assignee(self, stmt, cible, valeur):
-        if isinstance(cible, (ast.Tuple, ast.List, ast.Starred)):
-            if self._designe_un_statut(cible):
+    def _assigned_target(self, stmt, target, value):
+        if isinstance(target, (ast.Tuple, ast.List, ast.Starred)):
+            if self._designates_a_status(target):
                 self._opaque(
                     stmt,
-                    "affectation deballee : la valeur qui atterrit dans le statut n'est "
-                    "pas isolable. Forme canonique attendue : une affectation simple.",
+                    "unpacking assignment: the value that lands in the status cannot "
+                    "be isolated. Expected canonical form: a plain assignment.",
                 )
             return
-        if not self._designe_un_statut(cible):
+        if not self._designates_a_status(target):
             return
-        self._classer_valeur(
+        self._classify_value(
             stmt,
-            valeur,
-            "ecriture d'un statut par une expression non litterale et non reconnue "
-            "comme propagation. Formes canoniques : `<obj>.status = \"<statut>\"`, ou "
-            "propagation depuis `status` / `<expr>.status`.",
+            value,
+            "a status written by an expression that is neither a literal nor a "
+            "recognized propagation. Canonical forms: `<obj>.status = \"<status>\"`, "
+            "or propagation from `status` / `<expr>.status`.",
         )
 
-    # -- visites ------------------------------------------------------------ #
+    # -- visits ------------------------------------------------------------- #
 
     def visit_Assign(self, node):
-        for cible in node.targets:
-            self._cible_assignee(node, cible, node.value)
+        for target in node.targets:
+            self._assigned_target(node, target, node.value)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node):
         if node.value is not None:
-            self._cible_assignee(node, node.target, node.value)
+            self._assigned_target(node, node.target, node.value)
         self.generic_visit(node)
 
     def visit_AugAssign(self, node):
-        if self._designe_un_statut(node.target):
+        if self._designates_a_status(node.target):
             self._opaque(
                 node,
-                "affectation augmentee sur un statut : la valeur resultante ne se lit "
-                "pas dans la source.",
+                "augmented assignment on a status: the resulting value cannot be read "
+                "in the source.",
             )
         self.generic_visit(node)
 
     def visit_For(self, node):
-        if self._designe_un_statut(node.target):
+        if self._designates_a_status(node.target):
             self._opaque(
                 node,
-                "statut affecte par une boucle : la valeur ne se lit pas dans la source.",
+                "status assigned by a loop: the value cannot be read in the source.",
             )
         self.generic_visit(node)
 
     def visit_With(self, node):
         for item in node.items:
-            if item.optional_vars is not None and self._designe_un_statut(
+            if item.optional_vars is not None and self._designates_a_status(
                 item.optional_vars
             ):
                 self._opaque(
                     node,
-                    "statut affecte par un gestionnaire de contexte : la valeur ne se "
-                    "lit pas dans la source.",
+                    "status assigned by a context manager: the value cannot be read "
+                    "in the source.",
                 )
         self.generic_visit(node)
 
     def visit_Call(self, node):
-        nom = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if nom in CONSTRUCTEURS_DE_REJET:
-            self._classer_rejet(node)
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name in REJECTION_CONSTRUCTORS:
+            self._classify_rejection(node)
         else:
-            if nom == "setattr":
-                self._classer_setattr(node)
+            if name == "setattr":
+                self._classify_setattr(node)
             for kw in node.keywords:
-                if kw.arg in ARGUMENTS_DE_STATUT:
-                    self._classer_valeur(
+                if kw.arg in STATUS_ARGUMENTS:
+                    self._classify_value(
                         node,
                         kw.value,
-                        "statut passe en argument nomme par une expression non "
-                        "litterale et non reconnue comme propagation.",
+                        "a status passed as a keyword argument by an expression that "
+                        "is neither a literal nor a recognized propagation.",
                     )
         self.generic_visit(node)
 
-    # -- formes particulieres ----------------------------------------------- #
+    # -- special forms ------------------------------------------------------ #
 
-    def _classer_rejet(self, node):
-        """`EventRejected(...)` : le statut est le **premier argument positionnel**.
+    def _classify_rejection(self, node):
+        """`EventRejected(...)`: the status is the **first positional argument**.
 
-        Toute autre forme est refusee — y compris l'argument nomme, qui serait pourtant
-        lisible. C'est deliberé : une seule forme canonique laisse un seul chemin a
-        surveiller, la ou deux formes tolerees en appellent une troisieme.
+        Any other shape is refused - including the keyword argument, which would
+        however be readable. This is deliberate: a single canonical form leaves a
+        single path to watch, where two tolerated forms call for a third.
         """
         for kw in node.keywords:
             if kw.arg is None:
                 self._opaque(
                     node,
-                    "expansion `**` : les arguments d'EventRejected ne sont pas "
-                    "lisibles dans la source.",
+                    "`**` expansion: the arguments of EventRejected cannot be read in "
+                    "the source.",
                 )
                 return
-            if kw.arg in ARGUMENTS_DE_STATUT:
+            if kw.arg in STATUS_ARGUMENTS:
                 self._opaque(
                     node,
-                    "statut porte en argument nomme. Forme canonique attendue : "
-                    "EventRejected(\"<statut>\", <erreur>).",
+                    "status carried as a keyword argument. Expected canonical form: "
+                    "EventRejected(\"<status>\", <error>).",
                 )
                 return
         if not node.args:
             self._opaque(
                 node,
-                "EventRejected sans argument positionnel : le statut n'est pas "
-                "localisable.",
+                "EventRejected with no positional argument: the status cannot be "
+                "located.",
             )
             return
-        premier = node.args[0]
-        if isinstance(premier, ast.Starred):
+        first = node.args[0]
+        if isinstance(first, ast.Starred):
             self._opaque(
                 node,
-                "expansion `*` en premier argument : le statut n'est pas lisible dans "
-                "la source.",
+                "`*` expansion as first argument: the status cannot be read in the "
+                "source.",
             )
             return
-        if isinstance(premier, ast.Constant) and isinstance(premier.value, str):
-            self.statuts.add(premier.value)
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            self.statuses.add(first.value)
             return
         self._opaque(
             node,
-            "premier argument d'EventRejected non litteral (indirection). Forme "
-            "canonique attendue : EventRejected(\"<statut>\", <erreur>).",
+            "first argument of EventRejected is not a literal (indirection). Expected "
+            "canonical form: EventRejected(\"<status>\", <error>).",
         )
 
-    def _classer_setattr(self, node):
-        """`setattr` est une ecriture d'attribut que le nom seul ne trahit pas."""
+    def _classify_setattr(self, node):
+        """`setattr` is an attribute write that the name alone does not betray."""
         if node.keywords or len(node.args) != 3:
             self._opaque(
                 node,
-                "`setattr` de forme inattendue : impossible d'etablir s'il vise un "
-                "statut.",
+                "`setattr` of unexpected shape: impossible to establish whether it "
+                "targets a status.",
             )
             return
-        nom = node.args[1]
-        if not (isinstance(nom, ast.Constant) and isinstance(nom.value, str)):
+        name = node.args[1]
+        if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
             self._opaque(
                 node,
-                "`setattr` dont le nom d'attribut n'est pas litteral : il peut viser "
+                "`setattr` whose attribute name is not a literal: it may target "
                 "`status`.",
             )
             return
-        if nom.value in ATTRIBUTS_DE_STATUT:
-            self._classer_valeur(
+        if name.value in STATUS_ATTRIBUTES:
+            self._classify_value(
                 node,
                 node.args[2],
-                "statut ecrit par `setattr` avec une valeur non litterale.",
+                "a status written by `setattr` with a non-literal value.",
             )
 
 
-def balayer_source(texte, module="<extrait>"):
-    """Balaye un fragment de source. Renvoie `(statuts, sites opaques)`."""
-    balayeur = _Balayeur(module, texte)
-    balayeur.visit(ast.parse(texte))
-    return balayeur.statuts, balayeur.opaques
+def scan_source(text, module="<fragment>"):
+    """Scans one source fragment. Returns `(statuses, opaque sites)`."""
+    scanner = _Scanner(module, text)
+    scanner.visit(ast.parse(text))
+    return scanner.statuses, scanner.opaque_sites
 
 
-def balayer_le_noyau():
-    """Balaye `SOURCES`. Renvoie `(statuts, sites opaques)`."""
-    statuts = set()
-    opaques = []
-    for chemin in SOURCES:
-        with open(chemin, encoding="utf-8") as flux:
-            texte = flux.read()
-        vus, muets = balayer_source(texte, os.path.basename(chemin))
-        statuts |= vus
-        opaques.extend(muets)
-    return statuts, opaques
+def scan_the_core():
+    """Scans `SOURCES`. Returns `(statuses, opaque sites)`."""
+    statuses = set()
+    opaque_sites = []
+    for path in SOURCES:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        seen, silent = scan_source(text, os.path.basename(path))
+        statuses |= seen
+        opaque_sites.extend(silent)
+    return statuses, opaque_sites
 
 
-def statuts_produits_par_le_code():
-    """Union des statuts litteraux de tous les modules du noyau."""
-    return balayer_le_noyau()[0]
+def statuses_produced_by_the_code():
+    """Union of the literal statuses of every core module."""
+    return scan_the_core()[0]
 
 
-def _appliquer_exemptions(opaques):
-    """Renvoie `(sites non exemptes, index des exemptions effectivement utilisees)`."""
-    index = {(mod, portee, src): rang
-             for rang, (mod, portee, src, _) in enumerate(EXEMPTIONS)}
-    restants = []
-    utilisees = set()
-    for site in opaques:
-        rang = index.get(site.cle())
-        if rang is None:
-            restants.append(site)
+def _apply_exemptions(opaque_sites):
+    """Returns `(non-exempted sites, index of exemptions actually used)`."""
+    index = {(mod, scope, src): rank
+             for rank, (mod, scope, src, _) in enumerate(EXEMPTIONS)}
+    remaining = []
+    used = set()
+    for site in opaque_sites:
+        rank = index.get(site.key())
+        if rank is None:
+            remaining.append(site)
         else:
-            utilisees.add(rang)
-    return restants, utilisees
+            used.add(rank)
+    return remaining, used
 
 
 # --------------------------------------------------------------------------- #
-# L'enumeration du code
+# The enumeration of the code
 # --------------------------------------------------------------------------- #
 
-class EnumerationDeriveeDuCodeTest(unittest.TestCase):
-    """`ACL_STATUSES` est la projection exacte de ce que le noyau produit."""
+class EnumerationDerivedFromTheCodeTest(unittest.TestCase):
+    """`ACL_STATUSES` is the exact projection of what the core produces."""
 
-    def test_le_code_ne_produit_aucun_statut_non_declare(self):
-        """Le sens fort : un statut ajoute au code fait echouer la suite ici meme."""
-        inconnus = statuts_produits_par_le_code() - set(ACL_STATUSES)
+    def test_the_code_produces_no_undeclared_status(self):
+        """The strong direction: a status added to the code fails the suite right here."""
+        unknown = statuses_produced_by_the_code() - set(ACL_STATUSES)
         self.assertEqual(
-            set(), inconnus,
-            "statut(s) produits par le noyau et absents de ACL_STATUSES : %s. Un "
-            "statut ne s'ajoute pas sans etre declare, ni sans son cas de test dans "
-            "l'invariant 1 du §8.2." % sorted(inconnus),
+            set(), unknown,
+            "status(es) produced by the core and absent from ACL_STATUSES: %s. A "
+            "status is not added without being declared, nor without its test case in "
+            "invariant 1 of section 8.2." % sorted(unknown),
         )
 
-    def test_aucun_statut_declare_nest_mort(self):
-        """Le sens inverse : une valeur declaree que le code ne produit plus est un
-        residu, et un residu dans une enumeration est le debut de la derive."""
-        morts = set(ACL_STATUSES) - statuts_produits_par_le_code()
+    def test_no_declared_status_is_dead(self):
+        """The reverse direction: a declared value that the code no longer produces is
+        a residue, and a residue in an enumeration is where drift starts."""
+        dead = set(ACL_STATUSES) - statuses_produced_by_the_code()
         self.assertEqual(
-            set(), morts,
-            "statut(s) declares dans ACL_STATUSES que le noyau ne produit plus : %s"
-            % sorted(morts),
+            set(), dead,
+            "status(es) declared in ACL_STATUSES that the core no longer produces: %s"
+            % sorted(dead),
         )
 
-    def test_lextraction_nest_pas_vide(self):
-        """Garde-fou contre le « zero produit par un instrument mort » : une extraction
-        qui ne trouverait rien rendrait les deux tests precedents vrais par vacuite."""
-        self.assertGreaterEqual(len(statuts_produits_par_le_code()), 12)
+    def test_the_extraction_is_not_empty(self):
+        """Guard rail against the "zero produced by a dead instrument": an extraction
+        that found nothing would make the two tests above true by vacuity."""
+        self.assertGreaterEqual(len(statuses_produced_by_the_code()), 12)
 
-    def test_lenumeration_est_sans_doublon(self):
+    def test_the_enumeration_has_no_duplicate(self):
         self.assertEqual(len(ACL_STATUSES), len(set(ACL_STATUSES)))
 
 
 # --------------------------------------------------------------------------- #
-# L'inconnu echoue
+# The unknown fails
 # --------------------------------------------------------------------------- #
 
-class AucunAngleMortSilencieuxTest(unittest.TestCase):
-    """Le controle central : ce que l'extracteur ne sait pas lire, il le refuse."""
+class NoSilentBlindSpotTest(unittest.TestCase):
+    """The central control: what the extractor cannot read, it refuses."""
 
-    def test_aucune_construction_de_statut_nechappe_a_lextracteur(self):
-        _, opaques = balayer_le_noyau()
-        restants, _ = _appliquer_exemptions(opaques)
+    def test_no_status_construct_escapes_the_extractor(self):
+        _, opaque_sites = scan_the_core()
+        remaining, _ = _apply_exemptions(opaque_sites)
         self.assertEqual(
-            [], restants,
-            "construction(s) touchant un `acl_status` que l'extracteur ne sait pas "
-            "interpreter avec certitude. Chacune doit etre reecrite sous forme "
-            "canonique, ou couverte par une entree justifiee de EXEMPTIONS, ou "
-            "l'extracteur doit etre etendu — jamais ignoree :\n    - %s"
-            % "\n    - ".join(repr(site) for site in restants),
+            [], remaining,
+            "construct(s) touching an `acl_status` that the extractor cannot "
+            "interpret with certainty. Each one must be rewritten in canonical form, "
+            "or covered by a justified entry of EXEMPTIONS, or the extractor must be "
+            "extended - never ignored:\n    - %s"
+            % "\n    - ".join(repr(site) for site in remaining),
         )
 
-    def test_les_exemptions_declarees_correspondent_toutes_a_une_construction(self):
-        """Une exemption morte est un trou qui a survecu a son motif."""
-        _, opaques = balayer_le_noyau()
-        _, utilisees = _appliquer_exemptions(opaques)
-        mortes = [EXEMPTIONS[rang][:3]
-                  for rang in range(len(EXEMPTIONS)) if rang not in utilisees]
+    def test_every_declared_exemption_matches_a_construct(self):
+        """A dead exemption is a hole that outlived its motive."""
+        _, opaque_sites = scan_the_core()
+        _, used = _apply_exemptions(opaque_sites)
+        dead = [EXEMPTIONS[rank][:3]
+                for rank in range(len(EXEMPTIONS)) if rank not in used]
         self.assertEqual(
-            [], mortes,
-            "exemption(s) declaree(s) ne correspondant plus a aucune construction du "
-            "noyau : %s. Une exemption survit rarement au code qui l'a motivee ; la "
-            "retirer, ou la reajuster en connaissance de cause." % (mortes,),
+            [], dead,
+            "declared exemption(s) no longer matching any construct of the core: %s. "
+            "An exemption rarely survives the code that motivated it; remove it, or "
+            "readjust it knowingly." % (dead,),
         )
 
 
-class ExtracteurEprouveTest(unittest.TestCase):
-    """L'extracteur lui-meme est mis a l'epreuve, sur des fragments construits.
+class ExtractorIsProvenTest(unittest.TestCase):
+    """The extractor itself is put to the test, on constructed fragments.
 
-    Sans cela, les tests ci-dessus mesureraient un instrument dont rien n'etablit qu'il
-    voit encore quoi que ce soit.
+    Without this, the tests above would measure an instrument that nothing shows still
+    sees anything at all.
     """
 
-    #: Les deux formes canoniques, sous leurs quatre ecritures.
-    FORMES_CANONIQUES = (
-        ('raise EventRejected("par_exception", "motif")', "par_exception"),
-        ('errors.EventRejected("par_exception_qualifiee", "m")',
-         "par_exception_qualifiee"),
-        ('work.status = "par_affectation"', "par_affectation"),
-        ('self.status = "par_affectation_self"', "par_affectation_self"),
-        ('output["acl_status"] = "par_souscription"', "par_souscription"),
-        ('EventResult(status="par_argument_nomme")', "par_argument_nomme"),
+    #: The two canonical forms, under their four spellings.
+    CANONICAL_FORMS = (
+        ('raise EventRejected("by_exception", "reason")', "by_exception"),
+        ('errors.EventRejected("by_qualified_exception", "r")',
+         "by_qualified_exception"),
+        ('work.status = "by_assignment"', "by_assignment"),
+        ('self.status = "by_self_assignment"', "by_self_assignment"),
+        ('output["acl_status"] = "by_subscript"', "by_subscript"),
+        ('EventResult(status="by_keyword_argument")', "by_keyword_argument"),
     )
 
-    #: Les propagations : un statut ne ailleurs, deja collecte a sa naissance. Elles
-    #: sont donnees dans leur fonction englobante — la propagation depuis un nom exige
-    #: que ce nom soit un **parametre**.
-    FORMES_PROPAGEES = (
+    #: The propagations: a status born elsewhere, already collected at its birth. They
+    #: are given inside their enclosing function - propagation from a name requires
+    #: that name to be a **parameter**.
+    PROPAGATED_FORMS = (
         "def f(work, exc):\n    work.status = exc.status\n",
         "def __init__(self, status, error):\n    self.status = status\n",
         "def result(self):\n    return EventResult(status=self.status)\n",
-        'def ecrire(record, result):\n    record["status"] = str(result.status)\n',
+        'def write(record, result):\n    record["status"] = str(result.status)\n',
     )
 
-    #: Les formes que l'extracteur ne sait pas interpreter. Chacune **doit** echouer.
-    #: Les deux premieres sont exactement celles que l'audit de cloture a injectees dans
-    #: le noyau et qui ont laisse la suite entiere au vert.
-    FORMES_REFUSEES = (
-        'raise EventRejected(status="statut_furtif_kw", error="sonde")',
-        'work.status = _STATUT_FURTIF_INDIRECT',
-        'raise EventRejected(_STATUT, "sonde")',
+    #: The forms the extractor cannot interpret. Each one **must** fail. The first two
+    #: are exactly the ones the closing audit injected into the core, and which left
+    #: the whole suite green.
+    REFUSED_FORMS = (
+        'raise EventRejected(status="stealth_status_kw", error="probe")',
+        'work.status = _STEALTH_STATUS_INDIRECT',
+        'raise EventRejected(_STATUS, "probe")',
         'raise EventRejected(*args)',
-        'raise EventRejected(**charge)',
+        'raise EventRejected(**payload)',
         'raise EventRejected()',
-        'work.status = choisir_le_statut()',
+        'work.status = pick_the_status()',
         'work.status = "a" if condition else "b"',
-        'work.status = _TABLE["cle"]',
-        # l'enveloppe transparente ne blanchit pas ce qu'elle enveloppe
-        'work.status = str(_TABLE["cle"])',
+        'work.status = _TABLE["key"]',
+        # the transparent wrapper does not whitewash what it wraps
+        'work.status = str(_TABLE["key"])',
         'work.status = str(a, b)',
-        'work.status, work.error = _paire()',
-        'work.status += "_suffixe"',
-        'setattr(work, "status", _STATUT_FURTIF_INDIRECT)',
-        'setattr(work, nom_calcule, "statut_furtif")',
-        'output["acl_status"] = _STATUT_FURTIF_INDIRECT',
-        'EventResult(status=calculer())',
-        'for work.status in _STATUTS: pass',
-        # variable **locale** nommee `status` : ce n'est pas une propagation, c'est
-        # l'indirection par constante deguisee en propagation.
-        'def f(work):\n    status = "statut_furtif_local"\n    work.status = status\n',
+        'work.status, work.error = _pair()',
+        'work.status += "_suffix"',
+        'setattr(work, "status", _STEALTH_STATUS_INDIRECT)',
+        'setattr(work, computed_name, "stealth_status")',
+        'output["acl_status"] = _STEALTH_STATUS_INDIRECT',
+        'EventResult(status=compute())',
+        'for work.status in _STATUSES: pass',
+        # a **local** variable named `status`: this is not a propagation, it is
+        # indirection by constant, disguised as propagation.
+        'def f(work):\n    status = "stealth_status_local"\n    work.status = status\n',
     )
 
-    def test_les_formes_canoniques_sont_reconnues_et_collectees(self):
-        for source, attendu in self.FORMES_CANONIQUES:
+    def test_the_canonical_forms_are_recognized_and_collected(self):
+        for source, expected in self.CANONICAL_FORMS:
             with self.subTest(source=source):
-                statuts, opaques = balayer_source(source)
-                self.assertEqual([], opaques, "forme canonique jugee opaque")
-                self.assertEqual({attendu}, statuts)
+                statuses, opaque_sites = scan_source(source)
+                self.assertEqual([], opaque_sites, "canonical form judged opaque")
+                self.assertEqual({expected}, statuses)
 
-    def test_les_propagations_sont_reconnues_et_ne_collectent_rien(self):
-        for source in self.FORMES_PROPAGEES:
+    def test_the_propagations_are_recognized_and_collect_nothing(self):
+        for source in self.PROPAGATED_FORMS:
             with self.subTest(source=source):
-                statuts, opaques = balayer_source(source)
-                self.assertEqual([], opaques, "propagation jugee opaque")
-                self.assertEqual(set(), statuts)
+                statuses, opaque_sites = scan_source(source)
+                self.assertEqual([], opaque_sites, "propagation judged opaque")
+                self.assertEqual(set(), statuses)
 
-    def test_toute_forme_non_reconnue_est_refusee(self):
-        """Le coeur de C-1 : l'inconnu echoue, et il se nomme."""
-        for source in self.FORMES_REFUSEES:
+    def test_every_unrecognized_form_is_refused(self):
+        """The heart of C-1: the unknown fails, and it names itself."""
+        for source in self.REFUSED_FORMS:
             with self.subTest(source=source):
-                _, opaques = balayer_source(source, "extrait.py")
+                _, opaque_sites = scan_source(source, "fragment.py")
                 self.assertEqual(
-                    1, len(opaques),
-                    "forme non reconnue passee en silence : %s" % source,
+                    1, len(opaque_sites),
+                    "unrecognized form passed over in silence: %s" % source,
                 )
-                site = opaques[0]
-                self.assertEqual("extrait.py", site.module)
-                self.assertTrue(site.motif, "un refus sans motif n'aide personne")
-                self.assertGreaterEqual(site.ligne, 1)
+                site = opaque_sites[0]
+                self.assertEqual("fragment.py", site.module)
+                self.assertTrue(site.reason, "a refusal without a reason helps nobody")
+                self.assertGreaterEqual(site.line, 1)
                 self.assertIn(site.source, re.sub(r"[ \t]+", " ", source))
 
-    def test_le_noyau_reel_ne_declenche_aucun_refus(self):
-        """Le troisieme cas : sur le code livre, le controle est muet."""
-        statuts, opaques = balayer_le_noyau()
-        restants, _ = _appliquer_exemptions(opaques)
-        self.assertEqual([], restants)
-        self.assertEqual(set(ACL_STATUSES), statuts)
+    def test_the_real_core_triggers_no_refusal(self):
+        """The third case: on the shipped code, the control stays silent."""
+        statuses, opaque_sites = scan_the_core()
+        remaining, _ = _apply_exemptions(opaque_sites)
+        self.assertEqual([], remaining)
+        self.assertEqual(set(ACL_STATUSES), statuses)
 
 
 # --------------------------------------------------------------------------- #
-# L'enumeration du README
+# The enumeration of the README
 # --------------------------------------------------------------------------- #
 
-#: `Les etats terminaux … sont les douze `acl_status`.` — la seule tournure du README
-#: qui chiffre l'enumeration en toutes lettres.
-_COMPTE_README = re.compile(r"\bles\s+([a-zéèêë]+)\s+`acl_status`", re.IGNORECASE)
+#: The README is deliberately not translated yet, so the pattern below is written in
+#: French on purpose: it matches the one turn of phrase in the document that spells the
+#: size of the enumeration out in words. It is **data matching an untranslated file**,
+#: not prose - hence the accented letters in its character class.
+_README_COUNT = re.compile(r"\bles\s+([a-zéèêë]+)\s+`acl_status`", re.IGNORECASE)
 
-#: Assez de cardinaux pour encadrer une evolution ; **un mot absent de la table fait
-#: echouer**, plutot que de laisser passer un compte non verifie.
-_CARDINAUX = {
+#: Enough cardinals to frame an evolution; **a word absent from the table fails**,
+#: rather than letting an unverified count through. The keys are French because the
+#: README is.
+_CARDINALS = {
     "dix": 10, "onze": 11, "douze": 12, "treize": 13, "quatorze": 14,
     "quinze": 15, "seize": 16,
 }
 
 
-class ReadmeArrimeALaSourceUniqueTest(unittest.TestCase):
-    """C-2 — l'enumeration du README livre est derivee de `ACL_STATUSES`.
+class ReadmeAnchoredToTheSingleSourceTest(unittest.TestCase):
+    """C-2 - the enumeration of the shipped README is derived from `ACL_STATUSES`.
 
-    Le README recopiait les douze valeurs a la main : exactes le jour de l'audit, et
-    sans aucun lien avec la source. C'est la classe d'erreur de D-35, du cote de la
-    documentation livree. Ces tests posent le lien manquant.
+    The README used to copy the twelve values by hand: exact on the day of the audit,
+    and with no link whatsoever to the source. That is the error class of D-35, on the
+    shipped-documentation side. These tests establish the missing link.
 
-    Portee : ils arriment **l'enumeration**, le **compte** et la **machine a etats** du
-    `README.md`. Ils ne disent rien de la justesse des libelles qui decrivent chaque
-    statut ailleurs dans le document, ni du cahier des charges, qu'aucun test du depot
-    ne peut atteindre.
+    Reach: they anchor the **enumeration**, the **count** and the **state machine** of
+    `README.md`. They say nothing about the correctness of the wording that describes
+    each status elsewhere in the document, nor about the specification, which no test
+    of the repository can reach.
     """
 
     @classmethod
     def setUpClass(cls):
-        with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as flux:
-            cls.readme = flux.read()
+        with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as handle:
+            cls.readme = handle.read()
 
-    def _ligne_du_tableau(self):
-        lignes = [
-            ligne for ligne in self.readme.splitlines()
-            if ligne.startswith("| `acl_status` |")
+    def _table_row(self):
+        rows = [
+            row for row in self.readme.splitlines()
+            if row.startswith("| `acl_status` |")
         ]
         self.assertEqual(
-            1, len(lignes),
-            "le README doit porter exactement une ligne de tableau enumerant les "
-            "`acl_status` ; %d trouvee(s)." % len(lignes),
+            1, len(rows),
+            "the README must carry exactly one table row enumerating the "
+            "`acl_status` values; %d found." % len(rows),
         )
-        return lignes[0]
+        return rows[0]
 
-    def test_lenumeration_du_readme_egale_ACL_STATUSES(self):
-        """Un statut ajoute sans mise a jour du README fait echouer la suite ici."""
-        cellule = self._ligne_du_tableau().split("|")[2]
-        enumeres = re.findall(r"`([^`]+)`", cellule)
+    def test_the_readme_enumeration_equals_ACL_STATUSES(self):
+        """A status added without a README update fails the suite here."""
+        cell = self._table_row().split("|")[2]
+        enumerated = re.findall(r"`([^`]+)`", cell)
         self.assertEqual(
-            list(ACL_STATUSES), enumeres,
-            "le tableau des champs de sortie du README diverge de ACL_STATUSES "
-            "(ordre compris). Manquants : %s ; en trop : %s."
-            % (sorted(set(ACL_STATUSES) - set(enumeres)),
-               sorted(set(enumeres) - set(ACL_STATUSES))),
+            list(ACL_STATUSES), enumerated,
+            "the output-field table of the README diverges from ACL_STATUSES (order "
+            "included). Missing: %s ; extra: %s."
+            % (sorted(set(ACL_STATUSES) - set(enumerated)),
+               sorted(set(enumerated) - set(ACL_STATUSES))),
         )
 
-    def test_le_compte_annonce_par_le_readme_est_juste(self):
-        """« les douze `acl_status` » est une enumeration deguisee en nombre."""
-        mots = _COMPTE_README.findall(self.readme)
+    def test_the_count_announced_by_the_readme_is_right(self):
+        """The README spells the size of the enumeration out in words, which is an
+        enumeration disguised as a number."""
+        words = _README_COUNT.findall(self.readme)
         self.assertTrue(
-            mots, "le README n'annonce plus le nombre d'`acl_status` en toutes lettres ; "
-                  "si la tournure a change, ce controle doit etre reajuste, pas retire.",
+            words, "the README no longer announces the number of `acl_status` values "
+                   "in words; if the wording changed, this control must be readjusted, "
+                   "not removed.",
         )
-        for mot in mots:
-            with self.subTest(mot=mot):
+        for word in words:
+            with self.subTest(word=word):
                 self.assertIn(
-                    mot.lower(), _CARDINAUX,
-                    "cardinal « %s » absent de la table : compte invérifiable, donc "
-                    "refuse." % mot,
+                    word.lower(), _CARDINALS,
+                    "cardinal \"%s\" absent from the table: count unverifiable, "
+                    "therefore refused." % word,
                 )
                 self.assertEqual(
-                    len(ACL_STATUSES), _CARDINAUX[mot.lower()],
-                    "le README annonce « %s » `acl_status`, ACL_STATUSES en porte %d."
-                    % (mot, len(ACL_STATUSES)),
+                    len(ACL_STATUSES), _CARDINALS[word.lower()],
+                    "the README announces \"%s\" `acl_status` values, ACL_STATUSES "
+                    "carries %d." % (word, len(ACL_STATUSES)),
                 )
 
-    def test_la_machine_a_etats_du_readme_couvre_tous_les_statuts(self):
-        """Le diagramme est la troisieme copie de l'enumeration dans le document."""
-        blocs = [
-            bloc for bloc in re.findall(r"```mermaid\n(.*?)```", self.readme, re.S)
-            if "stateDiagram" in bloc
+    def test_the_readme_state_machine_covers_every_status(self):
+        """The diagram is the third copy of the enumeration in the document."""
+        blocks = [
+            block for block in re.findall(r"```mermaid\n(.*?)```", self.readme, re.S)
+            if "stateDiagram" in block
         ]
-        self.assertEqual(1, len(blocs), "un seul diagramme d'etats attendu")
-        cibles = set(re.findall(r"-->\s*([A-Za-z_][A-Za-z0-9_]*)", blocs[0]))
-        manquants = sorted(set(ACL_STATUSES) - cibles)
+        self.assertEqual(1, len(blocks), "exactly one state diagram expected")
+        targets = set(re.findall(r"-->\s*([A-Za-z_][A-Za-z0-9_]*)", blocks[0]))
+        missing = sorted(set(ACL_STATUSES) - targets)
         self.assertEqual(
-            [], manquants,
-            "statut(s) declares dans ACL_STATUSES et absents de la machine a etats du "
-            "README : %s." % manquants,
+            [], missing,
+            "status(es) declared in ACL_STATUSES and absent from the state machine of "
+            "the README: %s." % missing,
         )
 
 

@@ -1,26 +1,26 @@
-"""Enveloppe `bin/editacl.py` — chemin d'erreur fatale et collision de noms d'attributs.
+"""The `bin/editacl.py` wrapper - fatal error path and attribute name collision.
 
-Ce module est le seul a exercer `bin/editacl.py` lui-meme. Il le charge avec un **SDK
-factice** injecte dans `sys.modules`, jamais avec le SDK vendorise : `bin/lib` n'entre
-donc pas dans `sys.path` de la suite, et le §11.1 reste satisfait — hors Splunk, sans
-reseau.
+This module is the only one that exercises `bin/editacl.py` itself. It loads it with a
+**fake SDK** injected into `sys.modules`, never with the vendored SDK: `bin/lib`
+therefore never enters the `sys.path` of the suite, and section 11.1 stays satisfied -
+outside Splunk, with no network.
 
-Le faux SDK reproduit **une seule chose, mais exactement** : la regle de nommage du
-champ de stockage d'une `Option`, `backing_field_name = "_" + name`
-(`splunklib/searchcommands/decorators.py`). C'est cette regle qui fait qu'une option
-nommee `journal` occupe l'attribut `_journal` de l'instance — le meme que celui ou
-l'adaptateur rangeait son `JournalWriter`.
+The fake SDK reproduces **one single thing, but exactly**: the naming rule of the
+backing field of an `Option`, `backing_field_name = "_" + name`
+(`splunklib/searchcommands/decorators.py`). It is that rule which makes an option named
+`journal` occupy the `_journal` attribute of the instance - the very one where the
+adapter used to store its `JournalWriter`.
 
-La collision est **bidirectionnelle** :
+The collision is **two-way**:
 
-- avant `_setup()`, l'attribut porte le booleen de l'option, et tout `close()` sur lui
-  leve `AttributeError` ;
-- apres `_setup()`, l'ecriture du writer **ecrase la valeur de l'option**, qui n'est
-  plus lisible.
+- before `_setup()`, the attribute carries the boolean of the option, and any `close()`
+  on it raises `AttributeError`;
+- after `_setup()`, writing the writer **overwrites the value of the option**, which
+  then can no longer be read.
 
-Elle ne se manifeste que sur le chemin d'erreur fatale anterieur a l'ouverture du
-journal — typiquement l'echec du controle d'habilitation — c'est-a-dire exactement au
-moment ou l'operateur a besoin du message. Elle le remplace par une trace Python.
+It only shows up on the fatal error path prior to the opening of the journal -
+typically the failure of the capability check - that is, at exactly the moment when the
+operator needs the message. It replaces that message with a Python traceback.
 """
 
 import ast
@@ -35,11 +35,11 @@ SDK_DIR = os.path.join(BIN_DIR, "lib", "splunk" + "lib", "searchcommands")
 
 
 # --------------------------------------------------------------------------- #
-# Faux SDK — strictement ce que `bin/editacl.py` importe
+# Fake SDK - strictly what `bin/editacl.py` imports
 # --------------------------------------------------------------------------- #
 
 class _FakeOption(object):
-    """Descripteur reproduisant la regle de nommage du champ de stockage du SDK."""
+    """Descriptor reproducing the naming rule of the SDK's backing field."""
 
     def __init__(self, doc=None, require=False, default=None, validate=None):
         self.default = default
@@ -47,7 +47,7 @@ class _FakeOption(object):
 
     def __set_name__(self, owner, name):
         self.name = name
-        self.backing_field_name = "_" + name           # la regle du SDK, litteralement
+        self.backing_field_name = "_" + name        # the SDK rule, literally
 
     def __get__(self, instance, owner=None):
         if instance is None:
@@ -59,11 +59,11 @@ class _FakeOption(object):
 
 
 class _FakeRecordWriter(object):
-    """Ecrivain de chunks factice. Enregistre l'etat `finished` de chaque chunk : c'est
-    lui qui decide si splunkd marque le job en echec (§4.3, A-4).
+    """Fake chunk writer. It records the `finished` state of each chunk: that state is
+    what decides whether splunkd marks the job as failed (section 4.3, A-4).
 
-    Il reproduit par ailleurs **une seule autre chose, mais exactement** : la regle par
-    laquelle `RecordWriter._write_record` construit l'en-tete du flux
+    It also reproduces **one single other thing, but exactly**: the rule by which
+    `RecordWriter._write_record` builds the header of the stream
     (`splunklib/searchcommands/internals.py`).
 
         fieldnames = self._fieldnames
@@ -75,11 +75,11 @@ class _FakeRecordWriter(object):
         for fieldname in fieldnames:
             value = get_value(fieldname, None)
 
-    Deux consequences, et ce sont elles que les tests exercent : l'en-tete est fige sur
-    les cles du **premier** enregistrement emis, et les noms declares dans
-    `custom_fields` y sont ajoutes **quel que soit** le contenu de ce premier
-    enregistrement. `LeDoubleReproduitLeSdkTest` adosse cette double a la source du SDK
-    vendorise, que la suite ne charge pas (§11.1).
+    Two consequences, and they are the ones the tests exercise: the header is frozen on
+    the keys of the **first** record emitted, and the names declared in `custom_fields`
+    are added to it **whatever** the content of that first record.
+    `TheDoubleReproducesTheSdkTest` backs this double against the source of the vendored
+    SDK, which the suite does not load (section 11.1).
     """
 
     def __init__(self):
@@ -99,7 +99,7 @@ class _FakeRecordWriter(object):
                 [i for i in self.custom_fields if i not in self._fieldnames]
             )
         self.rows.append(
-            dict((nom, record.get(nom, None)) for nom in fieldnames)
+            dict((name, record.get(name, None)) for name in fieldnames)
         )
 
     def write_records(self, records):
@@ -108,7 +108,7 @@ class _FakeRecordWriter(object):
 
     @property
     def header(self):
-        """Jeu de colonnes du flux, c'est-a-dire ce que l'operateur voit."""
+        """Column set of the stream, that is, what the operator sees."""
         return list(self._fieldnames or [])
 
 
@@ -122,7 +122,7 @@ class _FakeSearchCommand(object):
         self.finishes = 0
 
     def prepare(self):
-        """Point d'extension du SDK, invoque avant toute execution. Inerte ici."""
+        """SDK extension point, invoked before any execution. Inert here."""
 
     def write_warning(self, message):
         self.warnings.append(message)
@@ -141,20 +141,20 @@ class _FakeSearchCommand(object):
         raise SystemExit(message or str(error))
 
 
-class Abandon(Exception):
-    """Substitut de `os._exit` dans les tests : le vrai tuerait le processus de test."""
+class Abort(Exception):
+    """Stand-in for `os._exit` in the tests: the real one kills the test process."""
 
     def __init__(self, code):
-        super(Abandon, self).__init__("abandon(%s)" % code)
+        super(Abort, self).__init__("abort(%s)" % code)
         self.code = code
 
 
-def _intercepter_labandon(module):
-    """Remplace la sortie de processus par une exception observable."""
-    def _abandon(code=1):
-        raise Abandon(code)
+def _intercept_the_abort(module):
+    """Replace the process exit by an observable exception."""
+    def _abort(code=1):
+        raise Abort(code)
 
-    module._abort_process = _abandon
+    module._abort_process = _abort
 
 
 class _FakeBoolean(object):
@@ -163,420 +163,425 @@ class _FakeBoolean(object):
 
 
 def _install_fake_sdk():
-    """Injecte le faux SDK dans `sys.modules` et renvoie les cles ajoutees."""
-    nom = "splunk" + "lib"
-    ajoutees = []
-    for cle in (nom, nom + ".searchcommands"):
-        if cle not in sys.modules:
-            ajoutees.append(cle)
-    racine = types.ModuleType(nom)
-    module = types.ModuleType(nom + ".searchcommands")
+    """Inject the fake SDK into `sys.modules` and return the keys added."""
+    name = "splunk" + "lib"
+    added = []
+    for key in (name, name + ".searchcommands"):
+        if key not in sys.modules:
+            added.append(key)
+    root = types.ModuleType(name)
+    module = types.ModuleType(name + ".searchcommands")
     module.Option = _FakeOption
     module.StreamingCommand = _FakeSearchCommand
     module.Configuration = lambda **kwargs: (lambda cls: cls)
     module.dispatch = lambda *args, **kwargs: None
     module.validators = types.SimpleNamespace(Boolean=_FakeBoolean)
-    racine.searchcommands = module
-    sys.modules[nom] = racine
-    sys.modules[nom + ".searchcommands"] = module
-    return ajoutees
+    root.searchcommands = module
+    sys.modules[name] = root
+    sys.modules[name + ".searchcommands"] = module
+    return added
 
 
-def _charger_editacl():
-    """Charge `bin/editacl.py` sous le faux SDK, sans polluer durablement `sys.path`."""
+def _load_editacl():
+    """Load `bin/editacl.py` under the fake SDK, without lastingly polluting `sys.path`.
+    """
     import importlib.util
 
-    chemin_lib = os.path.join(BIN_DIR, "lib")
-    path_avant = list(sys.path)
-    modules_ajoutes = _install_fake_sdk()
+    lib_path = os.path.join(BIN_DIR, "lib")
+    path_before = list(sys.path)
+    added_modules = _install_fake_sdk()
     try:
         spec = importlib.util.spec_from_file_location(
-            "editacl_sous_sdk_factice", os.path.join(BIN_DIR, "editacl.py")
+            "editacl_under_fake_sdk", os.path.join(BIN_DIR, "editacl.py")
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
     finally:
-        # `bin/editacl.py` insere `bin/lib` en tete de `sys.path` : on annule, sans quoi
-        # la suite cesserait de prouver que le noyau s'importe sans le SDK vendorise.
-        sys.path[:] = [p for p in path_avant if p != chemin_lib]
-        for cle in modules_ajoutes:
-            sys.modules.pop(cle, None)
+        # `bin/editacl.py` inserts `bin/lib` at the head of `sys.path`: we undo that,
+        # otherwise the suite would stop proving that the core imports without the
+        # vendored SDK.
+        sys.path[:] = [p for p in path_before if p != lib_path]
+        for key in added_modules:
+            sys.modules.pop(key, None)
 
 
-class CheminErreurFataleTest(unittest.TestCase):
-    """Une erreur fatale anterieure a l'ouverture du journal doit remonter **telle
-    quelle**. Le nettoyage du `finally` ne doit jamais la supplanter."""
+class FatalErrorPathTest(unittest.TestCase):
+    """A fatal error prior to the opening of the journal must come up **as it is**. The
+    cleanup of the `finally` must never supplant it."""
 
     MESSAGE = (
-        "controle d'habilitation impossible : reponse inexploitable de "
+        "capability check impossible: unusable response from "
         "/services/authentication/current-context (HTTP 0)"
     )
 
     def setUp(self):
-        self.module = _charger_editacl()
-        _intercepter_labandon(self.module)
+        self.module = _load_editacl()
+        _intercept_the_abort(self.module)
         from acltools.errors import FatalCapabilityError
 
-        self.commande = self.module.EditAclCommand()
-        self.commande.journal = True          # ce que fait le SDK sur `journal=t`
-        self.commande.dryrun = True
+        self.command = self.module.EditAclCommand()
+        self.command.journal = True           # what the SDK does on `journal=t`
+        self.command.dryrun = True
 
-        def _setup_qui_echoue():
+        def _setup_that_fails():
             raise FatalCapabilityError(self.MESSAGE)
 
-        self.commande._setup = _setup_qui_echoue
+        self.command._setup = _setup_that_fails
 
-    def test_le_message_dorigine_nest_pas_remplace_par_une_trace_python(self):
-        with self.assertRaises(Abandon):
-            list(self.commande.stream([{"title": "un_objet"}]))
-        self.assertEqual(self.commande.errors, [self.MESSAGE])
+    def test_the_original_message_is_not_replaced_by_a_python_traceback(self):
+        with self.assertRaises(Abort):
+            list(self.command.stream([{"title": "an_object"}]))
+        self.assertEqual(
+            self.command.errors, [self.module.MESSAGE_PREFIX + self.MESSAGE]
+        )
 
-    def test_aucune_attributeerror_sur_le_nettoyage(self):
+    def test_no_attributeerror_on_the_cleanup(self):
         try:
-            list(self.commande.stream([{"title": "un_objet"}]))
-        except Abandon:
+            list(self.command.stream([{"title": "an_object"}]))
+        except Abort:
             pass
         except AttributeError as exc:                            # pragma: no cover
             self.fail(
-                "le nettoyage du `finally` a leve une AttributeError et masque "
-                "l'erreur fatale : %s" % exc
+                "the cleanup of the `finally` raised an AttributeError and masked "
+                "the fatal error: %s" % exc
             )
 
-    def test_la_valeur_de_loption_journal_reste_lisible(self):
-        """L'option et le writer sont deux choses distinctes : ecrire l'un ne doit pas
-        rendre l'autre illisible."""
-        self.assertIs(self.commande.journal, True)
-        self.commande._journal_writer = object()
-        self.assertIs(self.commande.journal, True)
+    def test_the_value_of_the_journal_option_stays_readable(self):
+        """The option and the writer are two distinct things: writing one must not make
+        the other unreadable."""
+        self.assertIs(self.command.journal, True)
+        self.command._journal_writer = object()
+        self.assertIs(self.command.journal, True)
 
 
-class MarquageDuJobEnEchecTest(unittest.TestCase):
-    """A-4 — une erreur fatale du §9 doit marquer le job en echec.
+class JobFailureMarkingTest(unittest.TestCase):
+    """A-4 - a fatal error of section 9 must mark the job as failed.
 
-    Mesure sur Splunk 9.4.6 : le marquage depend d'un seul fait, le chunk final
-    `finished: true`. `error_exit()` du SDK l'envoie avant de quitter, et splunkd ignore
-    alors le code de retour du processus. Emettre le message dans un chunk **non final**
-    puis quitter en code non nul donne `dispatchState=FAILED`, `isFailed=true`, **et**
-    conserve le message.
+    Measured on Splunk 9.4.6: the marking depends on a single fact, the final chunk
+    `finished: true`. The SDK's `error_exit()` sends it before quitting, and splunkd
+    then ignores the return code of the process. Emitting the message in a **non-final**
+    chunk then quitting with a non-zero code gives `dispatchState=FAILED`,
+    `isFailed=true`, **and** keeps the message.
 
-    Le plafond `max_objects` **ne passe plus par ici** (D-28) : il n'est plus fatal. Le
-    chemin est desormais exerce par la capability absente, qui reste au §9.
+    The `max_objects` ceiling **no longer goes through here** (D-28): it is no longer
+    fatal. The path is now exercised by the missing capability, which stays in
+    section 9.
     """
 
-    MESSAGE = "capability 'edit_acl_bulk' absente. Roles de l'utilisateur : (aucun)"
+    MESSAGE = "capability 'edit_acl_bulk' missing. Roles of the user: (none)"
 
     def setUp(self):
-        self.module = _charger_editacl()
-        _intercepter_labandon(self.module)
+        self.module = _load_editacl()
+        _intercept_the_abort(self.module)
         from acltools.errors import FatalCapabilityError
 
-        self.commande = self.module.EditAclCommand()
-        self.commande.journal = True
-        self.commande.dryrun = False
+        self.command = self.module.EditAclCommand()
+        self.command.journal = True
+        self.command.dryrun = False
 
         message = self.MESSAGE
 
-        def _setup_qui_echoue():
+        def _setup_that_fails():
             raise FatalCapabilityError(message)
 
-        self.commande._setup = _setup_qui_echoue
+        self.command._setup = _setup_that_fails
 
-    def _executer(self):
-        with self.assertRaises(Abandon) as leve:
-            list(self.commande.stream([{"title": "un_objet"}]))
-        return leve.exception
+    def _run(self):
+        with self.assertRaises(Abort) as raised:
+            list(self.command.stream([{"title": "an_object"}]))
+        return raised.exception
 
-    def test_le_processus_quitte_en_code_non_nul(self):
-        self.assertEqual(self._executer().code, 1)
+    def test_the_process_exits_with_a_non_zero_code(self):
+        self.assertEqual(self._run().code, 1)
 
-    def test_le_chunk_emis_nest_pas_final(self):
-        """Le point de fond : `finished: true` ferait ignorer le code de retour."""
-        self._executer()
-        self.assertEqual(self.commande._record_writer.chunks, [False])
-        self.assertEqual(self.commande.finishes, 0)
+    def test_the_emitted_chunk_is_not_final(self):
+        """The substance of it: `finished: true` would make the return code ignored."""
+        self._run()
+        self.assertEqual(self.command._record_writer.chunks, [False])
+        self.assertEqual(self.command.finishes, 0)
 
-    def test_le_message_est_conserve(self):
-        """Marquer le job en echec ne doit pas couter le message de l'operateur."""
-        self._executer()
-        self.assertEqual(len(self.commande.errors), 1)
-        self.assertIn("edit_acl_bulk", self.commande.errors[0])
+    def test_the_message_is_kept(self):
+        """Marking the job as failed must not cost the operator the message."""
+        self._run()
+        self.assertEqual(len(self.command.errors), 1)
+        self.assertIn("edit_acl_bulk", self.command.errors[0])
 
-    def test_le_sdk_error_exit_nest_plus_employe(self):
-        """`error_exit()` envoie `finished: true` : il ne peut pas marquer l'echec."""
-        chemin = os.path.join(BIN_DIR, "editacl.py")
-        with open(chemin, encoding="utf-8") as handle:
-            arbre = ast.parse(handle.read(), filename=chemin)
-        appels = {
-            ast.unparse(noeud.func)
-            for noeud in ast.walk(arbre)
-            if isinstance(noeud, ast.Call)
+    def test_the_sdk_error_exit_is_no_longer_used(self):
+        """`error_exit()` sends `finished: true`: it cannot mark the failure."""
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        calls = {
+            ast.unparse(node.func)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
         }
-        self.assertNotIn("self.error_exit", appels)
-        self.assertNotIn("self.finish", appels)
+        self.assertNotIn("self.error_exit", calls)
+        self.assertNotIn("self.finish", calls)
 
-    def test_journal_et_diagnostic_sont_refermes_avant_labandon(self):
-        """`os._exit` court-circuite les `finally` : le nettoyage doit preceder."""
-        etat = {"journal": False, "diag": False}
+    def test_journal_and_diagnostic_are_closed_before_the_abort(self):
+        """`os._exit` short-circuits the `finally`: the cleanup must come first."""
+        state = {"journal": False, "diag": False}
 
         class _Journal(object):
             def close(self):
-                etat["journal"] = True
+                state["journal"] = True
 
         from acltools.diag import NullDiagnostics
 
         class _Diag(NullDiagnostics):
             def close(self):
-                etat["diag"] = True
+                state["diag"] = True
 
-        self.commande._journal_writer = _Journal()
-        self.commande._diag = _Diag()
-        self._executer()
-        self.assertEqual(etat, {"journal": True, "diag": True})
+        self.command._journal_writer = _Journal()
+        self.command._diag = _Diag()
+        self._run()
+        self.assertEqual(state, {"journal": True, "diag": True})
 
 
-class CollisionDeNomsTest(unittest.TestCase):
-    """Audit mecanique : aucun attribut prive de l'adaptateur ne doit porter le nom du
-    champ de stockage d'une `Option` ou d'un reglage de `Configuration`, ni celui d'un
-    attribut prive de la classe de base du SDK.
+class NameCollisionTest(unittest.TestCase):
+    """Mechanical audit: no private attribute of the adapter may bear the name of the
+    backing field of an `Option` or of a `Configuration` setting, nor that of a private
+    attribute of the SDK base class.
 
-    Le SDK est lu comme un **fichier source**, jamais importe : la suite reste
-    executable sans lui."""
+    The SDK is read as a **source file**, never imported: the suite stays runnable
+    without it."""
 
     @classmethod
     def setUpClass(cls):
-        chemin = os.path.join(BIN_DIR, "editacl.py")
-        with open(chemin, encoding="utf-8") as handle:
-            cls.arbre = ast.parse(handle.read(), filename=chemin)
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
+            cls.tree = ast.parse(handle.read(), filename=path)
 
-    def _classe_commande(self):
-        for noeud in ast.walk(self.arbre):
-            if isinstance(noeud, ast.ClassDef) and noeud.name == "EditAclCommand":
-                return noeud
-        self.fail("classe EditAclCommand introuvable")
+    def _command_class(self):
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.ClassDef) and node.name == "EditAclCommand":
+                return node
+        self.fail("class EditAclCommand not found")
 
-    def _attributs_prives_assignes(self):
-        """Tout `self._x = ...` de la classe."""
-        noms = set()
-        for noeud in ast.walk(self._classe_commande()):
-            cibles = []
-            if isinstance(noeud, ast.Assign):
-                cibles = noeud.targets
-            elif isinstance(noeud, ast.AugAssign):
-                cibles = [noeud.target]
-            for cible in cibles:
-                for element in ([cible] if not isinstance(cible, ast.Tuple)
-                                else cible.elts):
+    def _assigned_private_attributes(self):
+        """Every `self._x = ...` of the class."""
+        names = set()
+        for node in ast.walk(self._command_class()):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AugAssign):
+                targets = [node.target]
+            for target in targets:
+                for element in ([target] if not isinstance(target, ast.Tuple)
+                                else target.elts):
                     if (isinstance(element, ast.Attribute)
                             and isinstance(element.value, ast.Name)
                             and element.value.id == "self"
                             and element.attr.startswith("_")):
-                        noms.add(element.attr)
-        return noms
+                        names.add(element.attr)
+        return names
 
-    def _noms_doptions(self):
-        """Tout `x = Option(...)` au niveau de la classe."""
-        noms = set()
-        for noeud in self._classe_commande().body:
-            if isinstance(noeud, ast.Assign) and isinstance(noeud.value, ast.Call):
-                fonction = noeud.value.func
-                if isinstance(fonction, ast.Name) and fonction.id == "Option":
-                    for cible in noeud.targets:
-                        if isinstance(cible, ast.Name):
-                            noms.add(cible.id)
-        return noms
+    def _option_names(self):
+        """Every `x = Option(...)` at class level."""
+        names = set()
+        for node in self._command_class().body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                function = node.value.func
+                if isinstance(function, ast.Name) and function.id == "Option":
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            names.add(target.id)
+        return names
 
-    def _reglages_de_configuration(self):
-        """Mots-cles passes au decorateur `@Configuration(...)`."""
-        noms = set()
-        for decorateur in self._classe_commande().decorator_list:
-            if (isinstance(decorateur, ast.Call)
-                    and isinstance(decorateur.func, ast.Name)
-                    and decorateur.func.id == "Configuration"):
-                for mot in decorateur.keywords:
-                    if mot.arg:
-                        noms.add(mot.arg)
-        return noms
+    def _configuration_settings(self):
+        """Keywords passed to the `@Configuration(...)` decorator."""
+        names = set()
+        for decorator in self._command_class().decorator_list:
+            if (isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Name)
+                    and decorator.func.id == "Configuration"):
+                for keyword in decorator.keywords:
+                    if keyword.arg:
+                        names.add(keyword.arg)
+        return names
 
-    def _attributs_prives_du_sdk(self):
-        """`self._x = ...` de `SearchCommand` et `StreamingCommand`, lus dans le source
-        du SDK vendorise. Aucun import."""
-        noms = set()
-        for fichier in ("search_command.py", "streaming_command.py"):
-            chemin = os.path.join(SDK_DIR, fichier)
-            if not os.path.exists(chemin):                       # pragma: no cover
+    def _sdk_private_attributes(self):
+        """`self._x = ...` of `SearchCommand` and `StreamingCommand`, read in the source
+        of the vendored SDK. No import."""
+        names = set()
+        for filename in ("search_command.py", "streaming_command.py"):
+            path = os.path.join(SDK_DIR, filename)
+            if not os.path.exists(path):                         # pragma: no cover
                 continue
-            with open(chemin, encoding="utf-8") as handle:
-                arbre = ast.parse(handle.read(), filename=chemin)
-            for noeud in ast.walk(arbre):
-                if isinstance(noeud, ast.Assign):
-                    for cible in noeud.targets:
-                        if (isinstance(cible, ast.Attribute)
-                                and isinstance(cible.value, ast.Name)
-                                and cible.value.id == "self"
-                                and cible.attr.startswith("_")):
-                            noms.add(cible.attr)
-        return noms
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if (isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"
+                                and target.attr.startswith("_")):
+                            names.add(target.attr)
+        return names
 
-    def test_les_options_declarees_sont_bien_celles_du_paragraphe_4_1(self):
+    def test_the_declared_options_are_those_of_section_4_1(self):
         self.assertEqual(
-            self._noms_doptions(),
+            self._option_names(),
             {
-                # parametres de nommage — champs de reference (§3.1)
+                # field-naming parameters - reference fields (section 3.1)
                 "title", "app", "id", "type", "sharing",
-                # parametres de nommage — valeurs cibles (§3.3)
+                # field-naming parameters - target values (section 3.3)
                 "new_perms_read", "new_perms_write", "new_sharing", "new_owner",
-                # parametres fonctionnels (§4.1)
+                # functional parameters (section 4.1)
                 "dryrun", "validate_roles", "journal", "max_objects",
             },
         )
 
-    def test_le_parametre_fields_a_disparu(self):
-        """D-23 — il n'est plus declare, et sa matrice a dix-huit lignes avec lui."""
-        self.assertNotIn("fields", self._noms_doptions())
+    def test_the_fields_parameter_is_gone(self):
+        """D-23 - it is no longer declared, and its eighteen-row matrix went with it."""
+        self.assertNotIn("fields", self._option_names())
 
-    def test_aucun_attribut_prive_ne_collisionne_avec_un_champ_de_stockage(self):
-        # `backing_field_name = "_" + name`, decorators.py. Une option nommee `journal`
-        # occupe donc `_journal` : c'est ce qui a transforme une erreur fatale
-        # exploitable en `AttributeError: 'bool' object has no attribute 'close'`.
-        champs = {"_" + nom for nom in self._noms_doptions()}
-        champs |= {"_" + nom for nom in self._reglages_de_configuration()}
-        collisions = sorted(self._attributs_prives_assignes() & champs)
+    def test_no_private_attribute_collides_with_a_backing_field(self):
+        # `backing_field_name = "_" + name`, decorators.py. An option named `journal`
+        # therefore occupies `_journal`: that is what turned a usable fatal error into
+        # `AttributeError: 'bool' object has no attribute 'close'`.
+        fields = {"_" + name for name in self._option_names()}
+        fields |= {"_" + name for name in self._configuration_settings()}
+        collisions = sorted(self._assigned_private_attributes() & fields)
         self.assertEqual(
             collisions, [],
-            "attribut(s) prive(s) de l'adaptateur en collision avec le champ de "
-            "stockage d'une Option ou d'un reglage de Configuration : %s" % collisions,
+            "private attribute(s) of the adapter colliding with the backing field of "
+            "an Option or of a Configuration setting: %s" % collisions,
         )
 
-    def test_aucun_attribut_prive_ne_collisionne_avec_la_classe_de_base(self):
-        sdk = self._attributs_prives_du_sdk()
-        self.assertTrue(sdk, "le source du SDK vendorise n'a pas ete lu")
-        collisions = sorted(self._attributs_prives_assignes() & sdk)
+    def test_no_private_attribute_collides_with_the_base_class(self):
+        sdk = self._sdk_private_attributes()
+        self.assertTrue(sdk, "the source of the vendored SDK was not read")
+        collisions = sorted(self._assigned_private_attributes() & sdk)
         self.assertEqual(
             collisions, [],
-            "attribut(s) prive(s) de l'adaptateur en collision avec un attribut de "
-            "SearchCommand / StreamingCommand : %s" % collisions,
+            "private attribute(s) of the adapter colliding with an attribute of "
+            "SearchCommand / StreamingCommand: %s" % collisions,
         )
 
-    def _methode(self, nom):
-        for noeud in ast.walk(self._classe_commande()):
-            if isinstance(noeud, ast.FunctionDef) and noeud.name == nom:
-                return noeud
-        self.fail("methode %s() introuvable" % nom)
+    def _method(self, name):
+        for node in ast.walk(self._command_class()):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        self.fail("method %s() not found" % name)
 
-    def test_le_finally_de_stream_delegue_au_nettoyage(self):
-        essais = [n for n in ast.walk(self._methode("stream")) if isinstance(n, ast.Try)]
-        finallys = [n for n in essais if n.finalbody]
-        self.assertTrue(finallys, "le `stream()` n'a pas de bloc `finally`")
-        appels = {
+    def test_the_finally_of_stream_delegates_to_the_cleanup(self):
+        tries = [n for n in ast.walk(self._method("stream")) if isinstance(n, ast.Try)]
+        finallys = [n for n in tries if n.finalbody]
+        self.assertTrue(finallys, "`stream()` has no `finally` block")
+        calls = {
             ast.unparse(n.func)
-            for bloc in finallys
-            for f in bloc.finalbody
+            for block in finallys
+            for f in block.finalbody
             for n in ast.walk(f)
             if isinstance(n, ast.Call)
         }
-        self.assertIn("self._cleanup", appels)
+        self.assertIn("self._cleanup", calls)
 
-    def test_le_nettoyage_ne_peut_pas_masquer_lerreur_en_cours(self):
-        """Chaque `close()` du nettoyage doit etre protege : une exception levee dans
-        le `finally` remplacerait l'erreur fatale en cours de propagation."""
-        nettoyage = self._methode("_cleanup")
-        fermetures = [
-            n for n in ast.walk(nettoyage)
+    def test_the_cleanup_cannot_mask_the_error_in_flight(self):
+        """Every `close()` of the cleanup must be guarded: an exception raised in the
+        `finally` would replace the fatal error being propagated."""
+        cleanup = self._method("_cleanup")
+        closes = [
+            n for n in ast.walk(cleanup)
             if isinstance(n, ast.Call) and ast.unparse(n.func).endswith(".close")
         ]
-        self.assertTrue(fermetures, "le nettoyage ne referme rien")
-        proteges = {
+        self.assertTrue(closes, "the cleanup closes nothing")
+        protected = {
             n.lineno
-            for essai in ast.walk(nettoyage)
-            if isinstance(essai, ast.Try) and essai.handlers
-            for corps in essai.body
-            for n in ast.walk(corps)
+            for attempt in ast.walk(cleanup)
+            if isinstance(attempt, ast.Try) and attempt.handlers
+            for body in attempt.body
+            for n in ast.walk(body)
             if isinstance(n, ast.Call)
         }
-        for fermeture in fermetures:
+        for close_call in closes:
             self.assertIn(
-                fermeture.lineno, proteges,
-                "un `close()` du nettoyage n'est pas protege : une exception y "
-                "supplanterait l'erreur fatale en cours de propagation",
+                close_call.lineno, protected,
+                "a `close()` of the cleanup is not guarded: an exception there would "
+                "supplant the fatal error being propagated",
             )
 
 
-class ConsignationDesErreursFatalesTest(unittest.TestCase):
-    """A-3 — le §8.1 exige que les erreurs fatales figurent dans `editacl.log`.
+class FatalErrorRecordingTest(unittest.TestCase):
+    """A-3 - section 8.1 requires the fatal errors to appear in `editacl.log`.
 
-    C'est le seul endroit ou une erreur fatale survit a la fin de la recherche : le
-    message utilisateur est ephemere, le job disparait a l'expiration.
+    That is the only place where a fatal error survives the end of the search: the user
+    message is ephemeral, and the job disappears when it expires.
     """
 
     def setUp(self):
         from acltools.diag import NullDiagnostics
         from acltools.errors import FatalCapabilityError
 
-        self.module = _charger_editacl()
-        _intercepter_labandon(self.module)
-        self.commande = self.module.EditAclCommand()
-        self.commande.journal = True
-        self.commande.dryrun = True
-        self.consignees = []
+        self.module = _load_editacl()
+        _intercept_the_abort(self.module)
+        self.command = self.module.EditAclCommand()
+        self.command.journal = True
+        self.command.dryrun = True
+        self.recorded = []
 
-        consignees = self.consignees
+        recorded = self.recorded
 
-        class _FauxDiag(NullDiagnostics):
+        class _FakeDiag(NullDiagnostics):
             def fatal(self, message):
-                consignees.append(message)
+                recorded.append(message)
 
-        self.commande._diag = _FauxDiag()
+        self.command._diag = _FakeDiag()
         self.FatalCapabilityError = FatalCapabilityError
 
-    def _echouer_avec(self, exception):
-        def _setup_qui_echoue():
+    def _fail_with(self, exception):
+        def _setup_that_fails():
             raise exception
 
-        self.commande._setup = _setup_qui_echoue
+        self.command._setup = _setup_that_fails
         try:
-            list(self.commande.stream([{"title": "un_objet"}]))
-        except Abandon:
+            list(self.command.stream([{"title": "an_object"}]))
+        except Abort:
             pass
 
-    def test_une_erreur_fatale_de_preflight_est_consignee(self):
-        self._echouer_avec(self.FatalCapabilityError("capability absente"))
-        self.assertEqual(self.consignees, ["capability absente"])
+    def test_a_fatal_preflight_error_is_recorded(self):
+        self._fail_with(self.FatalCapabilityError("capability missing"))
+        self.assertEqual(self.recorded, ["capability missing"])
 
-    def test_le_plafond_nest_plus_une_erreur_fatale(self):
-        """D-28 — la classe d'exception a disparu, et rien ne doit la ressusciter.
+    def test_the_ceiling_is_no_longer_a_fatal_error(self):
+        """D-28 - the exception class is gone, and nothing must resurrect it.
 
-        Chercher `MaxObjectsReached` dans `acltools.errors` est l'erreur qu'un lecteur
-        de la v1 commettrait ; ce test la rend impossible a commettre en silence.
+        Looking for `MaxObjectsReached` in `acltools.errors` is the mistake a reader of
+        the v1 would make; this test makes it impossible to make silently.
         """
         import acltools.errors as errors
 
         self.assertFalse(hasattr(errors, "MaxObjectsReached"))
 
-    def test_le_diagnostic_est_referme_en_fin_dexecution(self):
-        fermetures = []
+    def test_the_diagnostic_is_closed_at_the_end_of_the_run(self):
+        closes = []
         from acltools.diag import NullDiagnostics
 
-        class _DiagQuiCompte(NullDiagnostics):
+        class _CountingDiag(NullDiagnostics):
             def close(self):
-                fermetures.append(True)
+                closes.append(True)
 
-        self.commande._diag = _DiagQuiCompte()
-        self.commande._setup = lambda: setattr(self.commande, "_ready", True)
-        self.commande._processor = None
-        self.commande._handle = lambda record: record
-        list(self.commande.stream([{"title": "un_objet"}]))
-        self.assertEqual(fermetures, [True])
+        self.command._diag = _CountingDiag()
+        self.command._setup = lambda: setattr(self.command, "_ready", True)
+        self.command._processor = None
+        self.command._handle = lambda record: record
+        list(self.command.stream([{"title": "an_object"}]))
+        self.assertEqual(closes, [True])
 
 
-class AvertissementDivergenceRuntimeTest(unittest.TestCase):
-    """A-2 — l'operateur doit lire, au niveau de la recherche, ce que le jeton
-    `acl_warning` ne peut pas dire.
+class RuntimeDivergenceWarningTest(unittest.TestCase):
+    """A-2 - the operator must read, at the level of the search, what the `acl_warning`
+    token cannot say.
 
-    `acl_warning` est un jeu de jetons concatenes par `;` : la phrase qui explique
-    qu'un `HTTP 500` de persistance laisse une vue runtime divergente et hors de portee
-    de `editacl_rollback` n'y tient pas. Elle est emise **une fois** par execution, par
-    l'enveloppe.
+    `acl_warning` is a set of tokens concatenated with `;`: the sentence explaining that
+    a persistence `HTTP 500` leaves a diverging runtime view, out of reach of
+    `editacl_rollback`, does not fit there. It is emitted **once** per run, by the
+    wrapper.
     """
 
     def setUp(self):
@@ -585,92 +590,94 @@ class AvertissementDivergenceRuntimeTest(unittest.TestCase):
 
         from acltools.preflight import validate_params
 
-        self.module = _charger_editacl()
-        _intercepter_labandon(self.module)
-        self.commande = self.module.EditAclCommand()
-        self.commande._ready = True
-        # `_handle` lit les parametres de nommage : la commande est cablee comme apres
-        # un `_setup()` reussi, sans reseau.
-        self.commande._params = validate_params()
+        self.module = _load_editacl()
+        _intercept_the_abort(self.module)
+        self.command = self.module.EditAclCommand()
+        self.command._ready = True
+        # `_handle` reads the field-naming parameters: the command is wired as it would
+        # be after a successful `_setup()`, with no network.
+        self.command._params = validate_params()
 
-        class _ProcesseurQuiDiverge(object):
+        class _DivergingProcessor(object):
             skipped_ceiling = 0
 
             def process(self, event):
                 return EventResult(
                     status="error",
-                    title="un_objet",
-                    endpoint="/servicesNS/nobody/mon_app/saved/searches/un_objet",
+                    title="an_object",
+                    endpoint="/servicesNS/nobody/my_app/saved/searches/an_object",
                     http_code=500,
                     error="post_failed:500:Could not flush changes to disk",
                     warnings=(RUNTIME_DIVERGENCE_WARNING,),
                 )
 
-        class _ProcesseurNominal(object):
+        class _NominalProcessor(object):
             skipped_ceiling = 0
 
             def process(self, event):
-                return EventResult(status="updated", title="un_objet", http_code=200)
+                return EventResult(status="updated", title="an_object", http_code=200)
 
-        self.divergent = _ProcesseurQuiDiverge()
-        self.nominal = _ProcesseurNominal()
+        self.diverging = _DivergingProcessor()
+        self.nominal = _NominalProcessor()
 
-    def _lot(self, processeur, taille):
-        self.commande._processor = processeur
+    def _batch(self, processor, size):
+        self.command._processor = processor
         return list(
-            self.commande.stream([{"title": "un_objet"} for _ in range(taille)])
+            self.command.stream([{"title": "an_object"} for _ in range(size)])
         )
 
-    def test_le_message_est_emis_et_nomme_les_deux_faits(self):
-        self._lot(self.divergent, 1)
-        self.assertEqual(len(self.commande.warnings), 1)
-        texte = self.commande.warnings[0].lower()
-        self.assertIn("runtime", texte)
-        self.assertIn("disque", texte)
-        self.assertIn("editacl_rollback", texte)
+    def test_the_message_is_emitted_and_names_both_facts(self):
+        self._batch(self.diverging, 1)
+        self.assertEqual(len(self.command.warnings), 1)
+        text = self.command.warnings[0].lower()
+        self.assertIn("runtime", text)
+        self.assertIn("disk", text)
+        self.assertIn("editacl_rollback", text)
 
-    def test_le_message_nest_emis_quune_fois_par_execution(self):
-        self._lot(self.divergent, 5)
-        self.assertEqual(len(self.commande.warnings), 1)
+    def test_the_message_is_emitted_only_once_per_run(self):
+        self._batch(self.diverging, 5)
+        self.assertEqual(len(self.command.warnings), 1)
 
-    def test_aucun_message_sans_divergence(self):
-        self._lot(self.nominal, 3)
-        self.assertEqual(self.commande.warnings, [])
+    def test_no_message_without_a_divergence(self):
+        self._batch(self.nominal, 3)
+        self.assertEqual(self.command.warnings, [])
 
 
-class AvertissementDeSimulationTest(unittest.TestCase):
-    """Le rappel de simulation est emis **une fois par execution**, pas par evenement.
+class SimulationWarningTest(unittest.TestCase):
+    """The simulation reminder is emitted **once per run**, not per event.
 
-    `dryrun` vaut `true` par defaut et n'etait signale nulle part : une execution qui
-    n'ecrit rien rend la meme table pleine qu'une execution qui a tout ecrit.
+    `dryrun` is `true` by default and was signaled nowhere: a run that writes nothing
+    returns the same full table as a run that wrote everything.
 
-    La justesse tient a deux proprietes, et les deux sont eprouvees ici sur un lot de
-    plusieurs objets **et sur plusieurs chunks** — le SDK appelle `stream()` une fois
-    par chunk, un compteur porte par la boucle ne tiendrait pas :
+    Its correctness rests on two properties, and both are exercised here on a batch of
+    several objects **and over several chunks** - the SDK calls `stream()` once per
+    chunk, so a counter carried by the loop would not hold:
 
-    1. un seul message pour tout le lot — un avertissement repete sur plusieurs
-       centaines d'objets est du bruit, et le bruit se filtre mentalement ;
-    2. c'est un avertissement, jamais une erreur : aucun `write_error`, aucun chunk
-       d'abandon, aucun appel a la sortie de processus. Le statut du job est intact.
+    1. a single message for the whole batch - a warning repeated over several hundred
+       objects is noise, and noise gets filtered out mentally;
+    2. it is a warning, never an error: no `write_error`, no abort chunk, no call to the
+       process exit. The status of the job is intact.
 
-    Le montage substitue les collaborateurs reseau de `_setup()` — il n'y a ni socket
-    ni instance Splunk dans cette suite (§11.1) — mais laisse le chemin d'emission
-    reel : `validate_params`, puis la boucle sur `params.warnings`.
+    The setup substitutes the network collaborators of `_setup()` - there is neither a
+    socket nor a Splunk instance in this suite (section 11.1) - but leaves the real
+    emission path in place: `validate_params`, then the loop over `params.warnings`.
     """
 
     def setUp(self):
         from acltools.model import EventResult
         from acltools.preflight import DRYRUN_WARNING
 
-        self.attendu = DRYRUN_WARNING
-        self.module = _charger_editacl()
-        _intercepter_labandon(self.module)
+        self.module = _load_editacl()
+        _intercept_the_abort(self.module)
+        # Every message reaching the search interface carries `MESSAGE_PREFIX`, applied
+        # at the single emission point of the adapter (D-39).
+        self.expected = self.module.MESSAGE_PREFIX + DRYRUN_WARNING
 
-        class _ProcesseurNominal(object):
+        class _NominalProcessor(object):
             skipped_ceiling = 0
 
             def process(self, event):
-                return EventResult(status="dryrun", title="un_objet", http_code=0)
+                return EventResult(status="dryrun", title="an_object", http_code=0)
 
         self.module.RestClient = lambda *a, **k: object()
         self.module.check_capability = lambda rest: None
@@ -680,117 +687,118 @@ class AvertissementDeSimulationTest(unittest.TestCase):
         self.module.AppStateCache = lambda rest: types.SimpleNamespace(
             is_app_disabled=lambda app: False
         )
-        self.module.EventProcessor = lambda **kwargs: _ProcesseurNominal()
+        self.module.EventProcessor = lambda **kwargs: _NominalProcessor()
 
-    def _commande(self, dryrun):
-        commande = self.module.EditAclCommand()
-        commande.dryrun = dryrun
-        commande.validate_roles = False
-        commande.journal = False              # aucun fichier ecrit par ce test
-        commande.max_objects = 10
-        commande._metadata = types.SimpleNamespace(
+    def _command(self, dryrun):
+        command = self.module.EditAclCommand()
+        command.dryrun = dryrun
+        command.validate_roles = False
+        command.journal = False               # no file written by this test
+        command.max_objects = 10
+        command._metadata = types.SimpleNamespace(
             searchinfo=types.SimpleNamespace(
                 sid="1700000000.1",
-                username="un_operateur",
+                username="an_operator",
                 splunkd_uri="https://127.0.0.1:8089",
-                session_key="clef-de-session-factice",
+                session_key="fake-session-key",
             )
         )
-        return commande
+        return command
 
-    def _executer(self, commande, objets, chunks=1):
-        """Deroule le lot en `chunks` appels successifs a `stream()`, comme le SDK."""
-        sorties = []
-        par_chunk = max(1, objets // chunks)
-        restants = objets
-        while restants > 0:
-            taille = min(par_chunk, restants)
-            sorties.extend(
-                commande.stream([{"title": "objet_%d" % i} for i in range(taille)])
+    def _run(self, command, objects, chunks=1):
+        """Run the batch through `chunks` successive calls to `stream()`, like the SDK.
+        """
+        outputs = []
+        per_chunk = max(1, objects // chunks)
+        remaining = objects
+        while remaining > 0:
+            size = min(per_chunk, remaining)
+            outputs.extend(
+                command.stream([{"title": "object_%d" % i} for i in range(size)])
             )
-            restants -= taille
-        return sorties
+            remaining -= size
+        return outputs
 
-    def test_le_rappel_est_emis_sur_un_lot_de_plusieurs_objets(self):
-        commande = self._commande(dryrun=True)
-        sorties = self._executer(commande, 250)
-        self.assertEqual(len(sorties), 250)
-        self.assertIn(self.attendu, commande.warnings)
+    def test_the_reminder_is_emitted_on_a_batch_of_several_objects(self):
+        command = self._command(dryrun=True)
+        outputs = self._run(command, 250)
+        self.assertEqual(len(outputs), 250)
+        self.assertIn(self.expected, command.warnings)
 
-    def test_le_rappel_nest_emis_quune_fois_pour_tout_le_lot(self):
-        commande = self._commande(dryrun=True)
-        self._executer(commande, 250)
-        self.assertEqual(commande.warnings.count(self.attendu), 1)
+    def test_the_reminder_is_emitted_only_once_for_the_whole_batch(self):
+        command = self._command(dryrun=True)
+        self._run(command, 250)
+        self.assertEqual(command.warnings.count(self.expected), 1)
 
-    def test_un_seul_rappel_meme_reparti_sur_plusieurs_chunks(self):
-        commande = self._commande(dryrun=True)
-        self._executer(commande, 250, chunks=5)
-        self.assertEqual(commande.warnings.count(self.attendu), 1)
+    def test_a_single_reminder_even_spread_over_several_chunks(self):
+        command = self._command(dryrun=True)
+        self._run(command, 250, chunks=5)
+        self.assertEqual(command.warnings.count(self.expected), 1)
 
-    def test_le_rappel_nest_pas_une_erreur(self):
-        commande = self._commande(dryrun=True)
-        self._executer(commande, 10)
-        self.assertEqual(commande.errors, [])
-        self.assertEqual(commande._record_writer.chunks, [])
+    def test_the_reminder_is_not_an_error(self):
+        command = self._command(dryrun=True)
+        self._run(command, 10)
+        self.assertEqual(command.errors, [])
+        self.assertEqual(command._record_writer.chunks, [])
 
-    def test_aucun_rappel_en_ecriture_reelle(self):
-        commande = self._commande(dryrun=False)
-        self._executer(commande, 10)
-        self.assertNotIn(self.attendu, commande.warnings)
+    def test_no_reminder_on_a_real_write(self):
+        command = self._command(dryrun=False)
+        self._run(command, 10)
+        self.assertNotIn(self.expected, command.warnings)
 
 
-class JeuDeChampsDeSortieDeclareTest(unittest.TestCase):
-    """§5.7, D-33 — le jeu de champs de sortie est **declare, jamais infere**.
+class DeclaredOutputFieldSetTest(unittest.TestCase):
+    """Section 5.7, D-33 - the output field set is **declared, never inferred**.
 
-    L'anomalie que ces tests figent n'est pas dans le code de l'app : elle est dans le
-    transport. Le writer du SDK construit l'en-tete du flux a partir des cles du
-    **premier** enregistrement emis, puis y projette tous les suivants. Les huit champs
-    `acl_before_*` / `acl_after_*` n'etant portes que par les enregistrements dont la
-    fusion a ete calculee, un lot dont la premiere ligne est un `skipped_private` prive
-    l'operateur de **tout** ce que la simulation existe pour montrer — sans erreur, sans
-    avertissement, et sans que le journal en porte la moindre trace.
+    The anomaly these tests freeze is not in the code of the app: it is in the
+    transport. The SDK writer builds the header of the stream from the keys of the
+    **first** record emitted, then projects every later one onto it. Since the eight
+    `acl_before_*` / `acl_after_*` fields are only carried by the records whose merge
+    was computed, a batch whose first line is a `skipped_private` deprives the operator
+    of **everything** the simulation exists to show - with no error, no warning, and
+    without the journal carrying the slightest trace of it.
 
-    **Un seul degre de liberte separe les deux mesures : l'ordre du lot.** Memes objets,
-    memes statuts, meme commande. Un test qui n'inverserait pas l'ordre ne prouverait
-    rien.
+    **A single degree of freedom separates the two measurements: the order of the
+    batch.** Same objects, same statuses, same command. A test that did not reverse the
+    order would prove nothing.
     """
 
     def setUp(self):
         from acltools.model import ACL_OUTPUT_FIELDS, ACL_STATE_FIELDS, AclState, EventResult
 
-        self.champs_declares = ACL_OUTPUT_FIELDS
-        self.champs_detat = ACL_STATE_FIELDS
-        self.module = _charger_editacl()
-        _intercepter_labandon(self.module)
+        self.declared_fields = ACL_OUTPUT_FIELDS
+        self.state_fields = ACL_STATE_FIELDS
+        self.module = _load_editacl()
+        _intercept_the_abort(self.module)
 
-        avant = AclState(owner="nobody", sharing="app",
-                         perms_read=("*",), perms_write=("ancien_role",))
-        apres = AclState(owner="nobody", sharing="app",
-                         perms_read=("*",), perms_write=("nouveau_role_admin",))
+        before = AclState(owner="nobody", sharing="app",
+                          perms_read=("*",), perms_write=("legacy_role",))
+        after = AclState(owner="nobody", sharing="app",
+                         perms_read=("*",), perms_write=("new_role_admin",))
 
-        #: Un statut **sans** etat — l'objet est ecarte avant la fusion — et un statut
-        #: qui en porte un. C'est exactement le lot que la macro d'inventaire produit :
-        #: elle liste les objets prives au meme titre que les autres.
-        resultats = {
-            "objet_prive": EventResult(
+        #: One status **without** a state - the object is skipped before the merge - and
+        #: one status that carries a state. This is exactly the batch the inventory
+        #: macro produces: it lists private objects on the same footing as the others.
+        results = {
+            "private_object": EventResult(
                 status="skipped_private",
-                title="objet_prive",
+                title="private_object",
                 error="private_object_out_of_scope",
             ),
-            "objet_partage": EventResult(
+            "shared_object": EventResult(
                 status="dryrun",
-                title="objet_partage",
+                title="shared_object",
                 http_code=200,
-                before=avant,
-                after=apres,
+                before=before,
+                after=after,
             ),
         }
 
-        class _ProcesseurParTitre(object):
+        class _ProcessorByTitle(object):
             skipped_ceiling = 0
 
             def process(self, event):
-                return resultats[event.title]
+                return results[event.title]
 
         self.module.RestClient = lambda *a, **k: object()
         self.module.check_capability = lambda rest: None
@@ -800,164 +808,165 @@ class JeuDeChampsDeSortieDeclareTest(unittest.TestCase):
         self.module.AppStateCache = lambda rest: types.SimpleNamespace(
             is_app_disabled=lambda app: False
         )
-        self.module.EventProcessor = lambda **kwargs: _ProcesseurParTitre()
+        self.module.EventProcessor = lambda **kwargs: _ProcessorByTitle()
 
-    def _flux(self, titres, declarer=True):
-        """Deroule un lot et rend l'ecrivain, en-tete figee comme le ferait le SDK."""
-        commande = self.module.EditAclCommand()
-        commande.dryrun = True
-        commande.validate_roles = False
-        commande.journal = False
-        commande.max_objects = 10
-        commande._metadata = types.SimpleNamespace(
+    def _stream(self, titles, declare=True):
+        """Run a batch and return the writer, header frozen as the SDK would do it."""
+        command = self.module.EditAclCommand()
+        command.dryrun = True
+        command.validate_roles = False
+        command.journal = False
+        command.max_objects = 10
+        command._metadata = types.SimpleNamespace(
             searchinfo=types.SimpleNamespace(
                 sid="1700000000.1",
-                username="un_operateur",
+                username="an_operator",
                 splunkd_uri="https://127.0.0.1:8089",
-                session_key="clef-de-session-factice",
+                session_key="fake-session-key",
             )
         )
-        sorties = list(commande.stream([{"title": titre} for titre in titres]))
-        if not declarer:
-            # Temoin : on retire la declaration juste avant l'ecriture, pour eprouver
-            # que la double reproduit bien l'anomalie qu'elle est censee reproduire.
-            commande._record_writer.custom_fields.clear()
-        commande._record_writer.write_records(sorties)
-        return commande._record_writer
+        outputs = list(command.stream([{"title": title} for title in titles]))
+        if not declare:
+            # Control: the declaration is removed just before the write, to prove that
+            # the double does reproduce the anomaly it is supposed to reproduce.
+            command._record_writer.custom_fields.clear()
+        command._record_writer.write_records(outputs)
+        return command._record_writer
 
-    # -- la preuve, dans les deux ordres ------------------------------------ #
+    # -- the proof, in both orders ------------------------------------------ #
 
-    def test_le_lot_commencant_par_un_statut_sans_etat_porte_tous_les_champs(self):
-        writer = self._flux(["objet_prive", "objet_partage"])
-        for champ in self.champs_declares:
-            self.assertIn(champ, writer.header, champ)
+    def test_a_batch_starting_with_a_stateless_status_carries_every_field(self):
+        writer = self._stream(["private_object", "shared_object"])
+        for field in self.declared_fields:
+            self.assertIn(field, writer.header, field)
 
-    def test_le_lot_commencant_par_un_statut_avec_etat_porte_tous_les_champs(self):
-        writer = self._flux(["objet_partage", "objet_prive"])
-        for champ in self.champs_declares:
-            self.assertIn(champ, writer.header, champ)
+    def test_a_batch_starting_with_a_stateful_status_carries_every_field(self):
+        writer = self._stream(["shared_object", "private_object"])
+        for field in self.declared_fields:
+            self.assertIn(field, writer.header, field)
 
-    def test_len_tete_est_la_meme_dans_les_deux_ordres(self):
-        """La propriete qui compte : la sortie ne depend plus de l'ordre du lot."""
-        direct = self._flux(["objet_prive", "objet_partage"]).header
-        inverse = self._flux(["objet_partage", "objet_prive"]).header
-        self.assertEqual(sorted(direct), sorted(inverse))
+    def test_the_header_is_the_same_in_both_orders(self):
+        """The property that matters: the output no longer depends on batch order."""
+        forward = self._stream(["private_object", "shared_object"]).header
+        reverse = self._stream(["shared_object", "private_object"]).header
+        self.assertEqual(sorted(forward), sorted(reverse))
 
-    def test_la_valeur_utile_est_bien_portee_quand_le_prive_est_en_tete(self):
-        """Presence de la colonne ne suffit pas : la valeur doit y etre."""
-        writer = self._flux(["objet_prive", "objet_partage"])
-        self.assertEqual(writer.rows[1]["acl_before_perms_write"], "ancien_role")
-        self.assertEqual(writer.rows[1]["acl_after_perms_write"], "nouveau_role_admin")
+    def test_the_useful_value_is_carried_when_the_private_object_comes_first(self):
+        """Presence of the column is not enough: the value must be in it."""
+        writer = self._stream(["private_object", "shared_object"])
+        self.assertEqual(writer.rows[1]["acl_before_perms_write"], "legacy_role")
+        self.assertEqual(writer.rows[1]["acl_after_perms_write"], "new_role_admin")
 
-    def test_le_statut_sans_etat_ne_porte_aucune_valeur_detat(self):
-        """La declaration ajoute la colonne, elle n'invente pas de contenu (§8.2)."""
-        writer = self._flux(["objet_prive", "objet_partage"])
-        for champ in self.champs_detat:
-            self.assertIsNone(writer.rows[0][champ], champ)
+    def test_the_stateless_status_carries_no_state_value(self):
+        """The declaration adds the column, it does not invent content (section 8.2)."""
+        writer = self._stream(["private_object", "shared_object"])
+        for field in self.state_fields:
+            self.assertIsNone(writer.rows[0][field], field)
 
-    # -- temoin : sans declaration, l'anomalie est bien reproduite ---------- #
+    # -- control: without the declaration, the anomaly is reproduced -------- #
 
-    def test_sans_declaration_les_huit_champs_disparaissent(self):
-        """Ce que mesurait l'auditeur sur `191d5e8`, et ce qui ferme le controle.
+    def test_without_the_declaration_the_eight_fields_disappear(self):
+        """What the auditor measured on `191d5e8`, and what closes the control.
 
-        Si ce test cessait de passer, la double ne reproduirait plus l'anomalie et les
-        cinq tests ci-dessus ne prouveraient plus rien.
+        If this test stopped passing, the double would no longer reproduce the anomaly
+        and the five tests above would no longer prove anything.
         """
-        writer = self._flux(["objet_prive", "objet_partage"], declarer=False)
-        for champ in self.champs_detat:
-            self.assertNotIn(champ, writer.header, champ)
+        writer = self._stream(["private_object", "shared_object"], declare=False)
+        for field in self.state_fields:
+            self.assertNotIn(field, writer.header, field)
 
-    def test_sans_declaration_lordre_inverse_les_conserve(self):
-        writer = self._flux(["objet_partage", "objet_prive"], declarer=False)
-        for champ in self.champs_detat:
-            self.assertIn(champ, writer.header, champ)
+    def test_without_the_declaration_the_reverse_order_keeps_them(self):
+        writer = self._stream(["shared_object", "private_object"], declare=False)
+        for field in self.state_fields:
+            self.assertIn(field, writer.header, field)
 
-    # -- la declaration ne peut pas deriver de la projection ---------------- #
+    # -- the declaration cannot drift away from the projection -------------- #
 
-    def test_la_declaration_couvre_exactement_ce_que_ladaptateur_projette(self):
-        """Deux listes qui divergeraient rendraient la correction muette.
+    def test_the_declaration_covers_exactly_what_the_adapter_projects(self):
+        """Two lists that drifted apart would make the fix silent.
 
-        Les noms projetes sont releves dans la source de `_handle`, ceux declares dans
-        `ACL_OUTPUT_FIELDS`. L'egalite des deux jeux est la seule chose qui garantit
-        qu'aucun champ ajoute demain ne retombera dans le defaut d'aujourd'hui.
+        The projected names are collected from the source of `_handle`, the declared
+        ones from `ACL_OUTPUT_FIELDS`. The equality of the two sets is the only thing
+        that guarantees that no field added tomorrow falls back into today's defect.
         """
         source = os.path.join(BIN_DIR, "editacl.py")
         with open(source, encoding="utf-8") as handle:
-            arbre = ast.parse(handle.read())
+            tree = ast.parse(handle.read())
 
-        projetes = set()
-        for noeud in ast.walk(arbre):
-            if not isinstance(noeud, ast.FunctionDef) or noeud.name != "_handle":
+        projected = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name != "_handle":
                 continue
-            for interne in ast.walk(noeud):
-                if not isinstance(interne, ast.Assign):
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Assign):
                     continue
-                for cible in interne.targets:
+                for target in inner.targets:
                     if (
-                        isinstance(cible, ast.Subscript)
-                        and isinstance(cible.value, ast.Name)
-                        and cible.value.id == "output"
-                        and isinstance(cible.slice, ast.Constant)
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "output"
+                        and isinstance(target.slice, ast.Constant)
                     ):
-                        projetes.add(cible.slice.value)
+                        projected.add(target.slice.value)
 
-        self.assertEqual(projetes, set(self.champs_declares))
+        self.assertEqual(projected, set(self.declared_fields))
 
-    def test_la_declaration_est_faite_des_le_point_dextension_du_sdk(self):
-        """`prepare()` est invoque par le SDK avant toute execution.
+    def test_the_declaration_is_made_from_the_sdk_extension_point(self):
+        """`prepare()` is invoked by the SDK before any execution.
 
-        `_setup()` la refait — il s'execute avant le premier `yield` — mais s'appuyer
-        sur lui seul ferait dependre la sortie d'un chemin qui n'est pas celui que le
-        SDK documente.
+        `_setup()` does it again - it runs before the first `yield` - but relying on it
+        alone would make the output depend on a path that is not the one the SDK
+        documents.
         """
-        commande = self.module.EditAclCommand()
-        commande.prepare()
+        command = self.module.EditAclCommand()
+        command.prepare()
         self.assertEqual(
-            set(self.champs_declares) - commande._record_writer.custom_fields, set()
+            set(self.declared_fields) - command._record_writer.custom_fields, set()
         )
 
 
-class LeDoubleReproduitLeSdkTest(unittest.TestCase):
-    """Adosse `_FakeRecordWriter` a la source du SDK vendorise, sans la charger.
+class TheDoubleReproducesTheSdkTest(unittest.TestCase):
+    """Backs `_FakeRecordWriter` against the source of the vendored SDK, without loading
+    it.
 
-    La suite ne met pas `bin/lib` dans `sys.path` (§11.1) : les tests d'A-1 s'appuient
-    donc sur une double. Une double qui aurait derive du SDK prouverait quelque chose
-    d'autre que ce qu'elle pretend. Ces trois controles lisent la source du SDK et
-    figent les trois faits sur lesquels la double — et la correction — reposent.
+    The suite does not put `bin/lib` in `sys.path` (section 11.1): the A-1 tests
+    therefore rest on a double. A double that had drifted away from the SDK would prove
+    something other than what it claims. These three controls read the source of the SDK
+    and freeze the three facts the double - and the fix - rest on.
     """
 
     @classmethod
     def setUpClass(cls):
-        chemin = os.path.join(SDK_DIR, "internals.py")
-        with open(chemin, encoding="utf-8") as handle:
+        path = os.path.join(SDK_DIR, "internals.py")
+        with open(path, encoding="utf-8") as handle:
             cls.source = handle.read()
-        cls.arbre = ast.parse(cls.source)
+        cls.tree = ast.parse(cls.source)
 
-    def test_len_tete_est_figee_sur_les_cles_du_premier_enregistrement(self):
+    def test_the_header_is_frozen_on_the_keys_of_the_first_record(self):
         self.assertIn(
             "self._fieldnames = fieldnames = list(record.keys())", self.source
         )
 
-    def test_len_tete_est_etendue_par_custom_fields(self):
+    def test_the_header_is_extended_by_custom_fields(self):
         self.assertIn(
             "[i for i in self.custom_fields if i not in self._fieldnames]", self.source
         )
 
-    def test_custom_fields_survit_a_la_fin_de_chunk(self):
-        """`_clear()` remet l'en-tete a zero, jamais la declaration.
+    def test_custom_fields_survives_the_end_of_chunk(self):
+        """`_clear()` resets the header, never the declaration.
 
-        C'est ce qui rend une declaration **unique** valable pour tous les chunks d'une
-        execution — sans quoi il faudrait la refaire a chaque chunk.
+        That is what makes a **single** declaration valid for every chunk of a run -
+        without it the declaration would have to be redone on each chunk.
         """
         clears = [
-            noeud
-            for noeud in ast.walk(self.arbre)
-            if isinstance(noeud, ast.FunctionDef) and noeud.name == "_clear"
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_clear"
         ]
         self.assertTrue(clears)
-        for noeud in clears:
-            corps = ast.dump(noeud)
-            self.assertNotIn("custom_fields", corps)
+        for node in clears:
+            body = ast.dump(node)
+            self.assertNotIn("custom_fields", body)
 
 
 if __name__ == "__main__":

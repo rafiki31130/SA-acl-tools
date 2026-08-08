@@ -1,12 +1,12 @@
-"""Jeu de tests unitaires du §11.1 — executable hors Splunk, sans instance, sans reseau.
+"""Unit test suite of spec section 11.1: runs outside Splunk, no instance, no network.
 
-Commande de rejeu, depuis la racine du depot :
+Replay command, from the root of the repository:
 
     python -m unittest discover -s tests -t . -v
 
-Aucune dependance de developpement : `unittest` de la bibliotheque standard suffit.
-Les tests importent `bin/acltools` directement, **sans jamais charger `bin/lib`** —
-c'est la verification pratique que le noyau ne depend pas du SDK.
+No development dependency: `unittest` from the standard library is enough. The tests
+import `bin/acltools` directly, **without ever loading `bin/lib`**, which is the
+practical check that the core does not depend on the SDK.
 """
 
 import os

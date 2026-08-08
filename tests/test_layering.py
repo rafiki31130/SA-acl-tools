@@ -1,9 +1,9 @@
-"""Etancheite des couches — la regle d'import du §1.2 de la spec, verifiee mecaniquement.
+"""Layer separation: the import rule of spec section 1.2, checked mechanically.
 
-C'est ce test qui empeche la testabilite hors Splunk de se degrader au fil des
-iterations. Sans lui, la regle n'est qu'une intention en commentaire : il suffit d'un
-import ajoute a la va-vite dans `merge.py` pour que le §11.1 devienne inapplicable et
-que la matrice de fusion cesse d'etre eprouvable sur une machine sans instance.
+This is the test that keeps testability outside Splunk from degrading over the
+iterations. Without it the rule is nothing but an intention in a comment: one import
+hastily added to `merge.py` is enough to make section 11.1 inapplicable and to stop the
+merge matrix from being provable on a machine with no instance.
 """
 
 import ast
@@ -14,15 +14,15 @@ from . import BIN_DIR
 
 PACKAGE_DIR = os.path.join(BIN_DIR, "acltools")
 
-#: Seul module autorise a parler HTTP et a ouvrir une socket.
+#: The only module allowed to speak HTTP and to open a socket.
 ALLOWED_NETWORK_MODULE = "rest.py"
 
-#: Modules interdits d'import dans le noyau, hors `rest.py`.
+#: Modules the core may not import, outside `rest.py`.
 FORBIDDEN_IMPORTS = ("socket", "http", "urllib.request", "urllib.error", "ssl")
 
-#: Motifs textuels interdits dans le noyau, sans exception de module : le SDK de
-#: commande de recherche n'y a aucune place. Le nom est reconstitue pour que ce
-#: fichier de test ne soit pas lui-meme un contre-exemple s'il etait deplace.
+#: Text patterns forbidden in the core, with no module exception: the search command
+#: SDK has no place there. The name is reassembled so that this test file is not itself
+#: a counter-example if it were ever moved.
 FORBIDDEN_TEXT = ("splunk" + "lib",)
 
 
@@ -48,52 +48,54 @@ def _imported_modules(path):
 
 class LayeringTest(unittest.TestCase):
 
-    def test_le_paquet_existe_et_nest_pas_vide(self):
-        fichiers = list(_python_files())
-        self.assertGreaterEqual(len(fichiers), 10)
-        self.assertIn(ALLOWED_NETWORK_MODULE, [name for name, _ in fichiers])
+    def test_the_package_exists_and_is_not_empty(self):
+        files = list(_python_files())
+        self.assertGreaterEqual(len(files), 10)
+        self.assertIn(ALLOWED_NETWORK_MODULE, [name for name, _ in files])
 
-    def test_aucun_module_du_noyau_nimporte_le_reseau_sauf_rest(self):
+    def test_no_core_module_imports_the_network_except_rest(self):
         for name, path in _python_files():
             if name == ALLOWED_NETWORK_MODULE:
                 continue
             with self.subTest(module=name):
                 modules = _imported_modules(path)
-                for interdit in FORBIDDEN_IMPORTS:
-                    racine = interdit.split(".")[0]
-                    fautifs = [
+                for forbidden in FORBIDDEN_IMPORTS:
+                    root = forbidden.split(".")[0]
+                    offenders = [
                         m for m in modules
-                        if m == interdit or m == racine or m.startswith(interdit + ".")
+                        if m == forbidden or m == root or m.startswith(forbidden + ".")
                     ]
-                    # `urllib.parse` est autorise : c'est du calcul de chaine, pas du
-                    # reseau. Seules les branches reseau d'urllib sont proscrites.
-                    fautifs = [m for m in fautifs if not m.startswith("urllib.parse")]
-                    if racine == "urllib":
-                        fautifs = [
-                            m for m in fautifs
+                    # `urllib.parse` is allowed: it is string computation, not network
+                    # access. Only the network branches of urllib are proscribed.
+                    offenders = [
+                        m for m in offenders if not m.startswith("urllib.parse")
+                    ]
+                    if root == "urllib":
+                        offenders = [
+                            m for m in offenders
                             if m in ("urllib", "urllib.request", "urllib.error")
                         ]
                     self.assertEqual(
-                        fautifs, [],
-                        "%s importe %r : la regle d'import du §1.2 interdit le reseau "
-                        "hors de acltools/rest.py" % (name, fautifs),
+                        offenders, [],
+                        "%s imports %r: the import rule of section 1.2 forbids the "
+                        "network outside acltools/rest.py" % (name, offenders),
                     )
 
-    def test_aucun_fichier_du_noyau_ne_mentionne_le_sdk(self):
+    def test_no_core_file_mentions_the_sdk(self):
         for name, path in _python_files():
             with self.subTest(module=name):
                 with open(path, encoding="utf-8") as handle:
                     source = handle.read()
-                for motif in FORBIDDEN_TEXT:
+                for pattern in FORBIDDEN_TEXT:
                     self.assertNotIn(
-                        motif, source,
-                        "%s mentionne %r : le noyau doit rester importable sans le SDK"
-                        % (name, motif),
+                        pattern, source,
+                        "%s mentions %r: the core must stay importable without the SDK"
+                        % (name, pattern),
                     )
 
-    def test_le_noyau_simporte_sans_bin_lib_sur_le_path(self):
-        """Les tests n'inserent jamais `bin/lib` dans `sys.path` : le simple fait que la
-        suite s'execute prouve que le noyau ne depend pas du SDK vendorise."""
+    def test_the_core_imports_without_bin_lib_on_the_path(self):
+        """The tests never insert `bin/lib` into `sys.path`: the mere fact that the
+        suite runs proves that the core does not depend on the vendored SDK."""
         import sys
 
         lib = os.path.join(BIN_DIR, "lib")
@@ -107,52 +109,52 @@ class LayeringTest(unittest.TestCase):
         import acltools.pipeline  # noqa: F401
         import acltools.preflight  # noqa: F401
 
-    def test_lenveloppe_se_compile_sans_le_sdk(self):
-        """`bin/editacl.py` n'est pas importable sans le SDK — c'est le but — mais il
-        doit au moins compiler, et son insertion de `sys.path` doit preceder le premier
-        import du SDK."""
-        chemin = os.path.join(BIN_DIR, "editacl.py")
-        with open(chemin, encoding="utf-8") as handle:
+    def test_the_wrapper_compiles_without_the_sdk(self):
+        """`bin/editacl.py` is not importable without the SDK, which is the point, but
+        it must at least compile, and its `sys.path` insertion must come before the
+        first import of the SDK."""
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
             source = handle.read()
-        compile(source, chemin, "exec")
+        compile(source, path, "exec")
 
-        tree = ast.parse(source, filename=chemin)
-        ligne_syspath = None
-        ligne_sdk = None
+        tree = ast.parse(source, filename=path)
+        syspath_line = None
+        sdk_line = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and ligne_syspath is None:
+            if isinstance(node, ast.Call) and syspath_line is None:
                 if ast.unparse(node.func) == "sys.path.insert":
-                    ligne_syspath = node.lineno
+                    syspath_line = node.lineno
             if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module.startswith("splunk" + "lib") and ligne_sdk is None:
-                    ligne_sdk = node.lineno
-        self.assertIsNotNone(ligne_syspath, "aucune insertion dans sys.path")
-        self.assertIsNotNone(ligne_sdk, "aucun import du SDK")
+                if node.module.startswith("splunk" + "lib") and sdk_line is None:
+                    sdk_line = node.lineno
+        self.assertIsNotNone(syspath_line, "no insertion into sys.path")
+        self.assertIsNotNone(sdk_line, "no import of the SDK")
         self.assertLess(
-            ligne_syspath, ligne_sdk,
-            "bin/lib doit etre en tete de sys.path AVANT le premier import du SDK",
+            syspath_line, sdk_line,
+            "bin/lib must be at the head of sys.path BEFORE the first SDK import",
         )
 
-    def test_lenveloppe_ne_porte_aucune_regle_metier(self):
-        """L'adaptateur cable, il ne decide pas : aucune des fonctions de decision du
-        noyau n'y est redefinie."""
-        chemin = os.path.join(BIN_DIR, "editacl.py")
-        with open(chemin, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=chemin)
-        definies = {
+    def test_the_wrapper_carries_no_business_rule(self):
+        """The adapter wires, it does not decide: none of the decision functions of the
+        core is redefined there."""
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        defined = {
             node.name for node in ast.walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
-        interdites = {
+        forbidden = {
             "merge", "is_noop", "normalize_roles", "validate_roles", "parse_fields",
             "build_object_path", "encode_title_segment", "resolve_handler_path",
             "build_intent_record", "build_outcome_record",
         }
-        self.assertEqual(definies & interdites, set())
+        self.assertEqual(defined & forbidden, set())
 
-    def test_le_noyau_nutilise_aucune_dependance_tierce(self):
-        """Aucune bibliotheque hors bibliotheque standard, sur aucun module."""
-        autorises = {
+    def test_the_core_uses_no_third_party_dependency(self):
+        """No library outside the standard library, on any module."""
+        allowed = {
             "ast", "csv", "json", "logging", "logging.handlers", "os", "re", "ssl",
             "sys", "time", "typing", "dataclasses", "datetime", "urllib",
             "urllib.parse", "urllib.request", "urllib.error", "collections",
@@ -163,12 +165,12 @@ class LayeringTest(unittest.TestCase):
                 for module in _imported_modules(path):
                     if module.startswith("."):
                         continue
-                    racine = module.split(".")[0]
-                    if racine == "acltools":
+                    root = module.split(".")[0]
+                    if root == "acltools":
                         continue
                     self.assertIn(
-                        module if module in autorises else racine, autorises,
-                        "%s importe %r, hors bibliotheque standard autorisee"
+                        module if module in allowed else root, allowed,
+                        "%s imports %r, outside the allowed standard library"
                         % (name, module),
                     )
 

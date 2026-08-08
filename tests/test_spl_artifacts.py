@@ -1,11 +1,12 @@
-"""Artefacts SPL : macros, recherches livrees, lookups (§6.5, §6.7, §8.6, §12.7).
+"""SPL artifacts: macros, shipped searches, lookups (sections 6.5, 6.7, 8.6, 12.7).
 
-Ces fichiers sont des livrables normatifs autant que le code, et ils ne sont
-eprouvables sur une instance qu'en l'ayant sous la main. Ce module fige hors Splunk ce
-qui peut l'etre : la presence des stanzas, le jeu de champs emis, la source
-d'inventaire, et surtout la **coherence entre la table lue par le code Python et le
-lookup lu par la macro d'inventaire** — la meme information sous deux formes, dont la
-divergence rendrait l'inventaire et la resolution incoherents sans le moindre message.
+These files are normative deliverables just as much as the code, and they can only be
+exercised on an instance by having one at hand. This module freezes outside Splunk what
+can be frozen: the presence of the stanzas, the set of emitted fields, the inventory
+source, and above all the **consistency between the table read by the Python code and
+the lookup read by the inventory macro**. That is the same information under two forms,
+and a divergence between them would make the inventory and the endpoint resolution
+inconsistent without a single message.
 """
 
 import csv
@@ -17,8 +18,8 @@ import unittest
 from . import BIN_DIR, REPO_ROOT
 from .test_journal import ROLLBACK_FIELDS_FROM_INTENT
 
-#: Jeu de champs exige du §6.7 contrainte 3, dans l'ordre, exactement.
-CONTRAT_ENTREE = (
+#: Set of fields required by section 6.7 constraint 3, in order, exactly.
+INPUT_CONTRACT = (
     "title",
     "eai:acl.app",
     "eai:acl.owner",
@@ -29,11 +30,11 @@ CONTRAT_ENTREE = (
     "id",
 )
 
-#: Champs produits par `editacl_rollback` (§8.6). `id` n'y figure pas : il n'est pas
-#: journalise, et c'est precisement pourquoi la macro d'inventaire doit synthetiser
-#: `eai:type` (§6.7 contrainte 4).
-#: L'ordre est celui du §8.6, repris litteralement.
-CONTRAT_ROLLBACK = (
+#: Fields produced by `editacl_rollback` (section 8.6). `id` is not among them: it is
+#: not journaled, and that is precisely why the inventory macro has to synthesize
+#: `eai:type` (section 6.7 constraint 4).
+#: The order is the one of section 8.6, taken literally.
+ROLLBACK_CONTRACT = (
     "eai:acl.perms.read",
     "eai:acl.perms.write",
     "eai:acl.sharing",
@@ -45,10 +46,10 @@ CONTRAT_ROLLBACK = (
 
 
 def read_splunk_conf(*parts):
-    """Lecteur de `.conf` Splunk : gere la continuation de ligne par `\\` finale.
+    """Splunk `.conf` reader: handles line continuation by a trailing `\\`.
 
-    `configparser` ne sait pas la traiter — il ne joint que les lignes indentees — et
-    rendrait donc toute definition de macro multiligne illisible.
+    `configparser` cannot deal with it - it only joins indented lines - and would
+    therefore make any multi-line macro definition unreadable.
     """
     path = os.path.join(REPO_ROOT, *parts)
     stanzas = {}
@@ -95,8 +96,8 @@ def endpoint_map():
         return json.load(f)
 
 
-def champs_de_table(definition):
-    """Extrait la liste de champs du dernier `| table ...` d'une definition SPL."""
+def table_fields(definition):
+    """Extract the field list of the last `| table ...` of an SPL definition."""
     segment = definition.rsplit("| table ", 1)[1]
     return [c.strip().strip('"').strip("'") for c in segment.split(",") if c.strip()]
 
@@ -104,36 +105,36 @@ def champs_de_table(definition):
 class MacrosTest(unittest.TestCase):
     def setUp(self):
         self.conf = read_splunk_conf("default", "macros.conf")
-        self.familles = read_csv_lookup("acl_object_families.csv")
+        self.families = read_csv_lookup("acl_object_families.csv")
 
-    def test_les_macros_du_cahier_des_charges_sont_declarees(self):
+    def test_the_macros_of_the_specification_are_declared(self):
         for stanza in ("acl_inventory", "acl_inventory(1)",
                        "editacl_rollback(1)", "editacl_rollback_apply(1)"):
             self.assertIn(stanza, self.conf)
 
-    def test_une_stanza_par_arite_jusqu_au_nombre_de_familles(self):
-        # Splunk indexe les macros par ARITE : `acl_inventory(savedsearch,views)` est un
-        # appel a deux arguments. Sans stanza `[acl_inventory(2)]`, la forme parametree
-        # du §13 echoue avec « macro cannot be found ».
-        arites = {
+    def test_one_stanza_per_arity_up_to_the_number_of_families(self):
+        # Splunk indexes macros by ARITY: `acl_inventory(savedsearch,views)` is a call
+        # with two arguments. Without an `[acl_inventory(2)]` stanza, the parameterized
+        # form of section 13 fails with "macro cannot be found".
+        arities = {
             int(m.group(1))
             for m in (re.match(r"^acl_inventory\((\d+)\)$", s) for s in self.conf)
             if m
         }
-        self.assertEqual(arites, set(range(1, len(self.familles) + 1)))
+        self.assertEqual(arities, set(range(1, len(self.families) + 1)))
 
-    def test_l_inventaire_ne_s_appuie_pas_sur_le_handler_d_agregation(self):
+    def test_the_inventory_does_not_rely_on_the_aggregation_handler(self):
         definition = self.conf["acl_inventory_base(1)"]["definition"]
         self.assertNotIn("admin/directory", definition)
         self.assertIn("inputlookup acl_object_families", definition)
 
-    def test_l_inventaire_emet_exactement_le_contrat_d_entree(self):
+    def test_the_inventory_emits_exactly_the_input_contract(self):
         definition = self.conf["acl_inventory_base(1)"]["definition"]
-        self.assertEqual(tuple(champs_de_table(definition)), CONTRAT_ENTREE)
+        self.assertEqual(tuple(table_fields(definition)), INPUT_CONTRACT)
 
-    def test_l_inventaire_synthetise_eai_type(self):
-        # Sans cette synthese l'aller fonctionne — `id` est exploitable — mais le retour
-        # arriere est impossible : la restauration resout par `eai:type` (§6.7-4).
+    def test_the_inventory_synthesizes_eai_type(self):
+        # Without that synthesis the outbound leg works - `id` is usable - but the
+        # rollback is impossible: the restore resolves by `eai:type` (section 6.7-4).
         definition = self.conf["acl_inventory_base(1)"]["definition"]
         self.assertIn("acl_family", definition)
         self.assertRegex(
@@ -141,131 +142,132 @@ class MacrosTest(unittest.TestCase):
             r"eval \"eai:type\" = if\(isnull\('eai:type'\).*acl_family",
         )
 
-    def test_la_selection_precede_les_appels_rest(self):
-        # Le levier de cout du §6.7-2 : une famille non demandee ne doit couter aucun
-        # appel REST. Si le `where` passait apres le `map`, tout serait enumere.
+    def test_the_selection_precedes_the_rest_calls(self):
+        # The cost lever of section 6.7-2: a family that was not asked for must cost no
+        # REST call. If the `where` came after the `map`, everything would be
+        # enumerated.
         definition = self.conf["acl_inventory_base(1)"]["definition"]
         self.assertLess(definition.index("| where match(family"),
                         definition.index("| map "))
 
-    def test_l_argument_de_famille_est_filtre_avant_injection_en_regex(self):
+    def test_the_family_argument_is_filtered_before_injection_into_a_regex(self):
         definition = self.conf["acl_inventory_base(1)"]["definition"]
         self.assertIn('replace("$families$", "[^A-Za-z0-9_,-]", "")', definition)
 
-    def test_le_rollback_produit_exactement_les_sept_champs_attendus(self):
+    def test_the_rollback_produces_exactly_the_seven_expected_fields(self):
         definition = self.conf["editacl_rollback(1)"]["definition"]
-        emis = re.findall(r'AS\s+"?([A-Za-z:._*]+)"?', definition)
+        emitted = re.findall(r'AS\s+"?([A-Za-z:._*]+)"?', definition)
         self.assertEqual(
-            tuple(c for c in emis if c != "restorable"), CONTRAT_ROLLBACK
+            tuple(c for c in emitted if c != "restorable"), ROLLBACK_CONTRACT
         )
 
-    def test_le_rollback_ne_consomme_que_des_champs_journalises(self):
+    def test_the_rollback_consumes_only_journaled_fields(self):
         definition = self.conf["editacl_rollback(1)"]["definition"]
-        for champ in ("before_perms_read", "before_perms_write", "before_sharing",
+        for field in ("before_perms_read", "before_perms_write", "before_sharing",
                       "before_owner", "app", "title", "eai_type", "endpoint", "phase",
                       "status", "sid"):
-            self.assertIn(champ, definition)
-            self.assertIn(champ, ROLLBACK_FIELDS_FROM_INTENT + ("status",))
+            self.assertIn(field, definition)
+            self.assertIn(field, ROLLBACK_FIELDS_FROM_INTENT + ("status",))
 
-    def test_le_rollback_n_apparie_que_les_ecritures_abouties(self):
-        # Un objet dont le POST a echoue n'a pas ete modifie : le « restaurer »
-        # l'ecrirait vers un etat qu'il n'a jamais quitte.
+    def test_the_rollback_pairs_only_completed_writes(self):
+        # An object whose POST failed was not modified: "restoring" it would write it
+        # towards a state it never left.
         definition = self.conf["editacl_rollback(1)"]["definition"]
         self.assertIn('phase="outcome" AND status="updated"', definition)
         self.assertIn("eventstats max(_restorable) AS restorable BY endpoint",
                       definition)
 
-    def test_le_rollback_applique_delegue_au_rollback_de_previsualisation(self):
-        # Deux copies du meme pipeline divergeraient au premier amendement, et la copie
-        # oubliee serait celle qui ecrit.
+    def test_the_applied_rollback_delegates_to_the_preview_rollback(self):
+        # Two copies of the same pipeline would diverge at the first amendment, and the
+        # forgotten copy would be the one that writes.
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
         self.assertIn("`editacl_rollback($sid$)`", definition)
 
-    def test_le_rollback_applique_porte_l_invocation_complete(self):
-        # D-13 : la macro existe pour que l'operateur n'ait rien a saisir au moment ou
-        # il restaure apres un incident.
+    def test_the_applied_rollback_carries_the_complete_invocation(self):
+        # D-13: the macro exists so that the operator has nothing to type at the moment
+        # of restoring after an incident.
         #
-        # Elle ne porte plus AUCUN parametre de nommage : la macro emet la nomenclature
-        # native, que les quatre valeurs cibles reprennent par defaut. La classe
-        # d'erreur de la v1.3 — liste `fields` non quotee, tronquee par SPL a sa
-        # premiere valeur, restauration qui ne retablit que `perms.read` en rapportant
-        # un succes — est eliminee par construction : il n'y a plus de liste a quoter.
+        # It no longer carries ANY field-naming parameter: the macro emits the
+        # platform's native field names, which the four target values pick up by
+        # default. The error class of v1.3 - an unquoted `fields` list, truncated by SPL
+        # to its first value, a restore that only put `perms.read` back while reporting
+        # a success - is eliminated by construction: there is no list left to quote.
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
         self.assertIn("| editacl ", definition)
         self.assertIn("dryrun=f", definition)
         self.assertNotIn("fields=", definition)
 
-    def test_le_rollback_applique_leve_le_plafond_par_defaut(self):
-        # Le defaut vaut dix (D-30) : une restauration s'y heurterait des le onzieme
-        # objet. Le volume a deja ete decide par l'operateur au moment de l'aller, et
-        # le `sid` delimite le jeu.
+    def test_the_applied_rollback_raises_the_default_ceiling(self):
+        # The default is ten (D-30): a restore would hit it at the eleventh object. The
+        # volume was already decided by the operator on the outbound leg, and the `sid`
+        # delimits the set.
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
         self.assertIn("max_objects=", definition)
 
-    def test_le_rollback_materialise_les_colonnes_de_permissions(self):
-        # §8.6, D-32 : la restauration d'une permission VIDE doit vider l'attribut.
-        # Mesure sur 9.4.6, la chaine journal -> indexation -> `stats` ne perd PAS une
-        # permission vide : la colonne est extraite et survit a l'agregation. Le
-        # `coalesce` est donc une DEFENSE EN PROFONDEUR — il materialise la colonne
-        # inconditionnellement, ce qui vaut pour une version de la plateforme qui ne
-        # conserverait pas ce comportement — et non le correctif d'un defaut observe.
+    def test_the_rollback_materializes_the_permission_columns(self):
+        # Section 8.6, D-32: restoring an EMPTY permission must clear the attribute.
+        # Measured on 9.4.6, the journal -> indexing -> `stats` chain does NOT lose an
+        # empty permission: the column is extracted and survives the aggregation. The
+        # `coalesce` is therefore DEFENSE IN DEPTH - it materializes the column
+        # unconditionally, which holds for a platform version that would not keep this
+        # behavior - and not the fix of an observed defect.
         definition = self.conf["editacl_rollback(1)"]["definition"]
-        for champ in ("eai:acl.perms.read", "eai:acl.perms.write"):
-            self.assertIn("coalesce('%s'" % champ, definition)
+        for field in ("eai:acl.perms.read", "eai:acl.perms.write"):
+            self.assertIn("coalesce('%s'" % field, definition)
 
-    def test_le_rollback_ne_materialise_ni_sharing_ni_owner(self):
-        # Leur valeur vide n'existe pas cote plateforme : materialiser une colonne vide
-        # n'y transformerait qu'une preservation correcte en rejet.
+    def test_the_rollback_materializes_neither_sharing_nor_owner(self):
+        # Their empty value does not exist on the platform side: materializing an empty
+        # column would only turn a correct preservation into a rejection.
         definition = self.conf["editacl_rollback(1)"]["definition"]
-        for champ in ("eai:acl.sharing", "eai:acl.owner"):
-            self.assertNotIn("coalesce('%s'" % champ, definition)
+        for field in ("eai:acl.sharing", "eai:acl.owner"):
+            self.assertNotIn("coalesce('%s'" % field, definition)
 
-    def test_le_rollback_reemet_le_proprietaire_anterieur(self):
-        # §8.6, D-22 + D-27 : la macro emet `eai:acl.owner` portant le proprietaire
-        # ANTERIEUR, que le defaut de `new_owner` reprend sans parametre explicite.
-        # C'est ce que le modele de parametres rend exprimable et que la v1 ne pouvait
-        # pas faire — le constat C-1 du cadrage tenait a cette impossibilite.
+    def test_the_rollback_reemits_the_previous_owner(self):
+        # Section 8.6, D-22 + D-27: the macro emits `eai:acl.owner` carrying the
+        # PREVIOUS owner, which the default of `new_owner` picks up with no explicit
+        # parameter. This is what the parameter model makes expressible and what v1
+        # could not do - finding C-1 of the scoping stage rested on that impossibility.
         definition = self.conf["editacl_rollback(1)"]["definition"]
         self.assertIn('earliest(before_owner)', definition)
         self.assertIn('AS "eai:acl.owner"', definition)
 
-    def test_seul_le_rollback_applique_ecrit(self):
-        # `editacl_rollback(1)` reste la forme de previsualisation : elle ne doit porter
-        # aucune invocation de la commande (le `sourcetype=editacl:journal` n'en est
-        # pas une : on cherche la commande en position de pipe).
+    def test_only_the_applied_rollback_writes(self):
+        # `editacl_rollback(1)` remains the preview form: it must carry no invocation of
+        # the command (the `sourcetype=editacl:journal` is not one: what is looked for
+        # is the command in pipe position).
         self.assertNotIn("| editacl ", self.conf["editacl_rollback(1)"]["definition"])
 
-    def test_le_rollback_est_invocable_en_position_generatrice(self):
-        # Invoquee par `| `editacl_rollback(...)``, la definition doit commencer par une
-        # commande. Le §8.6 ecrit le SPL sans son `search` de tete.
+    def test_the_rollback_is_invocable_in_generating_position(self):
+        # Invoked as `| `editacl_rollback(...)``, the definition must start with a
+        # command. Section 8.6 writes the SPL without its leading `search`.
         self.assertTrue(
             self.conf["editacl_rollback(1)"]["definition"].startswith("search index=")
         )
 
 
-class CoherenceTableEtLookupTest(unittest.TestCase):
-    """La table est lue par le code Python, le lookup par la macro. Une divergence
-    entre les deux ne se voit qu'a l'execution, et sans message."""
+class TableAndLookupConsistencyTest(unittest.TestCase):
+    """The table is read by the Python code, the lookup by the macro. A divergence
+    between the two only shows up at run time, and with no message."""
 
     def setUp(self):
-        self.familles = {
+        self.families = {
             row["family"]: row["handler_path"]
             for row in read_csv_lookup("acl_object_families.csv")
         }
         self.table = endpoint_map()
 
-    def test_chaque_famille_est_une_cle_de_la_table(self):
-        for famille, handler in self.familles.items():
-            self.assertIn(famille, self.table)
-            self.assertEqual(self.table[famille], handler)
+    def test_every_family_is_a_key_of_the_table(self):
+        for family, handler in self.families.items():
+            self.assertIn(family, self.table)
+            self.assertEqual(self.table[family], handler)
 
-    def test_chaque_handler_de_la_table_est_inventorie(self):
-        self.assertEqual(set(self.familles.values()), set(self.table.values()))
+    def test_every_handler_of_the_table_is_inventoried(self):
+        self.assertEqual(set(self.families.values()), set(self.table.values()))
 
-    def test_un_seul_enregistrement_par_handler(self):
-        # Deux cles de la table peuvent viser le meme handler ; l'inventaire ne doit
-        # l'enumerer qu'une fois, sinon il produit des doublons.
-        handlers = list(self.familles.values())
+    def test_a_single_record_per_handler(self):
+        # Two keys of the table may aim at the same handler; the inventory must only
+        # enumerate it once, otherwise it produces duplicates.
+        handlers = list(self.families.values())
         self.assertEqual(len(handlers), len(set(handlers)))
 
 
@@ -273,201 +275,202 @@ class SavedsearchesTest(unittest.TestCase):
     def setUp(self):
         self.conf = read_splunk_conf("default", "savedsearches.conf")
 
-    NOMS = (
-        "ACL — inventaire par rôle",
-        "ACL — références aux rôles décommissionnés",
-        "ACL — journal des modifications",
+    NAMES = (
+        "ACL - inventory by role",
+        "ACL - references to decommissioned roles",
+        "ACL - change journal",
     )
 
-    def test_les_trois_recherches_du_paragraphe_12_7_sont_livrees(self):
-        for nom in self.NOMS:
-            self.assertIn(nom, self.conf)
+    def test_the_three_searches_of_section_12_7_are_shipped(self):
+        for name in self.NAMES:
+            self.assertIn(name, self.conf)
 
-    def test_les_inventaires_sont_batis_sur_la_macro_et_pas_sur_le_handler(self):
-        for nom in self.NOMS[:2]:
-            recherche = self.conf[nom]["search"]
-            self.assertIn("`acl_inventory`", recherche)
-            self.assertNotIn("admin/directory", recherche)
+    def test_the_inventories_are_built_on_the_macro_and_not_on_the_handler(self):
+        for name in self.NAMES[:2]:
+            search = self.conf[name]["search"]
+            self.assertIn("`acl_inventory`", search)
+            self.assertNotIn("admin/directory", search)
 
-    def test_la_recherche_de_roles_decommissionnes_alimente_directement_editacl(self):
-        recherche = self.conf[self.NOMS[1]]["search"]
-        self.assertIn("lookup acl_decommissioned_roles", recherche)
-        emis = champs_de_table(recherche)
-        for champ in CONTRAT_ENTREE:
-            self.assertIn(champ, emis)
+    def test_the_decommissioned_roles_search_feeds_editacl_directly(self):
+        search = self.conf[self.NAMES[1]]["search"]
+        self.assertIn("lookup acl_decommissioned_roles", search)
+        emitted = table_fields(search)
+        for field in INPUT_CONTRACT:
+            self.assertIn(field, emitted)
 
-    def test_aucune_recherche_n_est_planifiee(self):
-        # L'inventaire est une macro invocable en ligne ; la planification est un usage
-        # recommande, jamais la modalite d'acces (§6.7 contrainte 1).
-        for nom in self.NOMS + (self.AUDIT,):
-            self.assertEqual(self.conf[nom]["enableSched"], "0")
+    def test_no_search_is_scheduled(self):
+        # The inventory is a macro invocable inline; scheduling is a recommended usage,
+        # never the way it is reached (section 6.7 constraint 1).
+        for name in self.NAMES + (self.AUDIT,):
+            self.assertEqual(self.conf[name]["enableSched"], "0")
 
-    # -- §12.7, livrable bloquant ------------------------------------------- #
+    # -- section 12.7, blocking deliverable ---------------------------------- #
 
-    AUDIT = "ACL — divergences eventtype / objets dérivés"
+    AUDIT = "ACL - eventtype / derived object divergences"
 
-    def test_la_recherche_d_audit_des_divergences_est_livree(self):
-        """Livrable **bloquant** du §12.
+    def test_the_divergence_audit_search_is_shipped(self):
+        """**Blocking** deliverable of section 12.
 
-        Elle couvre exactement l'angle mort de D-18 : un derive divergent dont le
-        porteur n'entre dans aucun lot n'est atteint par aucune cascade, et la commande
-        ne l'ecrira jamais. Sans cette recherche, le volume concerne n'est pas mesurable
-        sur le socle cible.
+        It covers exactly the blind spot of D-18: a diverging derived object whose
+        carrier enters no batch is reached by no cascade, and the command will never
+        write it. Without this search, the volume concerned is not measurable on the
+        target platform.
         """
         self.assertIn(self.AUDIT, self.conf)
 
-    def test_l_audit_est_bati_sur_la_macro_d_inventaire(self):
-        recherche = self.conf[self.AUDIT]["search"]
-        self.assertIn("`acl_inventory(eventtypes,fvtags)`", recherche)
-        self.assertNotIn("admin/directory", recherche)
+    def test_the_audit_is_built_on_the_inventory_macro(self):
+        search = self.conf[self.AUDIT]["search"]
+        self.assertIn("`acl_inventory(eventtypes,fvtags)`", search)
+        self.assertNotIn("admin/directory", search)
 
-    def test_l_audit_compare_le_derive_a_son_porteur(self):
-        recherche = self.conf[self.AUDIT]["search"]
-        # Les deux cotes sont apparies, puis leurs empreintes d'ACL comparees.
-        self.assertIn("acl_acl_porteur", recherche)
-        self.assertIn("acl_acl_derive", recherche)
-        self.assertIn("acl_acl_porteur != acl_acl_derive", recherche)
+    def test_the_audit_compares_the_derived_object_to_its_carrier(self):
+        search = self.conf[self.AUDIT]["search"]
+        # Both sides are paired, then their ACL digests are compared.
+        self.assertIn("acl_acl_carrier", search)
+        self.assertIn("acl_acl_derived", search)
+        self.assertIn("acl_acl_carrier != acl_acl_derived", search)
 
-    def test_l_audit_signale_les_roles_references_par_le_derive_seul(self):
-        """Le second volet du §12.7, distinct de la simple divergence d'ACL."""
-        recherche = self.conf[self.AUDIT]["search"]
-        self.assertIn("lookup acl_decommissioned_roles", recherche)
-        self.assertIn("acl_role_non_couvert", recherche)
+    def test_the_audit_reports_roles_referenced_by_the_derived_object_only(self):
+        """The second half of section 12.7, distinct from a plain ACL divergence."""
+        search = self.conf[self.AUDIT]["search"]
+        self.assertIn("lookup acl_decommissioned_roles", search)
+        self.assertIn("acl_role_uncovered", search)
 
-    def test_l_audit_apparie_par_decomposition_jamais_par_concatenation(self):
-        """Meme discipline que le rang 0 du §5.4 (§3.4, propriete 3).
+    def test_the_audit_pairs_by_decomposition_never_by_concatenation(self):
+        """Same discipline as rank 0 of section 5.4 (section 3.4, property 3).
 
-        L'appariement part de la cle composite de l'objet derive et la **decompose** ;
-        il ne recompose jamais un nom d'objet derive a partir du nom d'un porteur. Un
-        `eventtype=` suivi d'une concatenation signalerait la faute.
+        The pairing starts from the composite key of the derived object and
+        **decomposes** it; it never recomposes the name of a derived object from the
+        name of a carrier. An `eventtype=` followed by a concatenation would signal the
+        fault.
         """
-        recherche = self.conf[self.AUDIT]["search"]
-        self.assertIn("acl_pair_field", recherche)
-        self.assertIn("acl_pair_value", recherche)
-        self.assertNotIn('"eventtype=" .', recherche)
-        self.assertNotIn('. "eventtype="', recherche)
+        search = self.conf[self.AUDIT]["search"]
+        self.assertIn("acl_pair_field", search)
+        self.assertIn("acl_pair_value", search)
+        self.assertNotIn('"eventtype=" .', search)
+        self.assertNotIn('. "eventtype="', search)
 
 
-class LookupsEtMetadataTest(unittest.TestCase):
-    def test_les_definitions_de_lookup_pointent_sur_des_fichiers_livres(self):
+class LookupsAndMetadataTest(unittest.TestCase):
+    def test_the_lookup_definitions_point_at_shipped_files(self):
         conf = read_splunk_conf("default", "transforms.conf")
         for stanza in ("acl_object_families", "acl_decommissioned_roles"):
             self.assertIn(stanza, conf)
-            chemin = os.path.join(REPO_ROOT, "lookups", conf[stanza]["filename"])
-            self.assertTrue(os.path.exists(chemin), chemin)
+            path = os.path.join(REPO_ROOT, "lookups", conf[stanza]["filename"])
+            self.assertTrue(os.path.exists(path), path)
 
-    def test_le_lookup_de_roles_ne_porte_que_des_identifiants_generiques(self):
-        # Le depot est public : la liste livree est un gabarit, jamais des roles reels.
+    def test_the_roles_lookup_only_carries_generic_identifiers(self):
+        # The repository is public: the shipped list is a template, never real roles.
         roles = {row["role"] for row in read_csv_lookup("acl_decommissioned_roles.csv")}
-        self.assertEqual(roles, {"ancien_role", "role_a", "role_b"})
+        self.assertEqual(roles, {"legacy_role", "role_a", "role_b"})
 
-    def test_macros_transforms_et_lookups_sont_exportes_au_systeme(self):
-        # Une macro confinee au contexte de l'app n'est pas invocable en ligne depuis
-        # une recherche ad hoc, et une macro exportee qui s'appuie sur un lookup non
-        # exporte echoue hors de son app.
+    def test_macros_transforms_and_lookups_are_exported_to_the_system(self):
+        # A macro confined to the context of its app is not invocable inline from an ad
+        # hoc search, and an exported macro that relies on a lookup that is not exported
+        # fails outside its own app.
         meta = read_splunk_conf("metadata", "default.meta")
         for stanza in ("macros", "transforms", "lookups"):
             self.assertEqual(meta[stanza]["export"], "system")
 
 
 class RevalidationTest(unittest.TestCase):
-    """§6.5 — la procedure reutilise le noyau, elle ne le reimplemente pas."""
+    """Section 6.5: the procedure reuses the core, it does not reimplement it."""
 
     def setUp(self):
-        chemin = os.path.join(REPO_ROOT, "tools", "revalidate_mapping.py")
-        with open(chemin, encoding="utf-8") as handle:
+        path = os.path.join(REPO_ROOT, "tools", "revalidate_mapping.py")
+        with open(path, encoding="utf-8") as handle:
             self.source = handle.read()
 
-    def test_la_procedure_est_livree(self):
+    def test_the_procedure_is_shipped(self):
         self.assertTrue(self.source)
 
-    def test_elle_reutilise_le_noyau_plutot_que_de_le_reecrire(self):
+    def test_it_reuses_the_core_rather_than_rewriting_it(self):
         self.assertIn("from acltools.mapping import load_mapping", self.source)
         self.assertIn("from acltools.endpoint import build_object_path", self.source)
 
-    def test_elle_produit_les_trois_listes_exigees(self):
-        for marqueur in ("== A. ", "== B. ", "== C. "):
-            self.assertIn(marqueur, self.source)
+    def test_it_produces_the_three_required_lists(self):
+        for marker in ("== A. ", "== B. ", "== C. "):
+            self.assertIn(marker, self.source)
 
-    def test_le_mot_de_passe_n_est_jamais_un_argument_de_ligne_de_commande(self):
+    def test_the_password_is_never_a_command_line_argument(self):
         self.assertIn("sys.stdin.readline()", self.source)
         self.assertNotIn("--password", self.source)
 
 
-class DisparitionDeFieldsTest(unittest.TestCase):
-    """Balayage mecanique du depot : le parametre `fields` n'existe plus (D-23), et
-    aucune ligne copiable ne doit encore l'offrir.
+class FieldsParameterIsGoneTest(unittest.TestCase):
+    """Mechanical scan of the repository: the `fields` parameter no longer exists
+    (D-23), and no copyable line may still offer it.
 
-    Ce test remplace celui de la v1.3, qui balayait le depot a la recherche d'une liste
-    `fields` **non quotee** — SPL la tronquait a sa premiere valeur sans erreur, et une
-    restauration ainsi tronquee rapportait un succes sans restaurer. C'etait le defaut
-    le plus grave qu'ait connu ce projet.
+    This test replaces the one of v1.3, which scanned the repository looking for an
+    **unquoted** `fields` list. SPL truncated it to its first value with no error, and a
+    restore truncated that way reported a success without restoring. It was the most
+    serious defect this project has known.
 
-    La refonte l'elimine **par construction** : chaque parametre ne porte plus qu'un nom
-    de champ unique, sans virgule, et la troncature silencieuse n'a plus d'objet. Ce qui
-    reste a garder, c'est qu'aucune documentation ni aucun exemple ne propose encore la
-    forme disparue — un operateur qui la copierait obtiendrait une erreur de parametre
-    inconnu, et surtout une syntaxe qui ne fait plus ce qu'elle dit.
+    The redesign eliminates it **by construction**: each parameter now carries a single
+    field name, with no comma, and silent truncation has nothing left to act on. What
+    remains worth guarding is that no documentation and no example still offers the form
+    that disappeared - an operator copying it would get an unknown-parameter error, and
+    above all a syntax that no longer does what it says.
 
-    Le repertoire des tests est exclu : il **doit** pouvoir nommer le parametre disparu
-    pour prouver qu'il l'est.
+    The tests directory is excluded: it **must** be able to name the parameter that
+    disappeared in order to prove that it did.
     """
 
-    #: Construit par concatenation pour que ce fichier ne puisse pas etre son propre
-    #: contre-exemple. Le motif reconnait l'assignation d'option SPL `fields=`, pas la
-    #: commande `| fields ...` ni un identifiant Python comme `field_present`.
-    MOTIF = re.compile("fields" + r"\s*=")
+    #: Built by concatenation so that this file cannot be its own counter-example. The
+    #: pattern matches the SPL option assignment `fields=`, not the `| fields ...`
+    #: command nor a Python identifier such as `field_present`.
+    PATTERN = re.compile("fields" + r"\s*=")
 
-    EXCLUS = ("/.git/", "/__pycache__/", "/bin/lib/", "/tests/")
+    EXCLUDED = ("/.git/", "/__pycache__/", "/bin/lib/", "/tests/")
 
     EXTENSIONS = (".py", ".md", ".conf", ".csv", ".json", ".xml", ".sh", ".example",
                   ".txt", ".meta", ".gitattributes", ".gitignore")
 
-    def _fichiers(self):
-        for racine, dossiers, fichiers in os.walk(REPO_ROOT):
-            dossiers[:] = [
-                d for d in dossiers if d not in (".git", "__pycache__", "lib", "tests")
+    def _files(self):
+        for root, dirnames, filenames in os.walk(REPO_ROOT):
+            dirnames[:] = [
+                d for d in dirnames if d not in (".git", "__pycache__", "lib", "tests")
             ]
-            for nom in fichiers:
-                chemin = os.path.join(racine, nom)
-                normalise = chemin.replace(os.sep, "/")
-                if any(motif in normalise for motif in self.EXCLUS):
+            for name in filenames:
+                path = os.path.join(root, name)
+                normalized = path.replace(os.sep, "/")
+                if any(prefix in normalized for prefix in self.EXCLUDED):
                     continue
-                if not normalise.endswith(self.EXTENSIONS):
+                if not normalized.endswith(self.EXTENSIONS):
                     continue
-                yield chemin
+                yield path
 
-    def test_le_balayage_couvre_bien_les_livrables(self):
-        """Un balayage qui ne lit rien passerait toujours."""
-        lus = [os.path.basename(c) for c in self._fichiers()]
-        for attendu in ("README.md", "macros.conf", "editacl.py", "rest.py",
-                        "searchbnf.conf"):
-            self.assertIn(attendu, lus)
+    def test_the_scan_really_covers_the_deliverables(self):
+        """A scan that reads nothing would always pass."""
+        scanned = [os.path.basename(p) for p in self._files()]
+        for expected in ("README.md", "macros.conf", "editacl.py", "rest.py",
+                         "searchbnf.conf"):
+            self.assertIn(expected, scanned)
 
-    def test_le_motif_reconnait_la_forme_disparue_et_epargne_les_formes_licites(self):
-        self.assertTrue(self.MOTIF.search("| editacl " + "fields=perms.write"))
-        self.assertTrue(self.MOTIF.search("| editacl " + 'fields="a.b,c.d"'))
-        self.assertIsNone(self.MOTIF.search('| fields title "eai:acl.*"'))
-        self.assertIsNone(self.MOTIF.search("def field_present(record, name):"))
-        self.assertIsNone(self.MOTIF.search("FIELD_NAME_PARAMS = ("))
+    def test_the_pattern_matches_the_removed_form_and_spares_the_legitimate_ones(self):
+        self.assertTrue(self.PATTERN.search("| editacl " + "fields=perms.write"))
+        self.assertTrue(self.PATTERN.search("| editacl " + 'fields="a.b,c.d"'))
+        self.assertIsNone(self.PATTERN.search('| fields title "eai:acl.*"'))
+        self.assertIsNone(self.PATTERN.search("def field_present(record, name):"))
+        self.assertIsNone(self.PATTERN.search("FIELD_NAME_PARAMS = ("))
 
-    def test_le_parametre_fields_ne_figure_plus_dans_les_livrables(self):
-        fautifs = []
-        for chemin in self._fichiers():
+    def test_the_fields_parameter_no_longer_appears_in_the_deliverables(self):
+        offenders = []
+        for path in self._files():
             try:
-                with open(chemin, encoding="utf-8") as handle:
-                    lignes = handle.readlines()
+                with open(path, encoding="utf-8") as handle:
+                    lines = handle.readlines()
             except (UnicodeDecodeError, OSError):
                 continue
-            for numero, ligne in enumerate(lignes, 1):
-                if self.MOTIF.search(ligne):
-                    fautifs.append(
-                        "%s:%d" % (os.path.relpath(chemin, REPO_ROOT), numero)
+            for number, line in enumerate(lines, 1):
+                if self.PATTERN.search(line):
+                    offenders.append(
+                        "%s:%d" % (os.path.relpath(path, REPO_ROOT), number)
                     )
         self.assertEqual(
-            fautifs, [],
-            "le parametre `fields` a disparu (D-23) mais est encore offert ici : %s"
-            % ", ".join(fautifs),
+            offenders, [],
+            "the `fields` parameter is gone (D-23) but is still offered here: %s"
+            % ", ".join(offenders),
         )
 
 

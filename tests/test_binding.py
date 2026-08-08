@@ -1,16 +1,16 @@
-"""Liaison enregistrement SPL -> `EventInput` (§3.1, §3.2, §3.3).
+"""Binding of an SPL record to `EventInput` (sections 3.1, 3.2, 3.3).
 
-C'est ici que la semantique de presence est **realisee**, a partir de la seule donnee
-dont la commande dispose : l'enregistrement du chunk. Le moteur de fusion, lui, ne voit
-plus que le verdict (`EventInput.present`) — d'ou l'interet d'eprouver le verdict
-lui-meme, sur des enregistrements bruts.
+This is where the presence semantics is **realized**, out of the only datum the command
+has at hand: the chunk record. The merge engine, for its part, only ever sees the
+verdict (`EventInput.present`), which is precisely why the verdict itself is worth
+exercising, on raw records.
 
-Deux modes de defaillance sont couverts ici et nulle part ailleurs :
+Two failure modes are covered here and nowhere else:
 
-1. **decider par le type** — un multivalue reduit a une valeur arrive en chaine, et un
-   moteur qui lirait le type conclurait a tort ;
-2. **decider par la valeur** — un `raw is not None` ajoute « par prudence » au predicat
-   de presence transformerait un vidage explicite en preservation silencieuse.
+1. **deciding by type**: a multivalue reduced to a single value arrives as a string,
+   and an engine that read the type would conclude wrongly;
+2. **deciding by value**: a `raw is not None` added "out of caution" to the presence
+   predicate would turn an explicit clearing into a silent preservation.
 """
 
 import unittest
@@ -20,244 +20,245 @@ from acltools.model import DEFAULT_FIELD_NAMES, TARGET_ATTRIBUTES, FieldNames
 
 
 def record(**kwargs):
-    """Enregistrement de chunk. Une cle absente du dict **est** une colonne absente."""
+    """Chunk record. A key absent from the dict **is** an absent column."""
     return dict(kwargs)
 
 
-NOMS = DEFAULT_FIELD_NAMES
+NAMES = DEFAULT_FIELD_NAMES
 
 
-class PredicatDePresenceTest(unittest.TestCase):
-    """`field_present` est le point d'injection unique de la regle du §3.2.
+class PresencePredicateTest(unittest.TestCase):
+    """`field_present` is the single injection point of the rule of section 3.2.
 
-    Sa definition tient en une ligne — `name in record` — et c'est deliberement tout ce
-    qu'elle fait. Chaque clause supplementaire y serait une regression.
+    Its definition fits on one line, `name in record`, and that is deliberately all it
+    does. Every additional clause would be a regression.
     """
 
-    def test_cle_presente_valuee(self):
+    def test_key_present_with_a_value(self):
         self.assertTrue(field_present(record(a="x"), "a"))
 
-    def test_cle_presente_valant_la_chaine_vide(self):
+    def test_key_present_holding_the_empty_string(self):
         self.assertTrue(field_present(record(a=""), "a"))
 
-    def test_cle_presente_valant_none(self):
-        """`None` est une valeur de colonne presente, pas un signal d'absence."""
+    def test_key_present_holding_none(self):
+        """`None` is the value of a present column, not a signal of absence."""
         self.assertTrue(field_present(record(a=None), "a"))
 
-    def test_cle_presente_valant_une_liste_vide(self):
+    def test_key_present_holding_an_empty_list(self):
         self.assertTrue(field_present(record(a=[]), "a"))
 
-    def test_cle_absente(self):
+    def test_key_absent(self):
         self.assertFalse(field_present(record(b="x"), "a"))
 
-    def test_enregistrement_vide(self):
+    def test_empty_record(self):
         self.assertFalse(field_present({}, "a"))
 
-    def test_la_valeur_brute_nest_pas_coercee(self):
-        """`field_value` transporte, elle n'interprete pas : c'est `merge` qui decide."""
-        for brut in ("", None, [], ["role_a"], "role_a,role_b"):
-            with self.subTest(brut=brut):
-                self.assertEqual(field_value(record(a=brut), "a"), brut)
+    def test_the_raw_value_is_not_coerced(self):
+        """`field_value` carries, it does not interpret: `merge` is what decides."""
+        for raw in ("", None, [], ["role_a"], "role_a,role_b"):
+            with self.subTest(raw=raw):
+                self.assertEqual(field_value(record(a=raw), "a"), raw)
 
-    def test_une_colonne_absente_rend_le_defaut_demande(self):
-        sentinelle = object()
-        self.assertIs(field_value({}, "a", default=sentinelle), sentinelle)
+    def test_an_absent_column_yields_the_requested_default(self):
+        sentinel = object()
+        self.assertIs(field_value({}, "a", default=sentinel), sentinel)
 
 
-class PresenceDesValeursCiblesTest(unittest.TestCase):
-    """Le verdict porte sur les quatre attributs cibles, un a un."""
+class TargetValuePresenceTest(unittest.TestCase):
+    """The verdict bears on the four target attributes, one by one."""
 
-    def test_aucune_colonne_cible_aucun_attribut_present(self):
-        event = build_event(record(title="Ma recherche", **{"eai:acl.app": "mon_app"}),
-                            NOMS)
+    def test_no_target_column_no_attribute_present(self):
+        event = build_event(record(title="My search", **{"eai:acl.app": "my_app"}),
+                            NAMES)
         self.assertEqual(event.present, frozenset())
-        for attribut in TARGET_ATTRIBUTES:
-            self.assertFalse(event.has(attribut))
+        for attribute in TARGET_ATTRIBUTES:
+            self.assertFalse(event.has(attribute))
 
-    def test_perms_read_presente(self):
-        event = build_event(record(**{"eai:acl.perms.read": "role_a"}), NOMS)
+    def test_perms_read_present(self):
+        event = build_event(record(**{"eai:acl.perms.read": "role_a"}), NAMES)
         self.assertTrue(event.has("perms.read"))
         self.assertFalse(event.has("perms.write"))
 
-    def test_perms_write_presente(self):
-        event = build_event(record(**{"eai:acl.perms.write": ""}), NOMS)
+    def test_perms_write_present(self):
+        event = build_event(record(**{"eai:acl.perms.write": ""}), NAMES)
         self.assertTrue(event.has("perms.write"))
         self.assertEqual(event.new_perms_write, "")
 
-    def test_sharing_presente(self):
-        event = build_event(record(**{"eai:acl.sharing": "global"}), NOMS)
+    def test_sharing_present(self):
+        event = build_event(record(**{"eai:acl.sharing": "global"}), NAMES)
         self.assertTrue(event.has("sharing"))
 
-    def test_owner_presente(self):
-        event = build_event(record(**{"eai:acl.owner": "un_proprietaire"}), NOMS)
+    def test_owner_present(self):
+        event = build_event(record(**{"eai:acl.owner": "an_owner"}), NAMES)
         self.assertTrue(event.has("owner"))
-        self.assertEqual(event.new_owner, "un_proprietaire")
+        self.assertEqual(event.new_owner, "an_owner")
 
-    def test_les_quatre_colonnes_presentes(self):
+    def test_the_four_columns_present(self):
         event = build_event(
             record(**{
                 "eai:acl.perms.read": "role_a",
                 "eai:acl.perms.write": "role_b",
                 "eai:acl.sharing": "global",
-                "eai:acl.owner": "un_proprietaire",
+                "eai:acl.owner": "an_owner",
             }),
-            NOMS,
+            NAMES,
         )
         self.assertEqual(event.present, frozenset(TARGET_ATTRIBUTES))
 
 
-class PresenceNestPasLeTypeTest(unittest.TestCase):
-    """**Le point sur lequel la v1 s'est trompee.**
+class PresenceIsNotTypeTest(unittest.TestCase):
+    """**The point on which v1 got it wrong.**
 
-    Mesure sur 9.4.6 : la commande recoit soit une cle absente de l'enregistrement, soit
-    une cle presente valant la chaine vide. Jamais `None`, jamais une liste vide. Et un
-    champ multivalue **reduit a une seule valeur arrive en chaine**, pas en liste d'un
-    element.
+    Measured on 9.4.6: the command receives either a key absent from the record, or a
+    key present holding the empty string. Never `None`, never an empty list. And a
+    multivalue field **reduced to a single value arrives as a string**, not as a
+    one-element list.
     """
 
-    def test_multivalue_reduit_a_une_valeur_arrive_en_chaine_et_reste_present(self):
-        """Le cas nominal du decommissionnement, une fois le `mvmap` passe.
+    def test_multivalue_reduced_to_one_value_arrives_as_a_string_and_stays_present(self):
+        """The nominal decommissioning case, once `mvmap` has run.
 
-        Un moteur qui deciderait par le type — « liste, l'operateur a parle ; chaine, ce
-        n'est qu'une valeur heritee » — traiterait cet enregistrement comme une absence
-        et **preserverait** l'attribut, alors que le pipeline demande explicitement de
-        le reduire a ce seul role.
+        An engine deciding by type - "a list means the operator spoke; a string is only
+        an inherited value" - would treat this record as an absence and would
+        **preserve** the attribute, whereas the pipeline explicitly asks for it to be
+        reduced to that single role.
         """
-        event = build_event(record(**{"eai:acl.perms.write": "role_restant"}), NOMS)
+        event = build_event(record(**{"eai:acl.perms.write": "remaining_role"}), NAMES)
         self.assertTrue(event.has("perms.write"))
         self.assertIsInstance(event.new_perms_write, str)
         self.assertNotIsInstance(event.new_perms_write, list)
 
-    def test_multivalue_a_plusieurs_valeurs_arrive_en_liste_et_reste_present(self):
+    def test_multivalue_with_several_values_arrives_as_a_list_and_stays_present(self):
         event = build_event(
-            record(**{"eai:acl.perms.write": ["role_a", "role_b"]}), NOMS
+            record(**{"eai:acl.perms.write": ["role_a", "role_b"]}), NAMES
         )
         self.assertTrue(event.has("perms.write"))
         self.assertIsInstance(event.new_perms_write, list)
 
-    def test_le_verdict_est_identique_quel_que_soit_le_type(self):
-        """Chaine, liste d'un element, liste de deux, liste vide, chaine vide, `None` :
-        toutes ces formes sont des **colonnes presentes**. Le type n'entre nulle part."""
-        for brut in ("role_a", ["role_a"], ["role_a", "role_b"], [], "", None, 0):
-            with self.subTest(brut=brut):
-                event = build_event(record(**{"eai:acl.perms.write": brut}), NOMS)
+    def test_the_verdict_is_identical_whatever_the_type(self):
+        """String, one-element list, two-element list, empty list, empty string,
+        `None`: all these forms are **present columns**. The type enters nowhere."""
+        for raw in ("role_a", ["role_a"], ["role_a", "role_b"], [], "", None, 0):
+            with self.subTest(raw=raw):
+                event = build_event(record(**{"eai:acl.perms.write": raw}), NAMES)
                 self.assertTrue(
                     event.has("perms.write"),
-                    "la presence de la cle decide, pas le type de sa valeur",
+                    "the presence of the key decides, not the type of its value",
                 )
 
-    def test_une_colonne_absente_et_une_colonne_vide_donnent_des_verdicts_opposes(self):
-        """Les deux cas que la v1 tenait pour indiscernables, cote a cote sur des
-        enregistrements bruts."""
-        absente = build_event(record(title="x"), NOMS)
-        vide = build_event(record(title="x", **{"eai:acl.perms.read": ""}), NOMS)
-        self.assertFalse(absente.has("perms.read"))
-        self.assertTrue(vide.has("perms.read"))
+    def test_an_absent_column_and_an_empty_column_give_opposite_verdicts(self):
+        """The two cases v1 held to be indistinguishable, side by side on raw
+        records."""
+        absent = build_event(record(title="x"), NAMES)
+        empty = build_event(record(title="x", **{"eai:acl.perms.read": ""}), NAMES)
+        self.assertFalse(absent.has("perms.read"))
+        self.assertTrue(empty.has("perms.read"))
 
-    def test_une_colonne_valant_none_est_presente_et_non_absente(self):
-        """La regression la plus tentante : ajouter `and raw is not None` au predicat.
+    def test_a_column_holding_none_is_present_and_not_absent(self):
+        """The most tempting regression: adding `and raw is not None` to the predicate.
 
-        Elle transformerait un vidage explicite en preservation silencieuse, c'est-a-dire
-        exactement le defaut de la v1 reintroduit par la porte de service.
+        It would turn an explicit clearing into a silent preservation, that is, exactly
+        the v1 defect reintroduced through the back door.
         """
-        event = build_event(record(**{"eai:acl.perms.read": None}), NOMS)
+        event = build_event(record(**{"eai:acl.perms.read": None}), NAMES)
         self.assertTrue(event.has("perms.read"))
         self.assertIsNone(event.new_perms_read)
 
 
-class ParametresDeNommageTest(unittest.TestCase):
-    """Chaque parametre redirige la lecture d'une information vers un autre nom de
-    colonne. C'est ce qui permet de brancher la commande sur un pipeline amont qui a
-    renomme ses champs."""
+class FieldNamingParametersTest(unittest.TestCase):
+    """Each parameter redirects the reading of one piece of information to another
+    column name. That is what makes it possible to plug the command onto an upstream
+    pipeline that renamed its fields."""
 
-    def test_defaut_applique(self):
+    def test_default_applied(self):
         event = build_event(
-            record(title="Ma recherche", **{"eai:acl.app": "mon_app",
-                                            "eai:type": "savedsearch"}),
-            NOMS,
+            record(title="My search", **{"eai:acl.app": "my_app",
+                                         "eai:type": "savedsearch"}),
+            NAMES,
         )
-        self.assertEqual(event.title, "Ma recherche")
-        self.assertEqual(event.app, "mon_app")
+        self.assertEqual(event.title, "My search")
+        self.assertEqual(event.app, "my_app")
         self.assertEqual(event.eai_type, "savedsearch")
 
-    def test_champ_renomme(self):
-        noms = FieldNames(type="object_type", new_perms_write="write")
+    def test_renamed_field(self):
+        names = FieldNames(type="object_type", new_perms_write="write")
         event = build_event(
-            record(title="Ma recherche", **{"eai:acl.app": "mon_app",
-                                            "object_type": "savedsearch",
-                                            "write": "nouveau_role_admin"}),
-            noms,
+            record(title="My search", **{"eai:acl.app": "my_app",
+                                         "object_type": "savedsearch",
+                                         "write": "new_role_admin"}),
+            names,
         )
         self.assertEqual(event.eai_type, "savedsearch")
         self.assertTrue(event.has("perms.write"))
-        self.assertEqual(event.new_perms_write, "nouveau_role_admin")
+        self.assertEqual(event.new_perms_write, "new_role_admin")
 
-    def test_le_champ_dorigine_nest_plus_lu_apres_redirection(self):
-        """Rediriger, c'est bien deplacer la lecture, pas l'elargir."""
-        noms = FieldNames(new_perms_write="write")
+    def test_the_original_field_is_no_longer_read_after_redirection(self):
+        """Redirecting really means moving the reading, not widening it."""
+        names = FieldNames(new_perms_write="write")
         event = build_event(
-            record(**{"eai:acl.perms.write": "role_ignore"}), noms
+            record(**{"eai:acl.perms.write": "ignored_role"}), names
         )
         self.assertFalse(event.has("perms.write"))
 
-    def test_champ_designe_absent_du_jeu_de_resultats(self):
-        noms = FieldNames(new_perms_write="colonne_inexistante")
-        event = build_event(record(**{"eai:acl.perms.write": "role_a"}), noms)
+    def test_designated_field_absent_from_the_result_set(self):
+        names = FieldNames(new_perms_write="nonexistent_column")
+        event = build_event(record(**{"eai:acl.perms.write": "role_a"}), names)
         self.assertFalse(event.has("perms.write"))
         self.assertIsNone(event.new_perms_write)
 
-    def test_deux_parametres_peuvent_designer_la_meme_colonne(self):
-        """C'est le cas par defaut : `sharing` et `new_sharing` valent tous deux
-        `eai:acl.sharing`. La portee courante sert a ecarter les prives, la valeur
-        cible a decider de l'ecriture — deux usages d'une meme colonne."""
-        event = build_event(record(**{"eai:acl.sharing": "global"}), NOMS)
+    def test_two_parameters_may_designate_the_same_column(self):
+        """This is the default case: `sharing` and `new_sharing` both hold
+        `eai:acl.sharing`. The current sharing scope serves to skip private objects,
+        the target value to decide the write: two uses of one column."""
+        event = build_event(record(**{"eai:acl.sharing": "global"}), NAMES)
         self.assertEqual(event.current_sharing, "global")
         self.assertTrue(event.has("sharing"))
 
 
-class PorteeCouranteTest(unittest.TestCase):
-    """§3.1 et §3.5 — la portee courante est facultative, et son **absence** a un effet
-    observable : la commande ne peut plus ecarter les objets prives en amont."""
+class CurrentSharingScopeTest(unittest.TestCase):
+    """Sections 3.1 and 3.5: the current sharing scope is optional, and its **absence**
+    has an observable effect - the command can no longer skip private objects
+    upstream."""
 
-    def test_colonne_absente_donne_none(self):
-        event = build_event(record(title="x"), NOMS)
+    def test_absent_column_yields_none(self):
+        event = build_event(record(title="x"), NAMES)
         self.assertIsNone(event.current_sharing)
 
-    def test_colonne_presente_vide_donne_la_chaine_vide_pas_none(self):
-        """La distinction compte : `None` dit « je ne sais pas », `""` dit « la
-        plateforme ne l'a pas renseigne ». Ni l'un ni l'autre n'est `user`."""
-        event = build_event(record(**{"eai:acl.sharing": ""}), NOMS)
+    def test_present_empty_column_yields_the_empty_string_not_none(self):
+        """The distinction matters: `None` says "I do not know", `""` says "the
+        platform did not fill it in". Neither one is `user`."""
+        event = build_event(record(**{"eai:acl.sharing": ""}), NAMES)
         self.assertEqual(event.current_sharing, "")
         self.assertIsNotNone(event.current_sharing)
 
-    def test_colonne_presente_valuee(self):
-        event = build_event(record(**{"eai:acl.sharing": "user"}), NOMS)
+    def test_present_column_with_a_value(self):
+        event = build_event(record(**{"eai:acl.sharing": "user"}), NAMES)
         self.assertEqual(event.current_sharing, "user")
 
 
-class ChampsDeReferenceTest(unittest.TestCase):
+class ReferenceFieldsTest(unittest.TestCase):
 
-    def test_un_multivalue_mono_valeur_est_reduit_pour_un_champ_mono_valeur(self):
-        event = build_event(record(title=["Ma recherche"]), NOMS)
-        self.assertEqual(event.title, "Ma recherche")
+    def test_a_single_valued_multivalue_is_reduced_for_a_single_valued_field(self):
+        event = build_event(record(title=["My search"]), NAMES)
+        self.assertEqual(event.title, "My search")
 
-    def test_les_blancs_de_bordure_sont_retires(self):
-        event = build_event(record(title="  Ma recherche  "), NOMS)
-        self.assertEqual(event.title, "Ma recherche")
+    def test_surrounding_whitespace_is_stripped(self):
+        event = build_event(record(title="  My search  "), NAMES)
+        self.assertEqual(event.title, "My search")
 
-    def test_un_eai_type_vide_vaut_absent_pour_la_resolution(self):
-        """La resolution du §5.2 n'a que faire d'une chaine vide : elle bascule sur
-        `id`, ou rejette. La normaliser en `None` evite un
-        `unresolved_endpoint:` trompeur."""
-        event = build_event(record(**{"eai:type": "  "}), NOMS)
+    def test_an_empty_eai_type_counts_as_absent_for_resolution(self):
+        """The resolution of section 5.2 has no use for an empty string: it falls back
+        on `id`, or rejects. Normalizing it to `None` avoids a misleading
+        `unresolved_endpoint:`."""
+        event = build_event(record(**{"eai:type": "  "}), NAMES)
         self.assertIsNone(event.eai_type)
 
-    def test_aucun_champ_de_proprietaire_dadressage_nest_lu(self):
-        """D-25 — il n'y a pas de parametre `owner` de reference, seulement
-        `new_owner`, qui est une valeur cible. Un enregistrement portant un
-        proprietaire n'en fait donc rien d'autre qu'une valeur a appliquer."""
-        self.assertFalse(hasattr(NOMS, "owner"))
-        event = build_event(record(**{"eai:acl.owner": "un_tiers"}), NOMS)
+    def test_no_addressing_owner_field_is_read(self):
+        """D-25: there is no reference `owner` parameter, only `new_owner`, which is a
+        target value. A record carrying an owner therefore makes nothing of it other
+        than a value to apply."""
+        self.assertFalse(hasattr(NAMES, "owner"))
+        event = build_event(record(**{"eai:acl.owner": "a_third_party"}), NAMES)
         self.assertTrue(event.has("owner"))
         self.assertFalse(hasattr(event, "owner"))
 

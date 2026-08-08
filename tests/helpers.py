@@ -1,11 +1,11 @@
-"""Doublures de test : ports REST, journal et horloge.
+"""Test doubles: REST port, journal port and clock.
 
-Aucune bibliotheque de simulation HTTP, aucune socket, aucun serveur local. Le contrat
-de `RestPort` est etroit (trois methodes) et un port explicite est plus lisible qu'un
-correctif de bas niveau sur la pile reseau.
+No HTTP simulation library, no socket, no local server. The `RestPort` contract is
+narrow (three methods), and an explicit port reads better than a low-level patch on
+the network stack.
 
-Les fixtures JSON sont **redigees a la main** a partir de la forme observee en lab,
-jamais des captures brutes, et n'emploient que des identifiants generiques (§14).
+The JSON fixtures are **written by hand** from the shape observed on the reference
+platform, never from raw captures, and they only use generic identifiers (section 14).
 """
 
 import json
@@ -22,16 +22,16 @@ from acltools.model import (
 )
 from acltools.rest import RestResponse
 
-#: Sentinelle de **colonne absente** pour `make_event`.
+#: Sentinel for an **absent column** in `make_event`.
 #:
-#: Elle existe parce que `None` ne peut pas jouer ce role : depuis le §3.2, `None` est
-#: une valeur possible d'une colonne *presente*, et confondre les deux serait
-#: precisement l'erreur que la refonte corrige. Un test qui veut une colonne absente
-#: l'ecrit `ABSENT` ; tout le reste est present.
+#: It exists because `None` cannot play that role: since section 3.2, `None` is a
+#: possible value of a *present* column, and confusing the two is precisely the error
+#: the redesign fixes. A test that wants an absent column writes `ABSENT`; everything
+#: else is present.
 ABSENT = object()
 
-#: Table de correspondance minimale utilisee par les tests. Sous-ensemble strict de la
-#: table livree ; les tests de resolution n'ont pas besoin des 28 entrees.
+#: Minimal mapping table used by the tests. A strict subset of the shipped table; the
+#: endpoint resolution tests do not need all 28 entries.
 FIXTURE_MAPPING = Mapping(
     {
         "savedsearch": "saved/searches",
@@ -46,20 +46,21 @@ FIXTURE_MAPPING = Mapping(
 
 def acl_body(
     owner="nobody",
-    app="mon_app",
+    app="my_app",
     sharing="global",
     read=("role_a",),
-    write=("ancien_role",),
+    write=("legacy_role",),
     can_change_perms=True,
-    name="objet_temoin",
+    name="witness_object",
 ):
-    """Corps de reponse d'un `GET <objet>?output_mode=json&f=eai:acl*`.
+    """Response body of a `GET <object>?output_mode=json&f=eai:acl*`.
 
-    Seul le bloc `entry[0].acl` fait autorite (§5.3) ; `content` est volontairement
-    reduit, le parametre `f` le filtre de toute facon.
+    Only the `entry[0].acl` block is authoritative (section 5.3); `content` is
+    deliberately reduced, and the `f` parameter filters it out anyway.
 
-    `name` est l'identite canonique renvoyee par splunkd. Elle est distincte du `title`
-    de l'evenement d'entree et c'est elle qui alimente le rang 0 du §5.4 (§3.4, D-18).
+    `name` is the canonical identity returned by splunkd. It is distinct from the
+    `title` of the input event, and it is what feeds rank 0 of section 5.4
+    (section 3.4, D-18).
     """
     document = {
         "entry": [
@@ -80,17 +81,17 @@ def acl_body(
 
 
 def acl_body_raw(acl_block):
-    """Corps de reponse a partir d'un bloc `acl` brut (cas limites de parsing)."""
+    """Response body built from a raw `acl` block (parsing edge cases)."""
     return json.dumps(
-        {"entry": [{"name": "objet_temoin", "content": {}, "acl": acl_block}]}
+        {"entry": [{"name": "witness_object", "content": {}, "acl": acl_block}]}
     ).encode("utf-8")
 
 
 class FakeRest(object):
-    """Implementation en memoire de `RestPort`.
+    """In-memory implementation of `RestPort`.
 
-    Les reponses sont scriptees par `(methode, chemin)` ; a defaut, une reponse par
-    defaut est servie. Tous les appels sont enregistres dans l'ordre.
+    Responses are scripted by `(method, path)`; failing that, a default response is
+    served. Every call is recorded, in order.
     """
 
     def __init__(self, get_responses=None, post_responses=None, json_responses=None,
@@ -115,7 +116,7 @@ class FakeRest(object):
         self.calls.append(("JSON", path, params))
         return self.json_responses.get(path, self.default_json)
 
-    # -- assertions de confort --------------------------------------------- #
+    # -- convenience accessors ---------------------------------------------- #
 
     def count(self, method):
         return len([call for call in self.calls if call[0] == method])
@@ -128,10 +129,10 @@ class FakeRest(object):
 
 
 class FakeJournal(object):
-    """Implementation en memoire de `JournalPort`.
+    """In-memory implementation of `JournalPort`.
 
-    `fail_intent` / `fail_outcome` simulent un echec de la sequence
-    write + flush + fsync, qui doit annuler le POST (§8.4).
+    `fail_intent` / `fail_outcome` simulate a failure of the write + flush + fsync
+    sequence, which must cancel the POST (section 8.4).
     """
 
     def __init__(self, fail_intent=False, fail_outcome=False):
@@ -158,7 +159,8 @@ class FakeJournal(object):
 
 
 class FakeClock(object):
-    """Horodatage deterministe, au format du §8.2 (millisecondes obligatoires)."""
+    """Deterministic timestamps, in the format of section 8.2 (milliseconds
+    are mandatory)."""
 
     def __init__(self, start=0):
         self.tick = start
@@ -187,13 +189,13 @@ def make_params(
     )
 
 
-def make_ctx(sid="sid_de_test", user="operateur", host="sh01", dryrun=False):
+def make_ctx(sid="test_sid", user="an_operator", host="sh01", dryrun=False):
     return RunContext(sid=sid, user=user, host=host, dryrun=dryrun)
 
 
 def make_event(
-    title="Ma recherche",
-    app="mon_app",
+    title="My search",
+    app="my_app",
     id_value=None,
     eai_type="savedsearch",
     current_sharing=None,
@@ -202,12 +204,12 @@ def make_event(
     sharing=ABSENT,
     owner=ABSENT,
 ):
-    """Construit un `EventInput`, **colonnes absentes par defaut**.
+    """Build an `EventInput`, with **columns absent by default**.
 
-    Chacun des quatre attributs cibles vaut `ABSENT` tant qu'on ne le donne pas : un
-    test qui ne parle pas d'un attribut decrit donc une colonne absente, ce qui est le
-    cas nominal de preservation (§3.2). Passer `read=""` decrit au contraire une
-    colonne presente a cellule vide — l'ordre de vidage.
+    Each of the four target attributes stays `ABSENT` until it is given: a test that
+    says nothing about an attribute therefore describes an absent column, which is the
+    nominal preservation case (section 3.2). Passing `read=""` describes the opposite,
+    a present column with an empty cell, that is, the order to clear the attribute.
     """
     present = set()
     values = {}

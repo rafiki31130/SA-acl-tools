@@ -1,13 +1,13 @@
-"""Journal de diagnostic `editacl.log` (§8.1, A-3).
+"""Diagnostic log `editacl.log` (section 8.1, A-3).
 
-Le fichier etait annonce par le §8.1, par `inputs.conf` et par `props.conf`, et n'etait
-**jamais ecrit** — aucun `import logging` dans `bin/`. Ces tests figent les trois choses
-qui comptent : qu'il soit produit, qu'il porte ce que le §8.1 enumere, et qu'il ne
-porte **aucun secret**.
+The file was announced by section 8.1, by `inputs.conf` and by `props.conf`, and was
+**never written**: there was no `import logging` anywhere in `bin/`. These tests freeze
+the three things that matter: that it is produced, that it carries what section 8.1
+enumerates, and that it carries **no secret**.
 
-Ils figent aussi une propriete negative : la perte du diagnostic ne coute jamais une
-execution. Le fichier de diagnostic n'est pas le journal de restauration ; confondre
-les deux reproduirait, cote observabilite, l'erreur de conception que D-3 a evitee.
+They also freeze a negative property: losing the diagnostic never costs a run. The
+diagnostic file is not the rollback journal; confusing the two would reproduce, on the
+observability side, the design error that D-3 avoided.
 """
 
 import ast
@@ -35,12 +35,12 @@ from acltools.model import FieldNames, Params
 
 from . import BIN_DIR, REPO_ROOT
 
-#: Valeur factice, de la forme d'une cle de session Splunk. N'est un secret nulle part.
-CLE_FACTICE = "vBkTFCbEXAMPLEnotarealkey0123456789abcdefABCDEF0123456789xyz"
+#: Dummy value, shaped like a Splunk session key. It is a secret nowhere.
+FAKE_KEY = "vBkTFCbEXAMPLEnotarealkey0123456789abcdefABCDEF0123456789xyz"
 
 
-class ArbreDiag(object):
-    """Repertoire de logs jetable."""
+class DiagTree(object):
+    """Throwaway log directory."""
 
     def __enter__(self):
         self.dir = tempfile.mkdtemp(prefix="acl_diag_")
@@ -50,11 +50,11 @@ class ArbreDiag(object):
         shutil.rmtree(self.dir, ignore_errors=True)
         return False
 
-    def contenu(self):
-        chemin = diag_path(self.dir)
-        if not os.path.exists(chemin):
+    def content(self):
+        path = diag_path(self.dir)
+        if not os.path.exists(path):
             return ""
-        with open(chemin, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             return handle.read()
 
 
@@ -69,37 +69,38 @@ def params(names=None, warnings=()):
     )
 
 
-class FichierProduitTest(unittest.TestCase):
-    """A-3 — le fichier doit exister et ne pas etre vide."""
+class FileIsProducedTest(unittest.TestCase):
+    """A-3: the file must exist and must not be empty."""
 
-    def test_le_fichier_est_cree_et_ecrit(self):
-        with ArbreDiag() as arbre:
-            diag = open_diagnostics(arbre.dir, sid="1786033792.6")
+    def test_the_file_is_created_and_written(self):
+        with DiagTree() as tree:
+            diag = open_diagnostics(tree.dir, sid="1786033792.6")
             self.assertTrue(diag.enabled)
-            diag.startup(version="1.0.0", user="operateur")
+            diag.startup(version="1.0.0", user="operator")
             diag.close()
 
-            self.assertTrue(os.path.exists(diag_path(arbre.dir)))
-            self.assertTrue(arbre.contenu().strip())
+            self.assertTrue(os.path.exists(diag_path(tree.dir)))
+            self.assertTrue(tree.content().strip())
 
-    def test_le_nom_du_fichier_est_celui_que_monitorent_les_conf(self):
-        """`inputs.conf` declare le monitor, `props.conf` le sourcetype : le nom du
-        fichier reellement ouvert doit etre celui-la, sinon rien n'est collecte."""
+    def test_the_file_name_is_the_one_the_confs_monitor(self):
+        """`inputs.conf` declares the monitor and `props.conf` the sourcetype: the name
+        of the file actually opened must be that one, otherwise nothing is
+        collected."""
         parser = configparser.ConfigParser(strict=False)
         parser.read(os.path.join(REPO_ROOT, "default", "inputs.conf"), encoding="utf-8")
         stanzas = [s for s in parser.sections() if DIAG_BASENAME in s]
         self.assertEqual(
             len(stanzas), 1,
-            "aucune stanza de monitor ne porte %r" % DIAG_BASENAME,
+            "no monitor stanza carries %r" % DIAG_BASENAME,
         )
         self.assertEqual(parser.get(stanzas[0], "sourcetype"), "editacl:diag")
 
-    def test_rotation_conforme_au_paragraphe_8_1(self):
-        """« `RotatingFileHandler`, 5 Mo x 5 », litteralement."""
+    def test_rotation_conforms_to_section_8_1(self):
+        """Section 8.1 taken literally: "`RotatingFileHandler`, 5 MB x 5"."""
         self.assertEqual(MAX_BYTES, 5 * 1024 * 1024)
         self.assertEqual(BACKUP_COUNT, 5)
-        with ArbreDiag() as arbre:
-            diag = open_diagnostics(arbre.dir)
+        with DiagTree() as tree:
+            diag = open_diagnostics(tree.dir)
             try:
                 handler = diag._handler
                 self.assertIsInstance(handler, RotatingFileHandler)
@@ -108,176 +109,176 @@ class FichierProduitTest(unittest.TestCase):
             finally:
                 diag.close()
 
-    def test_une_ligne_par_enregistrement_et_horodatage_iso(self):
-        with ArbreDiag() as arbre:
-            diag = open_diagnostics(arbre.dir, sid="s1")
-            diag.info("premiere ligne")
-            diag.warning("message\nsur deux lignes")
+    def test_one_line_per_record_and_iso_timestamp(self):
+        with DiagTree() as tree:
+            diag = open_diagnostics(tree.dir, sid="s1")
+            diag.info("first line")
+            diag.warning("message\non two lines")
             diag.close()
 
-            lignes = [l for l in arbre.contenu().splitlines() if l.strip()]
-            self.assertEqual(len(lignes), 2)
-            for ligne in lignes:
-                horodatage = ligne.split(" ", 1)[0]
+            lines = [l for l in tree.content().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2)
+            for line in lines:
+                timestamp = line.split(" ", 1)[0]
                 self.assertRegex(
-                    horodatage,
+                    timestamp,
                     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$",
                 )
-                self.assertIn("sid=s1", ligne)
+                self.assertIn("sid=s1", line)
 
 
-class ContenuExigeParLeParagraphe81Test(unittest.TestCase):
-    """« demarrage, controle d'habilitation, parametres, resolution de la table de
-    correspondance, erreurs fatales » — les cinq, nommement."""
+class ContentRequiredBySection81Test(unittest.TestCase):
+    """The five headings section 8.1 enumerates, by name: "startup, capability check,
+    parameters, mapping table resolution, fatal errors"."""
 
-    def test_les_cinq_rubriques_sont_presentes(self):
-        with ArbreDiag() as arbre:
-            diag = open_diagnostics(arbre.dir, sid="1786033792.6")
-            diag.startup(version="1.0.0", user="operateur", splunkd_uri="https://x:8089")
-            diag.params(params(warnings=("dryrun=false sans max_objects explicite",)))
+    def test_the_five_headings_are_present(self):
+        with DiagTree() as tree:
+            diag = open_diagnostics(tree.dir, sid="1786033792.6")
+            diag.startup(version="1.0.0", user="operator", splunkd_uri="https://x:8089")
+            diag.params(params(warnings=("dryrun=false with no explicit max_objects",)))
             diag.capability(True)
             diag.realtime("batch")
             diag.mapping(load_mapping(os.path.join(BIN_DIR, "acl_endpoint_map.json"))
                          .coverage())
             diag.journal("/var/log/splunk/editacl_journal_1786033792.6.log", True)
-            diag.fatal("capability 'edit_acl_bulk' absente")
+            diag.fatal("capability 'edit_acl_bulk' missing")
             diag.close()
 
-            texte = arbre.contenu()
+            text = tree.content()
 
-        for attendu in (
-            "demarrage editacl",
+        for expected in (
+            "editacl startup",
             "version=1.0.0",
-            "parametres dryrun=false",
-            # Les neuf parametres de nommage sont consignes : sans eux, une execution
-            # dont un nom de champ a ete redirige est illisible a posteriori.
-            "nommage title=title",
+            "parameters dryrun=false",
+            # The nine field-naming parameters are recorded: without them, a run in
+            # which a field name was redirected is unreadable after the fact.
+            "field names title=title",
             "new_owner=eai:acl.owner",
             "max_objects=10",
-            "controle d'habilitation",
-            "table de correspondance : 28 entrees",
-            "journal de restauration ouvert",
-            "erreur fatale : capability 'edit_acl_bulk' absente",
+            "capability check",
+            "mapping table: 28 entries",
+            "rollback journal opened",
+            "fatal error: capability 'edit_acl_bulk' missing",
         ):
-            with self.subTest(attendu=attendu):
-                self.assertIn(attendu, texte)
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
 
-        self.assertIn("WARNING", texte)
-        self.assertIn("CRITICAL", texte)
+        self.assertIn("WARNING", text)
+        self.assertIn("CRITICAL", text)
 
-    def test_le_rappel_de_chargement_de_table_ecrit_bien_dans_le_fichier(self):
-        """§8.1 « resolution de la table » : `load_mapping` doit recevoir le diagnostic.
+    def test_the_table_loading_callback_does_write_into_the_file(self):
+        """Section 8.1, "table resolution": `load_mapping` must receive the diagnostic.
 
-        C'est le point exact releve par l'audit — `load_mapping()` etait appele sans
-        `diag`, donc les entrees ecartees ne laissaient aucune trace.
+        This is the exact point raised by the audit: `load_mapping()` was called
+        without `diag`, so the discarded entries left no trace at all.
         """
-        with ArbreDiag() as arbre:
-            dossier = tempfile.mkdtemp(prefix="acl_map_")
+        with DiagTree() as tree:
+            directory = tempfile.mkdtemp(prefix="acl_map_")
             try:
-                chemin = os.path.join(dossier, "map.json")
-                with open(chemin, "w", encoding="utf-8") as handle:
-                    handle.write('{"bon": "saved/searches", "mauvais": "../evasion"}')
-                diag = open_diagnostics(arbre.dir)
-                load_mapping(chemin, diag=diag)
+                path = os.path.join(directory, "map.json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write('{"good": "saved/searches", "bad": "../escape"}')
+                diag = open_diagnostics(tree.dir)
+                load_mapping(path, diag=diag)
                 diag.close()
             finally:
-                shutil.rmtree(dossier, ignore_errors=True)
+                shutil.rmtree(directory, ignore_errors=True)
 
-            texte = arbre.contenu()
-        self.assertIn("entree de table ecartee", texte)
-        self.assertIn("WARNING", texte)
+            text = tree.content()
+        self.assertIn("table entry discarded", text)
+        self.assertIn("WARNING", text)
 
 
-class AucunSecretTest(unittest.TestCase):
-    """R5 — un fichier de diagnostic collecte vers un index est lu par bien plus de
-    monde que le disque du search head."""
+class NoSecretTest(unittest.TestCase):
+    """R5: a diagnostic file collected into an index is read by far more people than
+    the disk of the search head."""
 
-    def test_redaction_des_formes_connues(self):
+    def test_redaction_of_the_known_forms(self):
         for message in (
-            "Authorization: Splunk %s" % CLE_FACTICE,
-            "en-tete Authorization=%s" % CLE_FACTICE,
-            "session_key=%s" % CLE_FACTICE,
-            "session-key: %s" % CLE_FACTICE,
-            "password=motdepasse123",
-            "api_key: %s" % CLE_FACTICE,
-            "Bearer %s" % CLE_FACTICE,
-            "token=%s" % CLE_FACTICE,
+            "Authorization: Splunk %s" % FAKE_KEY,
+            "header Authorization=%s" % FAKE_KEY,
+            "session_key=%s" % FAKE_KEY,
+            "session-key: %s" % FAKE_KEY,
+            "password=notarealpassword123",
+            "api_key: %s" % FAKE_KEY,
+            "Bearer %s" % FAKE_KEY,
+            "token=%s" % FAKE_KEY,
         ):
             with self.subTest(message=message):
-                sortie = redact(message)
-                self.assertNotIn(CLE_FACTICE, sortie)
-                self.assertNotIn("motdepasse123", sortie)
-                self.assertIn("[redige]", sortie)
+                output = redact(message)
+                self.assertNotIn(FAKE_KEY, output)
+                self.assertNotIn("notarealpassword123", output)
+                self.assertIn("[redacted]", output)
 
-    def test_aucune_troncature_de_secret(self):
-        """Un secret tronque reste un secret partiellement divulgue."""
-        sortie = redact("session_key=%s" % CLE_FACTICE)
-        for longueur in (8, 12, 20):
-            self.assertNotIn(CLE_FACTICE[:longueur], sortie)
+    def test_no_truncation_of_a_secret(self):
+        """A truncated secret is still a partially disclosed secret."""
+        output = redact("session_key=%s" % FAKE_KEY)
+        for length in (8, 12, 20):
+            self.assertNotIn(FAKE_KEY[:length], output)
 
-    def test_le_fichier_ne_porte_pas_la_cle_meme_si_elle_est_passee_par_erreur(self):
-        with ArbreDiag() as arbre:
-            diag = open_diagnostics(arbre.dir, sid="s1")
-            diag.info("appel refuse (Authorization: Splunk %s)" % CLE_FACTICE)
-            diag.fatal("controle d'habilitation impossible, session_key=%s" % CLE_FACTICE)
+    def test_the_file_does_not_carry_the_key_even_if_it_is_passed_by_mistake(self):
+        with DiagTree() as tree:
+            diag = open_diagnostics(tree.dir, sid="s1")
+            diag.info("call refused (Authorization: Splunk %s)" % FAKE_KEY)
+            diag.fatal("capability check impossible, session_key=%s" % FAKE_KEY)
             diag.close()
-            texte = arbre.contenu()
-        self.assertNotIn(CLE_FACTICE, texte)
-        self.assertNotIn(CLE_FACTICE[:16], texte)
+            text = tree.content()
+        self.assertNotIn(FAKE_KEY, text)
+        self.assertNotIn(FAKE_KEY[:16], text)
 
-    def test_aucune_methode_de_diagnostic_nadmet_un_secret_en_parametre(self):
-        """La garantie principale est **structurelle**, pas textuelle : le module ne
-        recoit jamais la cle de session."""
-        interdits = {
+    def test_no_diagnostic_method_accepts_a_secret_as_a_parameter(self):
+        """The main guarantee is **structural**, not textual: the module never
+        receives the session key."""
+        forbidden = {
             "session_key", "sessionkey", "token", "password", "secret", "api_key",
             "authorization", "credential",
         }
-        chemin = os.path.join(BIN_DIR, "acltools", "diag.py")
-        with open(chemin, encoding="utf-8") as handle:
-            arbre = ast.parse(handle.read(), filename=chemin)
-        for noeud in ast.walk(arbre):
-            if isinstance(noeud, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                noms = {a.arg.lower() for a in noeud.args.args}
-                noms |= {a.arg.lower() for a in noeud.args.kwonlyargs}
-                with self.subTest(fonction=noeud.name):
-                    self.assertEqual(noms & interdits, set())
+        path = os.path.join(BIN_DIR, "acltools", "diag.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names = {a.arg.lower() for a in node.args.args}
+                names |= {a.arg.lower() for a in node.args.kwonlyargs}
+                with self.subTest(function=node.name):
+                    self.assertEqual(names & forbidden, set())
 
-    def test_lenveloppe_ne_transmet_aucun_secret_au_diagnostic(self):
-        """Audit mecanique de `bin/editacl.py` : aucun appel `self._diag.*` ne porte
-        `session_key` ni un nom apparente."""
-        interdits = ("session_key", "password", "token", "secret", "api_key")
-        chemin = os.path.join(BIN_DIR, "editacl.py")
-        with open(chemin, encoding="utf-8") as handle:
-            arbre = ast.parse(handle.read(), filename=chemin)
-        appels = []
-        for noeud in ast.walk(arbre):
-            if isinstance(noeud, ast.Call) and isinstance(noeud.func, ast.Attribute):
-                cible = ast.unparse(noeud.func)
-                if cible.startswith("self._diag"):
-                    appels.append(ast.unparse(noeud))
-        self.assertTrue(appels, "l'enveloppe n'appelle aucun diagnostic")
-        for appel in appels:
-            with self.subTest(appel=appel):
-                for interdit in interdits:
-                    self.assertNotIn(interdit, appel)
+    def test_the_wrapper_passes_no_secret_to_the_diagnostic(self):
+        """Mechanical audit of `bin/editacl.py`: no `self._diag.*` call carries
+        `session_key` nor any related name."""
+        forbidden = ("session_key", "password", "token", "secret", "api_key")
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                target = ast.unparse(node.func)
+                if target.startswith("self._diag"):
+                    calls.append(ast.unparse(node))
+        self.assertTrue(calls, "the wrapper calls no diagnostic at all")
+        for call in calls:
+            with self.subTest(call=call):
+                for banned in forbidden:
+                    self.assertNotIn(banned, call)
 
 
-class LaPerteDuDiagnosticNeCoutePasUneExecutionTest(unittest.TestCase):
-    """Le fichier de diagnostic n'est **pas** le filet de securite. Aucun de ses echecs
-    n'est fatal — c'est la difference de nature avec le journal de restauration (D-3)."""
+class LosingTheDiagnosticNeverCostsARunTest(unittest.TestCase):
+    """The diagnostic file is **not** the safety net. None of its failures is fatal,
+    which is the difference in kind with the rollback journal (D-3)."""
 
-    def test_repertoire_absent_donne_un_diagnostic_inerte(self):
+    def test_a_missing_directory_yields_an_inert_diagnostic(self):
         diag = open_diagnostics(
-            os.path.join(tempfile.gettempdir(), "acl_inexistant_zz", "profond")
+            os.path.join(tempfile.gettempdir(), "acl_nonexistent_zz", "deep")
         )
         self.assertIsInstance(diag, NullDiagnostics)
         self.assertFalse(diag.enabled)
 
-    def test_splunk_home_absent_donne_un_diagnostic_inerte(self):
+    def test_a_missing_splunk_home_yields_an_inert_diagnostic(self):
         self.assertIsInstance(open_diagnostics(""), NullDiagnostics)
         self.assertIsInstance(open_diagnostics(None), NullDiagnostics)
 
-    def test_le_diagnostic_inerte_absorbe_tous_les_appels(self):
+    def test_the_inert_diagnostic_absorbs_every_call(self):
         diag = NullDiagnostics()
         diag("WARNING", "x")
         diag.startup(version="1")
@@ -291,86 +292,86 @@ class LaPerteDuDiagnosticNeCoutePasUneExecutionTest(unittest.TestCase):
         diag.fatal("x")
         diag.close()
 
-    def test_un_echec_decriture_ne_leve_pas(self):
-        class HandlerCasse(logging.Handler):
+    def test_a_write_failure_does_not_raise(self):
+        class BrokenHandler(logging.Handler):
             def emit(self, record):
-                raise IOError("disque plein")
+                raise IOError("disk full")
 
-        diag = Diagnostics("/inexistant/editacl.log", sid="s", handler=HandlerCasse())
+        diag = Diagnostics("/nonexistent/editacl.log", sid="s", handler=BrokenHandler())
         diag.info("message")
         diag.fatal("message")
         diag.close()
 
-    def test_le_module_nutilise_pas_le_registre_global_de_logging(self):
-        """Y attacher un handler ferait entrer dans le fichier les enregistrements
-        d'autres bibliotheques, dont on ne controle pas l'absence de secret."""
-        chemin = os.path.join(BIN_DIR, "acltools", "diag.py")
-        with open(chemin, encoding="utf-8") as handle:
-            arbre = ast.parse(handle.read(), filename=chemin)
-        appels = {
-            ast.unparse(noeud.func)
-            for noeud in ast.walk(arbre)
-            if isinstance(noeud, ast.Call)
+    def test_the_module_does_not_use_the_global_logging_registry(self):
+        """Attaching a handler to it would let the records of other libraries into the
+        file, and we do not control their freedom from secrets."""
+        path = os.path.join(BIN_DIR, "acltools", "diag.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=path)
+        calls = {
+            ast.unparse(node.func)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
         }
-        for interdit in ("logging.getLogger", "getLogger", "logging.basicConfig"):
-            with self.subTest(appel=interdit):
-                self.assertNotIn(interdit, appels)
+        for banned in ("logging.getLogger", "getLogger", "logging.basicConfig"):
+            with self.subTest(call=banned):
+                self.assertNotIn(banned, calls)
 
-    def test_le_paquet_expose_le_module(self):
+    def test_the_package_exposes_the_module(self):
         self.assertTrue(hasattr(diag_module, "open_diagnostics"))
 
 
-class EnveloppeCableLeDiagnosticTest(unittest.TestCase):
-    """Audit mecanique du cablage : `bin/editacl.py` doit reellement produire le
-    fichier, et le produire assez tot pour qu'un parametre invalide y figure."""
+class TheWrapperWiresTheDiagnosticTest(unittest.TestCase):
+    """Mechanical audit of the wiring: `bin/editacl.py` must really produce the file,
+    and produce it early enough for an invalid parameter to appear in it."""
 
     @classmethod
     def setUpClass(cls):
-        chemin = os.path.join(BIN_DIR, "editacl.py")
-        with open(chemin, encoding="utf-8") as handle:
-            cls.arbre = ast.parse(handle.read(), filename=chemin)
+        path = os.path.join(BIN_DIR, "editacl.py")
+        with open(path, encoding="utf-8") as handle:
+            cls.tree = ast.parse(handle.read(), filename=path)
 
-    def _fonction(self, nom):
-        for noeud in ast.walk(self.arbre):
-            if isinstance(noeud, ast.FunctionDef) and noeud.name == nom:
-                return noeud
-        self.fail("fonction %s introuvable" % nom)
+    def _function(self, name):
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        self.fail("function %s not found" % name)
 
-    def _appels(self, noeud):
+    def _calls(self, node):
         return [
             (ast.unparse(n.func), n)
-            for n in ast.walk(noeud)
+            for n in ast.walk(node)
             if isinstance(n, ast.Call)
         ]
 
-    def test_le_setup_ouvre_le_diagnostic(self):
-        cibles = [nom for nom, _ in self._appels(self._fonction("_setup"))]
-        self.assertIn("open_diagnostics", cibles)
+    def test_setup_opens_the_diagnostic(self):
+        targets = [name for name, _ in self._calls(self._function("_setup"))]
+        self.assertIn("open_diagnostics", targets)
 
-    def test_le_diagnostic_est_ouvert_avant_la_validation_des_parametres(self):
-        """Un `fields` invalide est une erreur fatale du §9 : elle doit etre consignee."""
-        ouverture = validation = None
-        for nom, noeud in self._appels(self._fonction("_setup")):
-            if nom == "open_diagnostics" and ouverture is None:
-                ouverture = noeud.lineno
-            if nom == "validate_params" and validation is None:
-                validation = noeud.lineno
-        self.assertIsNotNone(ouverture)
+    def test_the_diagnostic_is_opened_before_parameter_validation(self):
+        """An invalid `fields` is a fatal error of section 9: it must be recorded."""
+        opening = validation = None
+        for name, node in self._calls(self._function("_setup")):
+            if name == "open_diagnostics" and opening is None:
+                opening = node.lineno
+            if name == "validate_params" and validation is None:
+                validation = node.lineno
+        self.assertIsNotNone(opening)
         self.assertIsNotNone(validation)
-        self.assertLess(ouverture, validation)
+        self.assertLess(opening, validation)
 
-    def test_load_mapping_recoit_le_diagnostic(self):
-        """§8.1 « resolution de la table » : c'est l'omission relevee par l'audit."""
-        for nom, noeud in self._appels(self._fonction("_setup")):
-            if nom == "load_mapping":
-                mots_cles = {kw.arg for kw in noeud.keywords}
-                self.assertIn("diag", mots_cles)
+    def test_load_mapping_receives_the_diagnostic(self):
+        """Section 8.1, "table resolution": this is the omission raised by the audit."""
+        for name, node in self._calls(self._function("_setup")):
+            if name == "load_mapping":
+                keywords = {kw.arg for kw in node.keywords}
+                self.assertIn("diag", keywords)
                 return
-        self.fail("aucun appel a load_mapping dans _setup")
+        self.fail("no call to load_mapping in _setup")
 
-    def test_les_erreurs_fatales_sont_consignees_dans_stream(self):
-        cibles = [nom for nom, _ in self._appels(self._fonction("stream"))]
-        self.assertIn("self._diag.fatal", cibles)
+    def test_fatal_errors_are_recorded_in_stream(self):
+        targets = [name for name, _ in self._calls(self._function("stream"))]
+        self.assertIn("self._diag.fatal", targets)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,13 @@
-"""Manifeste d'empreintes de `bin/lib/` — `tools/hash_manifest.py` (A-6).
+"""Checksum manifest of `bin/lib/` - `tools/hash_manifest.py` (A-6).
 
-Le manifeste decrit **ce que `tools/vendor.sh` installe**. L'elagage de `vendor.sh`
-retire deja `__pycache__` et `*.pyc` ; le parcours de verification doit appliquer la
-meme exclusion. Sans cela, importer le SDK vendorise — c'est-a-dire executer un test,
-un diagnostic ou la commande elle-meme — cree des `.pyc` sous `bin/lib/` et met le
-verificateur en echec sur un faux positif, en orientant vers une reconstruction
-complete.
+The manifest describes **what `tools/vendor.sh` installs**. The pruning done by
+`vendor.sh` already removes `__pycache__` and `*.pyc`; the verification walk must apply
+the same exclusion. Without it, importing the vendored SDK - that is, running a test, a
+diagnostic or the command itself - creates `.pyc` files under `bin/lib/` and fails the
+verifier on a false positive, pointing the reader at a full rebuild.
 
-Les tests operent sur une arborescence temporaire : ils n'ecrivent jamais dans le
-`bin/lib/` du depot et ne dependent pas de son etat de compilation.
+The tests operate on a temporary tree: they never write into the `bin/lib/` of the
+repository and do not depend on its compilation state.
 """
 
 import contextlib
@@ -28,17 +27,17 @@ if _TOOLS not in sys.path:
 import hash_manifest  # noqa: E402
 
 
-def _muet(fonction):
-    """Appelle `fonction()` en absorbant ses sorties : `write`/`check` rendent compte
-    sur stdout/stderr, ce qui n'a rien a faire dans le rapport de tests."""
+def _silenced(function):
+    """Call `function()` while absorbing its output: `write` and `check` report on
+    stdout/stderr, which has no business in the test report."""
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
         io.StringIO()
     ):
-        return fonction()
+        return function()
 
 
-class ArbreTemporaire(object):
-    """Fait pointer `hash_manifest` sur une arborescence jetable, le temps du test."""
+class TemporaryTree(object):
+    """Point `hash_manifest` at a throwaway tree, for the duration of the test."""
 
     def __enter__(self):
         self.root = tempfile.mkdtemp(prefix="acl_manifest_")
@@ -52,63 +51,64 @@ class ArbreTemporaire(object):
         shutil.rmtree(self.root, ignore_errors=True)
         return False
 
-    def ecrire(self, relative, contenu=b"contenu"):
-        chemin = os.path.join(self.root, *relative.split("/"))
-        dossier = os.path.dirname(chemin)
-        if dossier and not os.path.isdir(dossier):
-            os.makedirs(dossier)
-        with open(chemin, "wb") as handle:
-            handle.write(contenu)
-        return chemin
+    def write_file(self, relative, content=b"content"):
+        path = os.path.join(self.root, *relative.split("/"))
+        directory = os.path.dirname(path)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory)
+        with open(path, "wb") as handle:
+            handle.write(content)
+        return path
 
 
-class ManifesteIgnoreLesArtefactsDeCompilationTest(unittest.TestCase):
-    """A-6 — un `__pycache__` ne doit ni entrer au manifeste ni le mettre en echec."""
+class ManifestIgnoresCompilationArtifactsTest(unittest.TestCase):
+    """A-6: a `__pycache__` must neither enter the manifest nor fail it."""
 
-    def test_le_parcours_ignore_pycache_et_pyc(self):
-        with ArbreTemporaire() as arbre:
-            arbre.ecrire("splunklib/__init__.py")
-            arbre.ecrire("splunklib/client.py")
-            arbre.ecrire("splunklib/__pycache__/__init__.cpython-312.pyc")
-            arbre.ecrire("splunklib/__pycache__/client.cpython-312.pyc")
-            arbre.ecrire("splunklib/client.pyo")
+    def test_the_walk_ignores_pycache_and_pyc(self):
+        with TemporaryTree() as tree:
+            tree.write_file("splunklib/__init__.py")
+            tree.write_file("splunklib/client.py")
+            tree.write_file("splunklib/__pycache__/__init__.cpython-312.pyc")
+            tree.write_file("splunklib/__pycache__/client.cpython-312.pyc")
+            tree.write_file("splunklib/client.pyo")
 
-            releves = sorted(relative for relative, _ in hash_manifest._entries())
+            recorded = sorted(relative for relative, _ in hash_manifest._entries())
 
-        self.assertEqual(releves, ["splunklib/__init__.py", "splunklib/client.py"])
+        self.assertEqual(recorded, ["splunklib/__init__.py", "splunklib/client.py"])
 
-    def test_check_reste_conforme_apres_apparition_dun_pycache(self):
-        """Le scenario reel : `check` passe, on importe le SDK, `check` doit passer.
+    def test_check_stays_compliant_after_a_pycache_appears(self):
+        """The real-world scenario: `check` passes, the SDK gets imported, `check` must
+        still pass.
 
-        C'est la formulation exacte de A-6 — le verificateur etait mis en echec par
-        l'acte meme d'utiliser ce qu'il verifie.
+        This is the exact wording of A-6 - the verifier was failed by the very act of
+        using what it verifies.
         """
-        with ArbreTemporaire() as arbre:
-            arbre.ecrire("splunklib/__init__.py")
-            arbre.ecrire("splunklib/searchcommands/__init__.py")
-            self.assertEqual(_muet(hash_manifest.write), 0)
-            self.assertEqual(_muet(hash_manifest.check), 0)
+        with TemporaryTree() as tree:
+            tree.write_file("splunklib/__init__.py")
+            tree.write_file("splunklib/searchcommands/__init__.py")
+            self.assertEqual(_silenced(hash_manifest.write), 0)
+            self.assertEqual(_silenced(hash_manifest.check), 0)
 
-            # Un import du SDK vendorise : l'interprete depose ses artefacts.
-            arbre.ecrire("splunklib/__pycache__/__init__.cpython-312.pyc")
-            arbre.ecrire(
+            # An import of the vendored SDK: the interpreter drops its artifacts.
+            tree.write_file("splunklib/__pycache__/__init__.cpython-312.pyc")
+            tree.write_file(
                 "splunklib/searchcommands/__pycache__/__init__.cpython-312.pyc"
             )
 
-            self.assertEqual(_muet(hash_manifest.check), 0)
+            self.assertEqual(_silenced(hash_manifest.check), 0)
 
-    def test_une_vraie_divergence_reste_detectee(self):
-        """L'exclusion ne doit pas emousser le controle : un fichier ajoute echoue."""
-        with ArbreTemporaire() as arbre:
-            arbre.ecrire("splunklib/__init__.py")
-            self.assertEqual(_muet(hash_manifest.write), 0)
+    def test_a_real_divergence_is_still_detected(self):
+        """The exclusion must not blunt the check: an added file fails it."""
+        with TemporaryTree() as tree:
+            tree.write_file("splunklib/__init__.py")
+            self.assertEqual(_silenced(hash_manifest.write), 0)
 
-            arbre.ecrire("splunklib/porte_derobee.py")
-            self.assertEqual(_muet(hash_manifest.check), 1)
+            tree.write_file("splunklib/backdoor.py")
+            self.assertEqual(_silenced(hash_manifest.check), 1)
 
-            os.remove(os.path.join(arbre.root, "splunklib", "porte_derobee.py"))
-            arbre.ecrire("splunklib/__init__.py", b"contenu modifie")
-            self.assertEqual(_muet(hash_manifest.check), 1)
+            os.remove(os.path.join(tree.root, "splunklib", "backdoor.py"))
+            tree.write_file("splunklib/__init__.py", b"modified content")
+            self.assertEqual(_silenced(hash_manifest.check), 1)
 
 
 if __name__ == "__main__":
