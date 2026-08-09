@@ -137,10 +137,16 @@
          here too, was polluted the same way on 5 lines out of 241.
 
          `default/props.conf` fixes that at the source, for every consumer, with
-         `KV_MODE = none` and three declared extractions. The `rex` below is not a
-         duplicate of that fix: it makes THIS panel independent of ANY extraction at all,
-         so a deployment carrying an older `local/props.conf` - or none - still gets one
-         row per run. The two agree by construction: same anchors, same expressions. -->
+         `KV_MODE = none` and four declared extractions. The `rex` below is not a
+         duplicate of that fix: search-time props only apply where they are exported and
+         where no `local/props.conf` overrides them, and this panel opens from any app
+         context. It therefore rebuilds what it needs from the raw line and depends on no
+         extraction at all. The two agree by construction: same anchors, same expressions,
+         tied together by `tests/test_dashboard.py`.
+
+         Both anchor on the SEQUENCE OF KEYS and never on the prose of the message: a
+         reworded warning must not be able to take a field away. -->
+
     <panel>
       <title>Runs started with no journal line</title>
       <table>
@@ -148,8 +154,8 @@
           <query>search (`acl_journal_source`) OR (`acl_diag_source`)
 | eval diag_raw = if(sourcetype="editacl:diag", _raw, null())
 | rex field=diag_raw "^\S+\s+[A-Z]+\s+sid=(?&lt;diag_sid&gt;\S+)"
-| rex field=diag_raw "editacl startup version=\S+ user=(?&lt;diag_user&gt;\S+)\s"
-| rex field=diag_raw "parameters dryrun=\S+ validate_roles=\S+ journal=(?&lt;diag_journal&gt;\S+) max_objects=(?&lt;diag_max_objects&gt;\S+)"
+| rex field=diag_raw "\bversion=\S+\s+user=(?&lt;diag_user&gt;\S+)\s"
+| rex field=diag_raw "\bdryrun=\S+\s+validate_roles=\S+\s+journal=(?&lt;diag_journal&gt;\S+)\s+max_objects=(?&lt;diag_max_objects&gt;\S+)"
 | eval sid = coalesce(diag_sid, sid)
 | stats count(eval(sourcetype="editacl:journal")) AS journal_lines,
         count(eval(sourcetype="editacl:diag"))    AS diag_lines,

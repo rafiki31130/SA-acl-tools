@@ -589,6 +589,29 @@ class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
         # The single line that removes the class rather than one instance of it.
         self.assertEqual(self.props["editacl:diag"].get("KV_MODE"), "none")
 
+    def test_the_props_are_exported_so_that_they_apply_where_searches_run(self):
+        # A search-time setting only applies in the namespaces it is exported to.
+        # MEASURED: unexported, the stanza above returns 248 clean run identifiers in the
+        # namespace of this app and 259 - eleven of them polluted - in the namespace of
+        # `search`, which is where the operator types. Without this export the fix is
+        # inert exactly where it is needed, and nothing says so.
+        meta = MetadataTest.read_meta()
+        self.assertIn("props", meta)
+        self.assertEqual(meta["props"].get("export"), "system")
+
+    def test_no_extraction_anchors_on_the_prose_of_a_message(self):
+        # An extraction anchored on the words of a message loses its fields the day the
+        # message is reworded, silently. MEASURED on a corpus written before the
+        # repository moved to English: anchors on `editacl startup` and `parameters`
+        # extracted `user` on 19 lines out of 248. The contract is the sequence of keys.
+        forbidden = ("startup", "parameters", "editacl ")
+        for key, value in self.props["editacl:diag"].items():
+            if not key.startswith("EXTRACT-"):
+                continue
+            for word in forbidden:
+                with self.subTest(extraction=key, word=word.strip()):
+                    self.assertNotIn(word, value)
+
     def test_every_field_the_panel_needs_has_a_declared_extraction(self):
         declared = " ".join(
             value

@@ -49,6 +49,26 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
+# `props.conf` carries SEARCH-TIME settings for the two sourcetypes of this app, and a
+# search-time setting only applies in the namespaces it is exported to. Confined to the
+# app context it would be inert everywhere the operator actually searches.
+#
+# MEASURED, and this is the whole reason the stanza exists: with `props` unexported, the
+# same query on the diagnostic sourcetype returns 248 clean run identifiers in the
+# namespace of this app, and 259 - of which 11 carry a whole sentence swallowed by the
+# automatic extractor - in the namespace of `search`. The monitoring view opens from any
+# app context, and every ad hoc search on the journal is typed from `search`.
+#
+# What is exported is narrow: two stanzas, both naming sourcetypes owned by this app.
+# Nothing here can alter the reading of anybody else's data.
+#
+# The journal never depended on this: its JSON is picked up by the platform on its own,
+# which is exactly what hid the gap until it was measured.
+
+[props]
+access = read : [ * ], write : [ admin ]
+export = system
+
 [lookups]
 access = read : [ * ], write : [ admin ]
 export = system
