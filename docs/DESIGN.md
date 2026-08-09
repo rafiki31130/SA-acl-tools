@@ -701,9 +701,10 @@ distinct keys for the same object - and no `/acl` suffix. It is the same string 
 `acl_endpoint` output field.
 
 `endpoint` is filled in **from resolution onwards, not from the write attempt**: an
-object that could not be found carries one. And the reverse trap: `eai_type` may be
-empty on the line of an object that was written and resolved, so any breakdown by object
-type undercounts unless it labels those lines.
+object that could not be found carries one. `eai_type` may still be empty on the line of
+an object that was written and resolved - not because the input row carried no type, that
+case is now covered, but because the handler path it resolved is the image of two keys or
+of none. Any breakdown by object type therefore still has to label those lines.
 
 That contract is also what closes the rollback hole. The shape
 `/servicesNS/nobody/<app>/<handler path>/<encoded title>` is exactly what route 1 of
@@ -712,24 +713,43 @@ longer depends on `eai:type` being present. The identifier costs no journaled fi
 the string was already there, on both phases, and it is the group key of the macro's own
 aggregation, so it cannot disagree with the pairing.
 
-### 5.6 Two fields for the nature of an object, and no inversion between them
+### 5.6 One vocabulary for the nature of an object, and where it runs out
 
-`eai_type` is what the **input event** carried; `handler` is what the command
-**resolved**. They coincide on a batch built on the inventory macro and diverge on every
-other: twenty-four of the twenty-seven native handlers emit no `eai:type`, so an event
-read natively is resolved, written and journaled with an empty type.
+The nature of an object is designated by **one** field, `eai_type`, in **one**
+vocabulary: the keys of the mapping table, which are the values an operator writes in
+`eai:type` and reads in the documentation. The command settles it right after endpoint
+resolution: the value the input row carried, or - the row having carried none, which
+twenty-four of the twenty-seven native handlers guarantee - the value the resolved
+handler path inverts to.
 
-Going from a handler back to a type is **not available**, and this was checked on the
-shipped artefacts rather than assumed. `bin/acl_endpoint_map.json` holds 28 keys for 27
-distinct handler paths - `times` and `conf-times` both map to `data/ui/times` - so the
-inversion is not a function. `lookups/acl_object_families.csv`, the same information in
-the shape the inventory macro needs, holds 27 rows and *is* injective, because it drops
-the `times` key; it is an inventory of families, not a reverse map, and reading it as
-one would silently rename an object type. On top of that, resolution through `id`
-accepts any well-formed handler path, including paths no key of either artefact names.
+The alternative was to publish the **handler path** as a second designation, and it was
+tried. It fails on its own terms: a mixed batch then shows one family under two labels.
+Measured in the lab on one run of eighteen objects, the breakdown panel returned
+`saved/searches`, `data/ui/views`, `data/macros`, `saved/eventtypes`, `admin/tags`,
+`admin/ntags`, `saved/fvtags` - and `no_such_family`, a *type*, on the single row
+refused before resolution. Two vocabularies in one column of one table, which is what an
+operator reads as a list of types. The shipped saved search over the same run grouped by
+`eai_type` and split the saved searches in two, `savedsearch` and the empty string, for
+objects of the same family in the same batch.
 
-The journal therefore carries both fields and derives neither. Consumers that want to
-group by the nature of an object read `handler` first: it is the one that is filled in.
+**The inversion is a partial function, and the exception is named rather than guessed.**
+`bin/acl_endpoint_map.json` holds 28 keys for 27 distinct handler paths: `data/ui/times`
+is the image of `times` **and** of `conf-times`, and of those two only. Every other path
+is the image of exactly one key, and a test asserts that exact set, so an entry added
+later that made a second path ambiguous fails the suite. Where the inversion is
+undefined - the ambiguous path, or a path no key names, which resolution through `id`
+can produce since it accepts any well-formed path - the type stays **empty**, and empty
+means "not established" rather than one of two candidates.
+
+`lookups/acl_object_families.csv` carries the same pair under the same column names,
+`eai_type,handler_path`, and **27 rows**: it drops the `times` key, because
+`conf-times` already claims `data/ui/times` and inventorying that endpoint twice would
+duplicate every object of the family. It is an inventory of families, not a reverse map.
+Building an inverse from it would answer `conf-times` with no warning where the shipped
+table says the answer is undefined; the inverse the code uses is built from the JSON.
+
+The handler path is still available to every consumer, and under its proper name: it is
+the third segment of `endpoint`, where it is an **address**.
 
 ---
 

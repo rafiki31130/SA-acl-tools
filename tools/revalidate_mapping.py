@@ -103,13 +103,18 @@ def entries(doc):
 
 
 def read_families_csv(path):
-    """`lookups/acl_object_families.csv` -> {family: handler_path}."""
+    """`lookups/acl_object_families.csv` -> {eai_type: handler_path}.
+
+    The column carries the same name as in the override file of section 6.3, because it
+    carries the same thing: the key of the mapping table, which is the one vocabulary
+    this app uses for the type of an object.
+    """
     out = {}
     if not os.path.exists(path):
         return out
     with open(path, "r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
-            family = (row.get("family") or "").strip()
+            family = (row.get("eai_type") or "").strip()
             handler = (row.get("handler_path") or "").strip()
             if family and not family.startswith("#"):
                 out[family] = handler

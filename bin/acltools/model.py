@@ -62,6 +62,7 @@ ACL_STATUSES = (
 ACL_UNCONDITIONAL_FIELDS = (
     "acl_status",
     "acl_endpoint",
+    "acl_type",
     "acl_http_code",
     "acl_error",
     "acl_warning",
@@ -100,6 +101,7 @@ ACL_STATE_FIELDS = (
 ACL_OUTPUT_FIELDS = (
     "acl_status",
     "acl_endpoint",
+    "acl_type",
     "acl_http_code",
     "acl_error",
     "acl_warning",
@@ -237,21 +239,23 @@ class EventResult:
     status: str
     title: str = ""
     app: str = ""
+    #: **Type of the object, in the vocabulary of the input contract** - the keys of
+    #: the mapping table of section 6, which are what an operator writes in `eai:type`
+    #: and reads in the documentation. It is the **single** designation of that notion
+    #: carried by the command, the journal and the views.
+    #:
+    #: Two ways of being filled in, and they produce values from the same vocabulary:
+    #:
+    #: - the input event carried a type, and it is kept as is;
+    #: - it carried none - twenty-four of the twenty-seven native handlers emit no
+    #:   `eai:type`, measured - and the type is the one the resolved handler path
+    #:   inverts to (`Mapping.type_of_handler`).
+    #:
+    #: Empty means **the type could not be established**, which happens when no route
+    #: resolved the object, when the handler path is the image of several keys, and
+    #: when it is the image of none. The handler path itself is never published under
+    #: this name: it is a different vocabulary, and `endpoint` already carries it.
     eai_type: str = ""
-    #: Handler path the command **actually resolved** for this object, for example
-    #: `saved/searches` (section 5.2). Empty when resolution did not take place.
-    #:
-    #: It is the datum `eai_type` was expected to stand for and does not always carry:
-    #: an event coming from a native endpoint has no `eai:type` at all, and the object
-    #: is nevertheless resolved and written. The command knows the handler at that
-    #: moment and used to discard it.
-    #:
-    #: **It is not an inverted type, and it must not be read as one.** The mapping
-    #: table of section 6 is not injective: two keys, `times` and `conf-times`, share
-    #: the handler `data/ui/times`, and the `id` route resolves handler paths that
-    #: belong to no key at all. Going back from a handler to a type is therefore
-    #: undefined in the general case; the handler itself is not.
-    handler: str = ""
     endpoint: str = ""
     http_code: int = 0
     error: Optional[str] = None
@@ -261,4 +265,3 @@ class EventResult:
     journaled: bool = False
     post_attempted: bool = False
     counted: bool = False
-    source: str = ""

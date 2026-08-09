@@ -7,6 +7,13 @@ D-5), which overrides the first.
 No derivation heuristic is allowed (section 6.2): `resolve` returns `None` on an
 unknown type, never a guessed value. The lab measurement justifies this empirically -
 `commands` resolves to `admin/commandsconf`, `conf-times` to `data/ui/times`.
+
+The table is read in **both** directions. Forward, `resolve` turns the type an operator
+wrote into the handler path the URI needs. Backwards, `type_of_handler` turns a handler
+path the `id` route produced back into the type - which is what lets the journal record
+one single designation of the object type, in the vocabulary the operator writes, on
+every line whatever route resolved the object. The backwards direction is a **partial**
+function and says so: see `Mapping.type_of_handler`.
 """
 
 import csv
@@ -45,19 +52,66 @@ def is_valid_handler_path(path):
 
 
 class Mapping(object):
-    """Table `eai:type` -> `handler_path`, immutable once built."""
+    """Table `eai:type` -> `handler_path`, immutable once built.
+
+    The table is also read **backwards**, and that direction is a partial function
+    rather than a bijection: the shipped table carries 28 keys for 27 distinct handler
+    paths. `data/ui/times` is the image of **two** keys, `times` and `conf-times`, and
+    a handler path resolved through the `id` route of section 5.2 may belong to no key
+    at all. `type_of_handler` therefore answers `None` on both of those cases instead
+    of picking one, and `ambiguous_handlers` publishes the collisions so that a test
+    can fail the day the table stops being invertible somewhere else.
+    """
 
     def __init__(self, entries, from_json=(), from_override=(), rejected=()):
         self._entries = dict(entries)
         self._from_json = tuple(sorted(from_json))
         self._from_override = tuple(sorted(from_override))
         self._rejected = tuple(rejected)
+        inverse = {}
+        for eai_type, handler_path in self._entries.items():
+            inverse.setdefault(handler_path, []).append(eai_type)
+        self._inverse = {
+            handler_path: tuple(sorted(keys))
+            for handler_path, keys in inverse.items()
+        }
 
     def resolve(self, eai_type):
         """Return the `handler_path` of an `eai:type`, or `None` if it is unknown."""
         if not eai_type:
             return None
         return self._entries.get(str(eai_type).strip())
+
+    def type_of_handler(self, handler_path):
+        """Return the `eai:type` of a handler path, or `None` when it is undefined.
+
+        Undefined covers **two** distinct situations, and neither of them may be
+        guessed:
+
+        - the handler path is the image of **several** keys - `data/ui/times`, image of
+          `times` and of `conf-times` on the shipped table. There is no ground on which
+          to prefer one, and the SPL counterpart of this table would answer with aplomb
+          because it drops one of the two keys (see `lookups/acl_object_families.csv`);
+        - the handler path is the image of **no** key. The `id` route of section 5.2
+          accepts any pattern-valid path, including endpoints this table never named.
+
+        The caller reads the empty type as "the type could not be established", which
+        is the truth, rather than as a type that happens to be wrong.
+        """
+        if not handler_path:
+            return None
+        keys = self._inverse.get(str(handler_path).strip())
+        if keys is None or len(keys) != 1:
+            return None
+        return keys[0]
+
+    def ambiguous_handlers(self):
+        """Handler paths that are the image of more than one key, with their keys."""
+        return {
+            handler_path: keys
+            for handler_path, keys in sorted(self._inverse.items())
+            if len(keys) > 1
+        }
 
     def types(self):
         return tuple(sorted(self._entries))
@@ -73,6 +127,8 @@ class Mapping(object):
             ),
             "rejected": self._rejected,
             "types": self.types(),
+            "handlers": len(self._inverse),
+            "ambiguous_handlers": self.ambiguous_handlers(),
         }
 
     def __len__(self):

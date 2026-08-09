@@ -133,21 +133,24 @@ class MacrosTest(unittest.TestCase):
         self.assertEqual(tuple(table_fields(definition)), INPUT_CONTRACT)
 
     def test_the_inventory_synthesizes_eai_type(self):
-        # Without that synthesis the outbound leg works - `id` is usable - but the
-        # rollback is impossible: the restore resolves by `eai:type` (section 6.7-4).
+        # Section 6.7-4. The value comes from the `eai_type` column of the lookup, that
+        # is, from the key of the mapping table - the same word the command journals
+        # and the monitoring view groups on. It gives the operator a type to filter on
+        # before the command has seen the row.
         definition = self.conf["acl_inventory_base(1)"]["definition"]
-        self.assertIn("acl_family", definition)
+        self.assertIn("acl_synthesized_type", definition)
         self.assertRegex(
             definition,
-            r"eval \"eai:type\" = if\(isnull\('eai:type'\).*acl_family",
+            r"eval \"eai:type\" = if\(isnull\('eai:type'\).*acl_synthesized_type",
         )
+        self.assertIn('eval acl_synthesized_type=\\"$eai_type$\\"', definition)
 
     def test_the_selection_precedes_the_rest_calls(self):
         # The cost lever of section 6.7-2: a family that was not asked for must cost no
         # REST call. If the `where` came after the `map`, everything would be
         # enumerated.
         definition = self.conf["acl_inventory_base(1)"]["definition"]
-        self.assertLess(definition.index("| where match(family"),
+        self.assertLess(definition.index("| where match(eai_type"),
                         definition.index("| map "))
 
     def test_the_family_argument_is_filtered_before_injection_into_a_regex(self):
@@ -514,8 +517,13 @@ class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
     happen.
     """
 
+    #: The untyped row rides on `data/ui/times`, the **named ambiguous handler** of
+    #: the table: image of `times` and of `conf-times` at once, so the type cannot be
+    #: recovered from the path and the journal line legitimately carries none. Every
+    #: other native family now gets its type back by inversion, which is precisely what
+    #: makes this the only shape of row that still needs `id` to come back.
     UNTYPED_ID = (
-        "https://localhost:8089/servicesNS/nobody/my_app/saved/searches/untyped_one"
+        "https://localhost:8089/servicesNS/nobody/my_app/data/ui/times/untyped_one"
     )
 
     def setUp(self):
@@ -537,7 +545,7 @@ class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
         self._make_event = make_event
         self._mapping = FIXTURE_MAPPING
 
-        endpoint = "/servicesNS/nobody/my_app/saved/searches/untyped_one"
+        endpoint = "/servicesNS/nobody/my_app/data/ui/times/untyped_one"
         self.journal = FakeJournal()
         rest = FakeRest(
             get_responses={endpoint: RestResponse(200, acl_body(write=("legacy_role",)))},
@@ -551,8 +559,10 @@ class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
             mapping=FIXTURE_MAPPING,
             clock=FakeClock(),
         )
-        # The untyped batch: no `eai:type` at all, resolution through `id` alone. That
-        # is what the saved-search endpoint of the platform hands out.
+        # The untyped batch: no `eai:type` at all, resolution through `id` alone, on
+        # the one handler path whose inversion is undefined. Twenty-four objects of
+        # that family exist on the reference platform and their endpoint emits no
+        # `eai:type`, so the case is reachable rather than contrived.
         self.outbound = self.processor.process(
             make_event(
                 title="untyped_one",
@@ -591,7 +601,7 @@ class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
         """Not a rebuilt string: the group key itself, so it cannot disagree with the
         pairing the macro just did."""
         self.assertEqual(
-            self.row["id"], "/servicesNS/nobody/my_app/saved/searches/untyped_one"
+            self.row["id"], "/servicesNS/nobody/my_app/data/ui/times/untyped_one"
         )
 
     def test_the_untyped_rollback_row_resolves_and_is_written_back(self):
@@ -601,7 +611,7 @@ class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
         from .helpers import FakeClock, FakeJournal, FakeRest, acl_body, make_ctx, \
             make_params
 
-        endpoint = "/servicesNS/nobody/my_app/saved/searches/untyped_one"
+        endpoint = "/servicesNS/nobody/my_app/data/ui/times/untyped_one"
         rest = FakeRest(
             get_responses={
                 endpoint: RestResponse(200, acl_body(write=("new_role_admin",)))
@@ -668,11 +678,10 @@ class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
         from acltools.endpoint import resolve_handler_path
 
         typed_endpoint = "/servicesNS/nobody/my_app/saved/searches/typed_one"
-        by_id, source_id = resolve_handler_path(typed_endpoint, "savedsearch",
-                                                self._mapping)
-        by_type, source_type = resolve_handler_path(None, "savedsearch", self._mapping)
-        self.assertEqual((by_id, source_id), ("saved/searches", "id"))
-        self.assertEqual((by_type, source_type), ("saved/searches", "eai:type"))
+        by_id = resolve_handler_path(typed_endpoint, "savedsearch", self._mapping)
+        by_type = resolve_handler_path(None, "savedsearch", self._mapping)
+        self.assertEqual(by_id, "saved/searches")
+        self.assertEqual(by_type, "saved/searches")
 
     def test_the_emitted_id_carries_the_fixed_context_so_it_reads_as_shared(self):
         """Section 3.5 reads the namespace of `id` to skip private objects. The
@@ -697,10 +706,24 @@ class TableAndLookupConsistencyTest(unittest.TestCase):
 
     def setUp(self):
         self.families = {
-            row["family"]: row["handler_path"]
+            row["eai_type"]: row["handler_path"]
             for row in read_csv_lookup("acl_object_families.csv")
         }
         self.table = endpoint_map()
+
+    def test_the_two_files_name_the_columns_the_same_way(self):
+        # One notion, one word. The override file of section 6.3 carries
+        # `eai_type,handler_path`; this lookup carries the same pair and used to call
+        # its first column `family`, which was a second name for the identifier the
+        # operator writes in `eai:type`.
+        rows = read_csv_lookup("acl_object_families.csv")
+        self.assertEqual(sorted(rows[0].keys()), ["eai_type", "handler_path"])
+        example = os.path.join(
+            REPO_ROOT, "lookups", "acl_endpoint_map_override.csv.example"
+        )
+        with open(example, encoding="utf-8") as handle:
+            header = handle.readline().strip()
+        self.assertEqual(header.split(","), ["eai_type", "handler_path"])
 
     def test_every_family_is_a_key_of_the_table(self):
         for family, handler in self.families.items():
@@ -715,6 +738,23 @@ class TableAndLookupConsistencyTest(unittest.TestCase):
         # enumerate it once, otherwise it produces duplicates.
         handlers = list(self.families.values())
         self.assertEqual(len(handlers), len(set(handlers)))
+
+    def test_the_lookup_is_deliberately_shorter_than_the_table_and_is_not_its_inverse(
+        self,
+    ):
+        # THE TRAP, and renaming the column made it look more like the table, so it is
+        # spelled out here. The JSON carries 28 keys, this lookup 27 rows: `times` is
+        # missing, because `conf-times` already claims `data/ui/times` and inventorying
+        # that endpoint twice would duplicate every object of the family.
+        #
+        # A reader who built an inverse table from THIS file would get
+        # `data/ui/times -> conf-times` with no warning at all, where the shipped table
+        # says the answer is undefined. The inverse the code uses is built from the
+        # JSON, by `Mapping.type_of_handler`, and answers `None` there.
+        missing = set(self.table) - set(self.families)
+        self.assertEqual(missing, {"times"})
+        self.assertEqual(len(self.families), 27)
+        self.assertEqual(len(self.table), 28)
 
 
 class SavedsearchesTest(unittest.TestCase):

@@ -716,6 +716,7 @@ Each input event produces **exactly one** output event, keeping all of its field
 |---|---|
 | `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `skipped_derived`, `skipped_private`, `skipped_ceiling`, `error` |
 | `acl_endpoint` | Path of the targeted object, **without** scheme, host, port or `/acl` suffix. **Empty** on the abstentions that address nothing - `skipped_private`, `skipped_ceiling` - where it would designate an object other than the one on the input row |
+| `acl_type` | **Type of the object as the command settled it**, in the vocabulary of the input contract (`savedsearch`, `views`, ...): the value the row carried, or the one its resolved endpoint inverts to when the row carried none. Empty when no route established a type. It is the value the journal records and the monitoring view groups on, so a simulation shows the same type the dashboard will |
 | `acl_http_code` | HTTP code of the POST, or of the GET on an upstream failure. **Sentinel `0`** when no HTTP exchange took place |
 | `acl_error` | Error message, truncated at 512 characters |
 | `acl_warning` | Non-blocking warnings, **joined by `;`** in a stable order |
@@ -799,27 +800,37 @@ An `intent` line with no `outcome` signals an interruption between the disk
 synchronisation and the POST response - **the POST may have succeeded**. Settle it
 against `splunkd_access.log`.
 
-### Two fields say what an object is, and they are not the same fact
+### One field says what an object is, and it is written in one vocabulary
 
-- `eai_type` is **what the input event carried**. It is empty whenever the pipeline did
-  not supply one, which a batch read from the native endpoints never does: twenty-four
-  of the twenty-seven native handlers emit no `eai:type` at all.
-- `handler` is **the handler path the command resolved** - `saved/searches`,
-  `data/ui/views` - whichever of the two routes of *Endpoint resolution* answered. It
-  is filled in on every object whose endpoint was resolved, and it is the field to
-  group on when you want to know what kind of objects a run touched.
+`eai_type` is **the type of the object**, in the vocabulary of the input contract: the
+keys of the mapping table - `savedsearch`, `views`, `eventtypes` - which are the words
+you write in `eai:type` in your own pipeline and read in this document.
 
-`handler` is **not an inverted type, and it cannot be turned back into one.** The
-shipped mapping table holds 28 keys for 27 distinct handler paths: `times` and
-`conf-times` both resolve to `data/ui/times`. And resolution through `id` accepts any
-well-formed handler path, including paths that no key of the table names. The journal
-therefore carries both fields and derives neither from the other.
+It is filled in on two routes, and both produce values from that one vocabulary:
 
-A `skipped_private` line carries its handler although its `endpoint` is deliberately
-empty. The two are not the same kind of datum: the endpoint is an **address**, and the
-one that could be computed there designates the shared object of the same name rather
-than the private object the input row designated. The handler is the **family**, which
-is the same for both.
+- the input row carried a type: it is kept as is;
+- the input row carried none - a batch read from the native endpoints carries none,
+  since twenty-four of the twenty-seven native handlers emit no `eai:type` - and the
+  type is the one the resolved handler path **inverts to**.
+
+An **empty** `eai_type` says the type could not be established. There are three ways in:
+no route resolved the object at all; the handler path is the image of **two** keys,
+which on the shipped table is `data/ui/times` and nothing else (`times` and
+`conf-times`); or the handler path is the image of no key, which resolution through
+`id` can produce since it accepts any well-formed path. **The command never picks one
+of two candidates**, and an empty type is the honest answer rather than a coin toss.
+
+The **handler path is not journaled under a name of its own.** It is the other
+vocabulary of the same notion - the one that addresses objects rather than names them -
+and `endpoint` already carries it, as its third segment. Publishing both is what made a
+single batch show one family under two labels: `saved/searches` on the rows a pipeline
+had read natively, `savedsearch` on the rows it had typed, in the same run and the same
+column of the same table.
+
+A `skipped_private` line keeps its type although its `endpoint` is deliberately empty.
+The endpoint is an **address**, and the one that could be computed there designates the
+shared object of the same name rather than the private object the input row designated.
+The type is the same for both.
 
 ### Which member ran it: the metadata, not a field
 
@@ -1108,7 +1119,7 @@ met, and **nothing for an attribute that did not move**.
 | `objects_changed` | The number of **result lines** carrying that transition. An object handed to the command twice counts twice, as everywhere else in this view |
 | `applied` | Of those, how many the platform accepted (`updated`) |
 | `simulated` | Of those, how many a `dryrun` run would have written |
-| one per object type | How the count splits by **the handler path the command resolved** - `saved/searches`, `data/ui/views` - with `(type not journaled)` left for the lines that carry neither a handler nor a type |
+| one per object type | How the count splits by **object type** - `savedsearch`, `views` - with `(type not established)` left for the lines on which no route gave one |
 
 Three things to know before reading a figure off it.
 
@@ -1117,16 +1128,15 @@ Three things to know before reading a figure off it.
   state exactly like one that succeeded. `objects_changed - applied - simulated` is what
   was attempted and refused; the *Errors* panel says why. **In simulation nothing was
   written at all** and the `after` value is the one that *would* be applied.
-- **The columns are handler paths, not `eai:type` values.** `eai:type` is what the input
-  event happened to carry, and it is empty on a large share of journal lines - the
-  saved-search endpoint of the platform emits none at all, so a batch read from the
-  native endpoints used to land *in full* in the single `(type not journaled)` column.
-  The handler is the path the command actually resolved: it is filled in on every
-  object whose endpoint was resolved, whichever of the two resolution routes answered,
-  and it is what you read on the object's URI anyway. A line that carries a type and no
-  handler - written before the handler was journaled - is grouped under its type.
-  `(type not journaled)` now means what it says: **neither** designation is present,
-  which is the case of an event refused before its endpoint could be resolved.
+- **The columns are object types, in the vocabulary you write.** `savedsearch`,
+  `views`, `eventtypes` - the keys of the mapping table, the same words your own SPL
+  carries. A row that reached the command without a type is typed here all the same,
+  because the command inverts the handler path it resolved. This panel used to prefer
+  the handler path and fall back on the type, which showed **both vocabularies at
+  once**: measured on a mixed batch, one run produced `saved/searches`, `data/ui/views`
+  and `data/macros` next to `no_such_family`, a type, on the row refused before
+  resolution. `(type not established)` is what an empty type becomes, and it covers an
+  event refused before resolution as well as an endpoint no single key names.
 - **The value columns are whole values, and that was a measurement, not a preference.**
   Showing the role added or removed instead would be closer to what a decommissioning
   looks for, and further from the question asked. The whole-value form was kept because
@@ -1300,10 +1310,10 @@ Its output carries **exactly** eight fields, in this order: `title`, `eai:acl.ap
 ```mermaid
 flowchart LR
   ARG["acl_inventory<br/>or acl_inventory(f1,...,fN)"] --> LK
-  LK[["lookup acl_object_families<br/>family -> native handler"]] --> SEL
-  SEL{"family<br/>selection"} -->|"family requested"| MAP["one | rest per native handler"]
-  SEL -.->|"family not requested:<br/>NO REST call"| SKIP(["ignored"])
-  MAP --> SYN["eai:type synthesised<br/>from the family"]
+  LK[["lookup acl_object_families<br/>eai_type -> native handler"]] --> SEL
+  SEL{"type<br/>selection"} -->|"type requested"| MAP["one | rest per native handler"]
+  SEL -.->|"type not requested:<br/>NO REST call"| SKIP(["ignored"])
+  MAP --> SYN["eai:type synthesised<br/>from the table key"]
   SYN --> NORM["normalisation<br/>8 fields, input contract"]
   NORM --> CMD["| editacl ..."]
   NORM --> RS["shipped searches"]
@@ -1315,11 +1325,21 @@ Three things to know:
    nothing. An operator who only handles saved searches does not pay for the enumeration
    of the lookup files, which are often the most numerous population.
 2. **`eai:type` is synthesised**, since most native endpoints do not emit one. The value
-   used is the mapping table key of the family being queried. **Without that synthesis
-   the outbound pass would work but rollback would be impossible**, since
-   `editacl_rollback` resolves through `eai:type`.
-3. **Family names are the mapping table keys**, carried by the `acl_object_families`
-   lookup (column `family`).
+   used is the mapping table key of the family being queried - the same word the command
+   journals and the monitoring view groups on. Measured on 9.4.6, the three families
+   that *do* emit a type of their own - `datamodel`, `models`, `views` - emit exactly
+   the key this table names, so preserving the native value introduces no second word.
+   The synthesis is **no longer what makes a rollback possible**: the command fills the
+   type in itself by inverting the handler path it resolved, and `editacl_rollback`
+   re-emits `id`. What the synthesis still buys is a type to filter on *before* the
+   command has seen the row.
+3. **The arguments are mapping table keys**, carried by the `acl_object_families`
+   lookup (column `eai_type`, the same column name the override file of *Extending the
+   mapping table* uses). That lookup carries **27 rows where the table carries 28
+   keys**: `times` is absent, because `conf-times` already claims `data/ui/times` and
+   inventorying an endpoint twice would duplicate its objects. **Do not read the lookup
+   as an inverse table** - it would answer `conf-times` where the shipped table says the
+   answer is undefined.
 
 **Cost.** A complete inventory sends one REST call per family - on the order of thirty
 calls, not one. That is the price of full coverage. On a loaded search head, prefer the

@@ -106,31 +106,34 @@ def _object_fields(result):
     summary line would then be counted as one more object by any `dc()` over those
     fields.
 
-    **`handler` carries what `eai_type` was assumed to carry and does not.** `eai_type`
-    is copied from the input event: a batch built on the native endpoints has none -
-    measured, twenty-four of the twenty-seven native handlers emit no `eai:type` - and
-    the objects are nevertheless resolved, written, and journaled with an empty type.
-    Every consumer that groups by type then piles those lines into a single bucket. The
-    handler path the command **actually resolved** is the same fact, it is filled in
-    whenever resolution succeeded whichever route answered, and it is what an operator
-    reads on the URI anyway.
+    **`eai_type` is the one and only designation of the object's type**, and it is
+    written in the vocabulary of the input contract - the keys of the mapping table of
+    section 6, which are what the operator writes in their pipeline and reads in the
+    documentation. The command settles it before the first control (section 5.2): the
+    value the input row carried, or, when it carried none, the type the resolved
+    handler path inverts to.
 
-    It is **not** a type: the mapping table of section 6 is not injective, and the `id`
-    route resolves paths that no key of that table names. The journal therefore carries
-    both, and neither stands in for the other.
+    The **handler path** is not journaled under a name of its own. It is the other
+    vocabulary of the same notion - the one that addresses objects rather than names
+    them - and publishing both is what made a batch show the same family under two
+    labels: `saved/searches` for the rows a pipeline read natively, `savedsearch` for
+    the rows it typed. `endpoint` carries the handler path already, as its third
+    segment, and it carries it as an **address**, which is what it is.
 
-    `handler` is kept on a `skipped_private` line, where `endpoint` is deliberately
-    erased. The two are not the same kind of datum: `endpoint` is an **address**, and
-    the one computed there designates the shared object of the same name rather than
-    the private object the input row designated - publishing it would mislead. The
-    handler is the **family**, which is the same for both.
+    An empty `eai_type` says the type could not be established: no route resolved the
+    object, or the handler path is the image of several keys, or of none. It is not a
+    line "written before the type was journaled" - the format has one generation.
+
+    `endpoint` is deliberately erased on a `skipped_private` line: the string computed
+    there designates the shared object of the same name rather than the private object
+    the input row designated, and publishing it would mislead. The type survives that
+    erasure, because it is the same for both.
     """
     return {
         "endpoint": str(result.endpoint or ""),
         "app": str(result.app or ""),
         "title": str(result.title or ""),
         "eai_type": str(result.eai_type or ""),
-        "handler": str(result.handler or ""),
     }
 
 

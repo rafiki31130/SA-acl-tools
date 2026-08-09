@@ -690,6 +690,14 @@ class EditAclCommand(StreamingCommand):
         output = dict(record)
         output["acl_status"] = result.status
         output["acl_endpoint"] = result.endpoint
+        # The type the command settled on, in the vocabulary of the input contract. It
+        # is the exact analogue of `acl_endpoint`: the command publishes the address it
+        # resolved, and it publishes the type it resolved, rather than leaving the
+        # operator to compare an empty `eai:type` column in the simulation output with
+        # a filled one in the journal and in the monitoring view. On a row that carried
+        # a type, it repeats it; on a row that carried none, it is the only place the
+        # operator sees one before the write.
+        output["acl_type"] = result.eai_type
         output["acl_http_code"] = result.http_code
         output["acl_error"] = result.error or ""
         output["acl_warning"] = ";".join(result.warnings)

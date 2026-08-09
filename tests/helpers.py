@@ -40,6 +40,11 @@ FIXTURE_MAPPING = Mapping(
         "macros": "data/macros",
         "lookup-table-file": "data/lookup-table-files",
         "fvtags": "saved/fvtags",
+        # The **named ambiguous case** of the shipped table, reproduced here so that
+        # the fixture exercises it: `data/ui/times` is the image of these two keys and
+        # of no other, which makes going back from that path to a type undefined.
+        "times": "data/ui/times",
+        "conf-times": "data/ui/times",
     }
 )
 

@@ -633,25 +633,23 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
                     "no declared status starts with %r" % prefix,
                 )
 
-    def test_no_panel_ventilates_on_the_type_alone(self):
-        # Section 8.6.bis, seen from the view. `eai_type` is what the input event
-        # carried, and a batch read from the native endpoints carries none: measured on
-        # the lab, 515 objects written with no type journaled, all of them in one
-        # bucket. Every panel that builds an object-type label therefore reads the
-        # RESOLVED HANDLER first and falls back on the type, which only lines written
-        # before the handler was journaled still need.
+    def test_no_panel_reads_a_second_vocabulary_of_the_object_type(self):
+        # ONE notion, ONE field. The command settles the object type before its first
+        # control and writes it under `eai_type`, in the vocabulary of the input
+        # contract - the very words the operator puts in their own SPL.
         #
-        # The test is written on the ABSENCE of the old form rather than on the presence
-        # of the new one: a sixth panel added later with the old form fails here, which
-        # a per-panel assertion would not have caught.
+        # The panels used to prefer a journaled `handler` path and fall back on the
+        # type. Measured on a mixed lab batch, one single run then produced
+        # `saved/searches`, `data/ui/views`, `data/macros` AND `no_such_family` in the
+        # same column: two vocabularies of one notion, side by side, in a table the
+        # operator reads as a list of types.
+        #
+        # The test is written on the ABSENCE of the second field rather than on the
+        # presence of the first: a panel added later that reintroduces it fails here.
         for title, query in self.queries:
-            if "object_type" not in query:
-                continue
             with self.subTest(panel=title):
-                self.assertNotRegex(
-                    query, r'eval object_type = if\(coalesce\(eai_type,""\)'
-                )
-                self.assertIn("handler", query)
+                for forbidden in ("handler", "handler_path", "family"):
+                    self.assertNotIn(forbidden, query)
 
     def test_the_empty_object_type_is_labelled_wherever_it_is_grouped_on(self):
         # Measured, and named nowhere in the specification before this view: `eai_type`
@@ -662,15 +660,16 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
         # not label those lines undercounts without a word.
         #
         # The wording is not frozen, the LABELLING is: the breakdown panel turns the
-        # value into a column HEADER, where a bare "(not journaled)" would not say what
-        # it is that was not journaled.
+        # value into a column HEADER, so a bare "(none)" would not say what it is that
+        # is missing. "not journaled" would be wrong now: the field IS journaled on
+        # every object line, and simply holds nothing when no route established a type.
         for title, query in self.queries:
             if "BY" not in query:
                 continue
             if not re.search(r"BY[^|]*\beai_type\b|object_type", query):
                 continue
             with self.subTest(panel=title):
-                self.assertRegex(query, r'"\([a-z ]*not journaled\)"')
+                self.assertRegex(query, r'"\(type not established\)"')
 
     def test_the_comparison_columns_are_guarded_against_null_equals_null(self):
         # Measured: `null == null` is false in SPL, so an object with no prior state
@@ -1190,33 +1189,27 @@ class TheChangeBreakdownIsBuiltFromTheJournalAndNotFromAGuessTest(unittest.TestC
         written = [name for name in names if name and ('"%s"' % name) in self.query]
         self.assertEqual(written, [], "a family name is written into the panel")
 
-    def test_the_breakdown_ventilates_on_the_resolved_handler_first(self):
-        # The correction of section 8.6.bis, seen from the view. `eai_type` is what the
-        # input event happened to carry; the saved-search endpoint of the platform emits
-        # none at all, so a batch read natively used to land IN FULL in the single
-        # "(type not journaled)" column - measured on the lab, 515 objects written with
-        # no type journaled. `handler` is the path the command RESOLVED: it is filled in
-        # on every resolved object, whichever route of section 5.2 answered.
-        self.assertIn("values(handler)              AS object_handler", self.query)
-        self.assertRegex(
-            self.query,
-            r'eval object_type = case\(coalesce\(object_handler,""\)!="",\s*'
-            r"object_handler",
-        )
-        # The handler comes FIRST and the type second - the regex above pins that
-        # order. A run never mixes the two, since one run writes one journal format, so
-        # the column vocabulary of a given run stays homogeneous.
+    def test_the_breakdown_ventilates_on_the_single_type_field(self):
+        # The column headers of this panel and the values an operator writes in
+        # `eai:type` are the SAME WORDS. That is the whole point: a batch read from the
+        # native endpoints carries no type, and the command fills one in by inverting
+        # the handler path it resolved, so the panel is typed without ever publishing
+        # the addressing vocabulary as if it were a type.
+        self.assertIn("values(eai_type)             AS object_type", self.query)
+        self.assertNotRegex(self.query, r"handler")
 
-    def test_the_untyped_lines_get_their_own_column_rather_than_disappearing(self):
-        # The last-resort label survives, and now means what it says: NEITHER
-        # designation is present, which is an event refused before its endpoint could be
-        # resolved. It is still a column HEADER, where a bare "(not journaled)" would
-        # not say what it is that was not journaled.
-        self.assertIn('"(type not journaled)"', self.query)
+    def test_the_lines_with_no_established_type_get_their_own_column(self):
+        # The last-resort label means what it says: neither the input row nor the
+        # inversion of the resolved handler path gave a type. That covers an event
+        # refused before resolution, and an endpoint no single key of the table names.
+        # It is a column HEADER, so a bare "(not journaled)" would not say what it is
+        # that is missing - and "not journaled" would now be wrong, since the field IS
+        # journaled and simply holds nothing.
+        self.assertIn('"(type not established)"', self.query)
         self.assertRegex(
             self.query,
-            r'coalesce\(object_type,""\)!="",\s*object_type,\s*'
-            r'1==1,\s*"\(type not journaled\)"\)',
+            r'eval object_type = if\(coalesce\(object_type,""\)!="",\s*'
+            r'object_type,\s*"\(type not established\)"\)',
         )
 
     def test_the_panel_says_what_it_shows_in_simulation(self):

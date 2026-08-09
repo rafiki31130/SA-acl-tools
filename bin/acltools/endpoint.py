@@ -158,20 +158,24 @@ def is_fixed_context(owner):
 
 
 def resolve_handler_path(id_value, eai_type, mapping):
-    """Resolve the handler path. Returns `(handler_path, source)`.
+    """Resolve the handler path of the object. Returns the path.
 
-    `source` is either `"id"` or `"eai:type"`.
+    **Which of the two routes answered is not returned**, and that is deliberate. It
+    was, and nothing ever read it: no output field, no journal key, no view. A datum
+    carried the length of the pipeline and consumed by nobody is one more thing to keep
+    in step with the code for no benefit, and the fact it stood for - the nature of the
+    object - is published under one single name, `eai_type` (section 5.7).
 
     Errors: `EventRejected("rejected", "unresolved_endpoint:<eai:type>")` when neither
     route succeeds.
     """
     from_id = handler_path_from_id(id_value)
     if from_id:
-        return from_id, "id"
+        return from_id
 
     from_type = mapping.resolve(eai_type) if mapping is not None else None
     if from_type:
-        return from_type, "eai:type"
+        return from_type
 
     raise EventRejected(
         "rejected", "unresolved_endpoint:%s" % ("" if not eai_type else str(eai_type))

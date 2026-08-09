@@ -198,40 +198,40 @@ class HandlerPathFromIdTest(unittest.TestCase):
 class ResolveHandlerPathTest(unittest.TestCase):
 
     def test_the_id_route_has_priority(self):
-        handler, source = resolve_handler_path(
+        handler = resolve_handler_path(
             "https://base.invalid:0/servicesNS/nobody/my_app/saved/searches/object",
             "views",
             FIXTURE_MAPPING,
         )
-        self.assertEqual((handler, source), ("saved/searches", "id"))
+        self.assertEqual(handler, "saved/searches")
 
     def test_id_on_admin_directory_falls_back_to_the_table(self):
-        handler, source = resolve_handler_path(
+        handler = resolve_handler_path(
             "https://base.invalid:0/servicesNS/-/-/admin/directory/object",
             "savedsearch",
             FIXTURE_MAPPING,
         )
-        self.assertEqual((handler, source), ("saved/searches", "eai:type"))
+        self.assertEqual(handler, "saved/searches")
 
     def test_absent_id_falls_back_to_the_table(self):
-        handler, source = resolve_handler_path(None, "views", FIXTURE_MAPPING)
-        self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
+        handler = resolve_handler_path(None, "views", FIXTURE_MAPPING)
+        self.assertEqual(handler, "data/ui/views")
 
     def test_malformed_id_falls_back_to_the_table(self):
-        handler, source = resolve_handler_path(
+        handler = resolve_handler_path(
             "not-a-uri", "views", FIXTURE_MAPPING
         )
-        self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
+        self.assertEqual(handler, "data/ui/views")
 
     def test_id_with_a_traversal_falls_back_to_the_table(self):
         """A-5: the refusal does not open a functional hole - the table takes over."""
-        handler, source = resolve_handler_path(
+        handler = resolve_handler_path(
             "https://base.invalid:0/servicesNS/nobody/my_app/"
             "saved/../../services/authentication/users/object",
             "views",
             FIXTURE_MAPPING,
         )
-        self.assertEqual((handler, source), ("data/ui/views", "eai:type"))
+        self.assertEqual(handler, "data/ui/views")
 
     def test_unknown_eai_type_rejects_with_no_heuristic(self):
         with self.assertRaises(EventRejected) as raised:
@@ -249,13 +249,13 @@ class ResolveHandlerPathTest(unittest.TestCase):
     def test_family_without_a_native_eai_type_resolved_by_id(self):
         """The seven families missing from `admin/directory` emit no `eai:type` on
         their native endpoint: `id` is the only route available there."""
-        handler, source = resolve_handler_path(
+        handler = resolve_handler_path(
             "https://base.invalid:0/servicesNS/nobody/my_app/data/lookup-table-files/"
             "table.csv",
             None,
             FIXTURE_MAPPING,
         )
-        self.assertEqual((handler, source), ("data/lookup-table-files", "id"))
+        self.assertEqual(handler, "data/lookup-table-files")
 
 
 class NamespaceCarriedByIdTest(unittest.TestCase):

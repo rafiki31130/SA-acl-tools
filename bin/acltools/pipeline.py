@@ -145,16 +145,15 @@ class _Work(object):
     """Mutable state of the processing of one event, frozen into an `EventResult`."""
 
     __slots__ = (
-        "title", "app", "eai_type", "handler", "endpoint", "http_code", "status",
+        "title", "app", "eai_type", "endpoint", "http_code", "status",
         "error", "warnings", "before", "after", "journaled", "post_attempted",
-        "counted", "source", "platform_name",
+        "counted", "platform_name",
     )
 
     def __init__(self, event):
         self.title = str(event.title or "")
         self.app = str(event.app or "")
-        self.eai_type = str(event.eai_type or "")
-        self.handler = ""
+        self.eai_type = str(event.eai_type or "").strip()
         self.endpoint = ""
         self.http_code = 0
         self.status = "error"
@@ -165,7 +164,6 @@ class _Work(object):
         self.journaled = False
         self.post_attempted = False
         self.counted = False
-        self.source = ""
         #: Identity returned by splunkd in the GET response (section 5.3), never the
         #: `title` of the event: section 5.3 states that the GET is authoritative, and
         #: an upstream `eval` may have forged the `title`.
@@ -181,7 +179,6 @@ class _Work(object):
             title=self.title,
             app=self.app,
             eai_type=self.eai_type,
-            handler=self.handler,
             endpoint=self.endpoint,
             http_code=int(self.http_code or 0),
             error=self.error,
@@ -191,7 +188,6 @@ class _Work(object):
             journaled=self.journaled,
             post_attempted=self.post_attempted,
             counted=self.counted,
-            source=self.source,
         )
 
 
@@ -325,18 +321,31 @@ class EventProcessor(object):
         # therefore empty, as it already is for `skipped_ceiling`, the other abstention
         # with no HTTP exchange: an empty `acl_endpoint` and `acl_http_code = 0` say the
         # same thing, nothing was addressed.
-        handler_path, source = resolve_handler_path(
+        handler_path = resolve_handler_path(
             event.id_value, event.eai_type, self._mapping
         )
-        work.source = source
-        # The handler is kept, and no longer discarded once the URI is built
-        # (section 8.2). It is what the command knows about the nature of the object at
-        # this exact point, whichever of the two routes answered, whereas `eai_type` is
-        # only what the input event happened to carry. On a batch built on native
-        # endpoints, `eai_type` is empty and this is the only type-like datum the
-        # journal can carry.
-        work.handler = handler_path
         work.endpoint = build_object_path(event.app, handler_path, event.title)
+
+        # **The type of the object is settled here, once, and in a single vocabulary**
+        # - that of the input contract, which is the vocabulary the operator writes in
+        # `eai:type` and reads in the documentation.
+        #
+        # An event whose row carried a type keeps it. An event that carried none -
+        # twenty-four of the twenty-seven native handlers emit no `eai:type`, measured,
+        # so a batch read natively is entirely untyped - gets the type the resolved
+        # handler path inverts to.
+        #
+        # The inversion is a **partial** function and the command does not extend it:
+        # `data/ui/times` is the image of `times` **and** of `conf-times`, and the `id`
+        # route resolves paths no key of the table names. `type_of_handler` answers
+        # `None` on both, the type stays empty, and empty says "the type could not be
+        # established" instead of naming one of two candidates.
+        #
+        # The handler path is **not** published as a type under any name: it belongs to
+        # the other vocabulary, the one that addresses objects, and `endpoint` already
+        # carries it - `/servicesNS/nobody/<app>/<handler path>/<encoded title>`.
+        if not work.eai_type and self._mapping is not None:
+            work.eai_type = self._mapping.type_of_handler(handler_path) or ""
 
         # Rank -1 (section 3.5, D-26, D-34) - private objects, skipped **with no GET
         # and no POST**.

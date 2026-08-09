@@ -460,9 +460,7 @@
         <search>
           <query>`acl_journal_source` sid="$sid$" phase=outcome
 | eval application = if(coalesce(app,"")="", "(not journaled)", app)
-| eval object_type = case(coalesce(handler,"")!="", handler,
-                          coalesce(eai_type,"")!="", eai_type,
-                          1==1, "(not journaled)")
+| eval object_type = if(coalesce(eai_type,"")!="", eai_type, "(type not established)")
 | stats count AS events, values(status) AS statuses BY application, object_type
 | sort - events, application, object_type</query>
           <earliest>$tr.earliest$</earliest>
@@ -504,25 +502,25 @@
             section 8.5 says produces two `outcome` lines - counts twice, like everywhere
             else in this view.
 
-         4. THE OBJECT TYPE COLUMNS ARE BUILT FROM THE DATA, and the discriminant is
-            THE RESOLVED HANDLER, not `eai_type`. `eai_type` is what the input event
-            happened to carry, and it is empty on more than three quarters of the lines
-            of a heterogeneous batch - the saved-search endpoint of the platform emits
-            none at all, so a batch of saved searches read natively is entirely untyped
-            and used to land, in full, in the single "(type not journaled)" column.
-            `handler` is the path the command REALLY resolved: it is filled in whenever
-            the endpoint was resolved, whichever of the two routes of section 5.2
-            answered, it is unambiguous, and it is what an operator reads on the URI.
-            Measured on the lab: a slash in a value written into a field name survives
-            `eval {field}`, `stats sum(*) AS *` and `table *`, so `saved/searches` is a
-            usable column header.
+         4. THE OBJECT TYPE COLUMNS ARE BUILT FROM THE DATA, and there is exactly ONE
+            field to build them from: `eai_type`, written by the command in the
+            vocabulary of the input contract - `savedsearch`, `views`, `eventtypes`.
+            That is the vocabulary the operator writes in their pipeline and reads in
+            the documentation, so the column headers of this panel and the values of
+            their own SPL are the same words.
 
-            `eai_type` is kept as the SECOND choice, for lines written before the
-            handler was journaled - the journal format is not versioned (section 15.7),
-            and a run predating this change carries a type and no handler. A run never
-            mixes the two, since one run writes one format. "(type not journaled)" is
-            the last resort and now means what it says: NEITHER designation is there,
-            which is the case of an event refused before endpoint resolution.
+            This panel used to prefer the JOURNALED HANDLER PATH and fall back on the
+            type. The two are different vocabularies of the same notion, and the panel
+            showed both AT ONCE: measured on a mixed lab batch, one run produced
+            `saved/searches`, `data/ui/views`, `data/macros` - and `no_such_family`, a
+            type, on the row refused before resolution. The comment that used to sit
+            here claimed "a run never mixes the two"; it did, on the very first batch
+            that carried an unresolved object.
+
+            "(type not established)" is what an empty `eai_type` becomes, and it means
+            what it says: neither the input row nor the inversion of the resolved
+            handler path gave a type. That covers an event refused before resolution,
+            and an object whose handler path is the image of two keys or of none.
 
          5. THE GRANULARITY IS THE WHOLE VALUE OF THE ATTRIBUTE, before and after, and
             not the individual role added or removed. That is the form the sponsor asked
@@ -546,13 +544,14 @@
       <html>
         <p>One row per transition that actually happened, one column per object type.
           An attribute that did not move produces no row. The column is the
-          <b>handler path the command resolved</b> - <tt>saved/searches</tt>,
-          <tt>data/ui/views</tt> - which is filled in on every resolved object, unlike
-          <tt>eai:type</tt>, which a batch read from the native endpoints does not
-          carry at all. Lines that carry a type but no handler, written before the
-          handler was journaled, are grouped under their type.
-          <tt>(type not journaled)</tt> is left for the lines that carry neither, which
-          means the object was refused before its endpoint could be resolved.</p>
+          <b>object type</b> as the command settled it - <tt>savedsearch</tt>,
+          <tt>views</tt>, <tt>eventtypes</tt> - which is the same vocabulary you write
+          in <tt>eai:type</tt> in your pipeline. A row that carried no type gets the
+          one its resolved endpoint inverts to, so a batch read from the native
+          endpoints is typed here even though the platform emitted nothing.
+          <tt>(type not established)</tt> is left for the lines where neither route
+          gave a type: an object refused before its endpoint could be resolved, or an
+          endpoint no single type names.</p>
         <p><b>objects_changed</b> counts result lines, not objects reconstructed from
           their fields: an object handed to the command twice counts twice.
           <b>applied</b> is the part the platform accepted, <b>simulated</b> the part a
@@ -568,7 +567,6 @@
 | stats count(eval(phase="outcome"))                          AS result_lines,
         count(eval(phase="outcome" AND status="updated"))     AS applied,
         count(eval(phase="outcome" AND status="dryrun"))       AS simulated,
-        values(handler)              AS object_handler,
         values(eai_type)             AS object_type,
         earliest(before_owner)       AS before_owner,
         earliest(after_owner)        AS after_owner,
@@ -579,9 +577,8 @@
         earliest(before_sharing)     AS before_sharing,
         earliest(after_sharing)      AS after_sharing
   BY endpoint
-| eval object_type = case(coalesce(object_handler,"")!="", object_handler,
-                          coalesce(object_type,"")!="", object_type,
-                          1==1, "(type not journaled)")
+| eval object_type = if(coalesce(object_type,"")!="", object_type,
+                        "(type not established)")
 | eval change_type = mvappend(
       if(isnull(before_read)    OR isnull(after_read)    OR before_read    = after_read,    null(), "Read"),
       if(isnull(before_write)   OR isnull(after_write)   OR before_write   = after_write,   null(), "Write"),
@@ -635,7 +632,6 @@
         values(eval(if(phase="outcome", http_code, null()))) AS http_code,
         values(eval(if(phase="outcome" AND error!="", error, null()))) AS error,
         values(app) AS application, values(title) AS title,
-        values(handler) AS object_handler,
         values(eai_type) AS object_type,
         earliest(before_owner)       AS before_owner,
         earliest(after_owner)        AS after_owner,
@@ -647,9 +643,8 @@
         earliest(after_sharing)      AS after_sharing,
         min(_time) AS first_seen
   BY endpoint
-| eval object_type = case(coalesce(object_handler,"")!="", object_handler,
-                          coalesce(object_type,"")!="", object_type,
-                          1==1, "(not journaled)")
+| eval object_type = if(coalesce(object_type,"")!="", object_type,
+                        "(type not established)")
 | eval read_change    = case(isnull(before_read)  OR isnull(after_read),  "n/a",
                              before_read  = after_read,  "=", 1==1, "CHANGED")
 | eval write_change   = case(isnull(before_write) OR isnull(after_write), "n/a",
@@ -684,9 +679,7 @@
           <query>`acl_journal_source` sid="$sid$" phase=outcome
 | where coalesce(endpoint,"") = ""
 | eval application = if(coalesce(app,"")="", "(not journaled)", app)
-| eval object_type = case(coalesce(handler,"")!="", handler,
-                          coalesce(eai_type,"")!="", eai_type,
-                          1==1, "(not journaled)")
+| eval object_type = if(coalesce(eai_type,"")!="", eai_type, "(type not established)")
 | eval error = if(error="", "(none)", error)
 | sort _time
 | table _time, application, object_type, title, status, http_code, error</query>
@@ -709,9 +702,7 @@
 | search NOT status IN (updated, noop, dryrun)
 | rex field=error "^(?&lt;error_class&gt;[a-z_]+(?::\d+)?)"
 | eval error_class = coalesce(error_class, "(no message)")
-| eval object_type = case(coalesce(handler,"")!="", handler,
-                          coalesce(eai_type,"")!="", eai_type,
-                          1==1, "(not journaled)")
+| eval object_type = if(coalesce(eai_type,"")!="", eai_type, "(type not established)")
 | stats count AS events, values(status) AS statuses,
         values(title) AS titles, values(error) AS messages
   BY error_class, object_type

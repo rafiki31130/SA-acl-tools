@@ -1,4 +1,4 @@
-family,handler_path
+eai_type,handler_path
 collections-conf,storage/collections/config
 commands,admin/commandsconf
 conf-times,data/ui/times

@@ -189,6 +189,78 @@ class LoadMappingTest(unittest.TestCase):
         self.assertEqual(len(diagnostics), 1)
 
 
+class TheTableIsReadBackwardsAndSaysWhereItCannotBeTest(unittest.TestCase):
+    """The inverse direction, `handler path -> eai:type`, and its **one** blind spot.
+
+    The command needs it: twenty-four of the twenty-seven native handlers emit no
+    `eai:type`, so a batch read natively resolves through `id` and would carry no type
+    at all. Inverting the table gives the type back, in the vocabulary the operator
+    writes - which is what lets one single designation of that notion travel from the
+    pipeline to the journal to the monitoring view.
+
+    The inverse is a **partial function**, and the exception is named here rather than
+    guessed at run time: `data/ui/times` is the image of `times` **and** of
+    `conf-times`. Every other handler path of the shipped table is the image of exactly
+    one key. If a later entry made a second path ambiguous, this test fails - which is
+    the whole reason it asserts the exact set instead of a count.
+    """
+
+    #: The one ambiguous handler path of the shipped table, and its two keys. Named,
+    #: not discovered: a test that recomputed the expected value from the file would
+    #: pass on any table whatsoever.
+    AMBIGUOUS = {"data/ui/times": ("conf-times", "times")}
+
+    def setUp(self):
+        self.mapping = load_mapping(SHIPPED_TABLE)
+
+    def test_the_table_is_invertible_everywhere_except_on_the_named_case(self):
+        self.assertEqual(self.mapping.ambiguous_handlers(), self.AMBIGUOUS)
+
+    def test_the_shape_the_ambiguity_comes_from(self):
+        """28 keys for 27 distinct handler paths: one path short of a bijection."""
+        coverage = self.mapping.coverage()
+        self.assertEqual(coverage["total"], 28)
+        self.assertEqual(coverage["handlers"], 27)
+
+    def test_every_unambiguous_handler_inverts_to_its_only_key(self):
+        for eai_type in self.mapping.types():
+            handler_path = self.mapping.resolve(eai_type)
+            if handler_path in self.AMBIGUOUS:
+                continue
+            with self.subTest(eai_type=eai_type):
+                self.assertEqual(self.mapping.type_of_handler(handler_path), eai_type)
+
+    def test_the_ambiguous_path_yields_no_type_rather_than_one_of_its_keys(self):
+        """Both answers would be defensible, which is exactly why neither is given."""
+        for handler_path in self.AMBIGUOUS:
+            with self.subTest(handler_path=handler_path):
+                self.assertIsNone(self.mapping.type_of_handler(handler_path))
+
+    def test_a_handler_no_key_names_yields_no_type(self):
+        """The `id` route of section 5.2 accepts any pattern-valid path, and the set of
+        paths it can produce is **not** bounded by this table."""
+        self.assertIsNone(self.mapping.type_of_handler("some/future/endpoint"))
+        self.assertIsNone(self.mapping.type_of_handler(""))
+        self.assertIsNone(self.mapping.type_of_handler(None))
+
+    def test_an_override_that_creates_an_ambiguity_is_reported_and_not_resolved(self):
+        """The operator may extend the table (section 6.3), so the ambiguity is not a
+        property of the shipped file alone. An override pointing a second key at an
+        existing handler makes that handler undecidable, and it must come out that way
+        rather than resolving to whichever key was loaded last."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        override = os.path.join(directory, "override.csv")
+        with open(override, "w", encoding="utf-8", newline="") as handle:
+            handle.write("eai_type,handler_path\nlocal_alias,saved/searches\n")
+        mapping = load_mapping(SHIPPED_TABLE, override)
+        self.assertEqual(
+            mapping.ambiguous_handlers()["saved/searches"],
+            ("local_alias", "savedsearch"),
+        )
+        self.assertIsNone(mapping.type_of_handler("saved/searches"))
+
+
 class ExampleFileTest(unittest.TestCase):
     """D-5: the archive ships the example, **never** the real file."""
 
