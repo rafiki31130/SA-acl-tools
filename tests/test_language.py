@@ -70,9 +70,15 @@ Every text file tracked in the repository, with two declared exclusions:
 
 `README.md` used to carry a third, temporary exclusion, while the split into an operator
 document and a developer document was still pending. Both documents are now in English
-and both are in scope, together with `docs/DESIGN.md`. The exclusion is gone, and so is
+and both are in scope, together with `DEVNOTES.md`. The exclusion is gone, and so is
 the test that watched over its justification: an exclusion that no longer has a reason
 must not survive as a habit.
+
+`DEVNOTES.md` replaced `docs/DESIGN.md` when the README was reduced to an operator
+document. The scan walks the whole tree, so the move needed no rule change - only the
+sentinel list of `test_the_scan_actually_reads_the_deliverables` names the file, and a
+sentinel that names a path which no longer exists is exactly the kind of dead check this
+module refuses to carry.
 """
 
 import os
@@ -221,7 +227,7 @@ class RepositoryIsInEnglishTest(unittest.TestCase):
         scanned = {relative for relative, _absolute in self.files}
         for expected in (
             "README.md",
-            "docs/DESIGN.md",
+            "DEVNOTES.md",
             "bin/editacl.py",
             "bin/acltools/pipeline.py",
             "bin/acltools/preflight.py",

@@ -634,11 +634,15 @@ class ExtractorIsProvenTest(unittest.TestCase):
 # The enumeration of the shipped documentation
 # --------------------------------------------------------------------------- #
 
-#: Path of the two documents, relative to the repository root. The split of D-45 gave
-#: each of them one copy of the enumeration and no more, and the class below anchors
-#: each copy to `ACL_STATUSES`.
+#: Path of the two documents, relative to the repository root. The split gave each of
+#: them one copy of the enumeration and no more, and the class below anchors each copy
+#: to `ACL_STATUSES`.
+#:
+#: `DEVNOTES.md` replaced `docs/DESIGN.md` when the README was reduced to an operator
+#: document: one file at the root, absorbing the design notes and everything the README
+#: no longer carries, and excluded from the deployable archive by `.gitattributes`.
 README = "README.md"
-DESIGN = os.path.join("docs", "DESIGN.md")
+DESIGN = "DEVNOTES.md"
 
 #: The one turn of phrase in the README that spells the size of the enumeration out in
 #: words. A number written in letters is an enumeration in disguise, and it drifts the
@@ -665,18 +669,23 @@ class ShippedDocumentationAnchoredToTheSingleSourceTest(unittest.TestCase):
     and with no link whatsoever to the source. That is the error class of D-35, on the
     shipped-documentation side. These tests establish the missing link.
 
-    **Where each copy lives, since the split of D-45.** The README is the operator
-    document: it carries the enumeration itself, in the output field table, because the
-    set of values an operator may read in `acl_status` is part of the output contract
-    and must not require opening a design document. `docs/DESIGN.md` is the developer
-    document: it carries the state machine, because that diagram shows the normative
-    ranks and the internal transitions, which is design material. One copy each, one
-    anchoring test each - a value duplicated in both documents would be one more thing
-    to keep in step, for nothing.
+    **Where each copy lives, and why the reduction of the README did not move it.** The
+    README is the operator document: it carries the enumeration itself, in the output
+    field table, because the set of values an operator may read in `acl_status` is part
+    of the output contract. Two arguments could have been argued either way once the
+    README shrank to an operator document; a third settles it. `README.md` is the **only
+    one of the two documents shipped in the deployable archive** - `DEVNOTES.md` carries
+    `export-ignore` - so an enumeration living there would be unreachable from an app
+    installed on a search head, which is exactly where the question gets asked.
 
-    Reach: they anchor the **enumeration**, the **count**, the **mention of each value**
-    in the README, and the **state machine** of `docs/DESIGN.md`. They say nothing about
-    the correctness of the wording that describes each status, nor about the
+    `DEVNOTES.md` carries the state machine instead, because that diagram shows the
+    normative ranks and the internal transitions, which nobody reads to interpret a
+    result table. One copy each, one anchoring test each - a value duplicated in both
+    documents would be one more thing to keep in step, for nothing.
+
+    Reach: they anchor the **enumeration**, the **count**, the **explanation of each
+    value** in the README, and the **state machine** of `DEVNOTES.md`. They say nothing
+    about the correctness of the wording that describes each status, nor about the
     specification, which no test of this repository can reach.
     """
 
@@ -736,12 +745,19 @@ class ShippedDocumentationAnchoredToTheSingleSourceTest(unittest.TestCase):
 
         A status added to the table row and nowhere else would leave the operator with
         a name and no meaning. This is the broad net under the exact check above: every
-        value must appear at least once as an inline-code token somewhere in the
-        document.
+        value must appear at least once **outside** the enumeration row.
+
+        **That exclusion is what the reduction of the README bought.** The check used to
+        search the whole document, which the enumeration row satisfied on its own - so
+        the docstring claimed a reach the code did not have, and a status added to the
+        row and explained nowhere passed. The operator README now carries a one-line
+        meaning for each value, so the row can be taken out of the haystack and the
+        question asked is the one that matters: is this value explained anywhere?
         """
+        body = self.readme.replace(self._table_row(), "")
         missing = sorted(
             status for status in ACL_STATUSES
-            if not re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(status), self.readme)
+            if not re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(status), body)
         )
         self.assertEqual(
             [], missing,
@@ -751,7 +767,7 @@ class ShippedDocumentationAnchoredToTheSingleSourceTest(unittest.TestCase):
         )
 
     def test_the_design_state_machine_covers_every_status(self):
-        """The state machine of `docs/DESIGN.md` is the second copy, and the last one."""
+        """The state machine of `DEVNOTES.md` is the second copy, and the last one."""
         blocks = [
             block for block in re.findall(r"```mermaid\n(.*?)```", self.design, re.S)
             if "stateDiagram" in block
@@ -784,6 +800,22 @@ class ShippedDocumentationAnchoredToTheSingleSourceTest(unittest.TestCase):
             "the README carries a state diagram again. The enumeration of the states "
             "belongs to %s, which is where the anchoring test looks; either move it "
             "back or extend that test to cover both." % DESIGN,
+        )
+
+    def test_the_readme_still_carries_a_conceptual_diagram(self):
+        """The operator document keeps at least one diagram, and it is not the state
+        machine.
+
+        The specification requires a conceptual schema in the README. Reducing a document
+        is exactly the moment a diagram gets dropped as "design material", so the floor is
+        held mechanically rather than by intention: at least one mermaid block, none of
+        them a state diagram (the test above).
+        """
+        blocks = re.findall(r"```mermaid\n(.*?)```", self.readme, re.S)
+        self.assertTrue(
+            blocks,
+            "the README no longer carries any mermaid diagram; the specification "
+            "requires at least one conceptual schema in the operator document.",
         )
 
 

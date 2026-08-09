@@ -149,11 +149,16 @@ class DeployableArchiveTest(unittest.TestCase):
 
     Same campaign: removing `tests/ export-ignore` passed the suite. D-37 makes the
     deployment start from the commit, so this file is what keeps the test suite, the
-    maintenance tools and the design notes OUT of a search head. Nothing else states
+    maintenance tools and the development notes OUT of a search head. Nothing else states
     that scope, and nothing else would notice it changing.
+
+    `DEVNOTES.md` replaced the `docs/` directory when the README was reduced to an
+    operator document: one file at the root instead of a directory, still excluded, for
+    the same reason. A **file** rather than a directory matters to this check - a pattern
+    written `DEVNOTES` or `docs` without its trailing marker would silently stop matching.
     """
 
-    EXPORT_IGNORED = ("tests/", "tools/", "docs/", ".gitattributes", ".gitignore")
+    EXPORT_IGNORED = ("tests/", "tools/", "DEVNOTES.md", ".gitattributes", ".gitignore")
 
     def setUp(self):
         with open(os.path.join(REPO_ROOT, ".gitattributes"), encoding="utf-8") as f:
