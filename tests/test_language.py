@@ -64,15 +64,15 @@ Every text file tracked in the repository, with two declared exclusions:
 - `bin/lib/` - the vendored Splunk SDK. It is third-party code, its integrity is held
   by `bin/lib/MANIFEST.sha256` and by `tests/test_vendor_manifest.py`, and touching it
   would break both;
-- `README.md` - **temporary exclusion**. The README is the object of a separate piece of
-  work (splitting the user-facing and developer-facing halves, then translating). It is
-  deliberately left untouched until then, so this check would fail on it for a reason
-  that is known and scheduled. **When that work lands, delete `README.md` from
-  `EXCLUDED_PATHS`** - `test_the_readme_exclusion_is_still_justified` fails once the
-  README no longer holds French, so the exclusion cannot outlive its reason;
 - this module itself. Its vocabulary *is* the French word list; scanning it would make
   the check fail on its own instrument. It is the only file whose exclusion buys
   nothing but the check's own existence.
+
+`README.md` used to carry a third, temporary exclusion, while the split into an operator
+document and a developer document was still pending. Both documents are now in English
+and both are in scope, together with `docs/DESIGN.md`. The exclusion is gone, and so is
+the test that watched over its justification: an exclusion that no longer has a reason
+must not survive as a habit.
 """
 
 import os
@@ -94,7 +94,6 @@ TEXT_FILENAMES = (".gitattributes", ".gitignore", "LICENSE")
 #: is implicit. A path prefix, in repository-relative POSIX form.
 EXCLUDED_PATHS = (
     "bin/lib/",              # vendored SDK, third party, integrity held by a manifest
-    "README.md",             # separate splitting-and-translation work, see docstring
     "tests/test_language.py",  # this module: its content is the detector's vocabulary
 )
 
@@ -221,12 +220,15 @@ class RepositoryIsInEnglishTest(unittest.TestCase):
         """
         scanned = {relative for relative, _absolute in self.files}
         for expected in (
+            "README.md",
+            "docs/DESIGN.md",
             "bin/editacl.py",
             "bin/acltools/pipeline.py",
             "bin/acltools/preflight.py",
             "default/macros.conf",
             "default/savedsearches.conf",
             "default/searchbnf.conf",
+            "default/data/ui/views/editacl_runs.xml",
             "metadata/default.meta",
             "lookups/acl_decommissioned_roles.csv",
             "tests/test_pipeline.py",
@@ -265,21 +267,19 @@ class RepositoryIsInEnglishTest(unittest.TestCase):
             % (len(faults), "\n".join(faults[:60])),
         )
 
-    def test_the_readme_exclusion_is_still_justified(self):
-        """The temporary exclusion cannot outlive its reason.
+    def test_no_path_is_excluded_without_a_standing_reason(self):
+        """An exclusion is a hole opened by hand, and holes outlive their reason.
 
-        `README.md` is excluded because a separate piece of work owns it. The day that
-        work lands and the README is English, this test fails and asks for the
-        exclusion to be deleted - which is the only way an exclusion that is no longer
-        needed gets noticed.
+        Only two exclusions are admitted, both named and justified in the module
+        docstring. Adding a third one has to be a deliberate act, visible in this diff -
+        which is what stopped the temporary `README.md` exclusion from becoming
+        permanent once the split-and-translate work had landed.
         """
-        readme = os.path.join(REPO_ROOT, "README.md")
-        if not os.path.exists(readme):                               # pragma: no cover
-            self.skipTest("no README.md in this checkout")
-        self.assertTrue(
-            scan_text(_read(readme)),
-            "README.md no longer holds French: remove it from EXCLUDED_PATHS so it "
-            "comes back under the check",
+        self.assertEqual(
+            ("bin/lib/", "tests/test_language.py"),
+            EXCLUDED_PATHS,
+            "the set of exclusions changed: justify the new one in the module "
+            "docstring, or remove it",
         )
 
 

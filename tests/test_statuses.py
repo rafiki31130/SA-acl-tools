@@ -631,41 +631,59 @@ class ExtractorIsProvenTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# The enumeration of the README
+# The enumeration of the shipped documentation
 # --------------------------------------------------------------------------- #
 
-#: The README is deliberately not translated yet, so the pattern below is written in
-#: French on purpose: it matches the one turn of phrase in the document that spells the
-#: size of the enumeration out in words. It is **data matching an untranslated file**,
-#: not prose - hence the accented letters in its character class.
-_README_COUNT = re.compile(r"\bles\s+([a-zéèêë]+)\s+`acl_status`", re.IGNORECASE)
+#: Path of the two documents, relative to the repository root. The split of D-45 gave
+#: each of them one copy of the enumeration and no more, and the class below anchors
+#: each copy to `ACL_STATUSES`.
+README = "README.md"
+DESIGN = os.path.join("docs", "DESIGN.md")
 
-#: Enough cardinals to frame an evolution; **a word absent from the table fails**,
-#: rather than letting an unverified count through. The keys are French because the
-#: README is.
+#: The one turn of phrase in the README that spells the size of the enumeration out in
+#: words. A number written in letters is an enumeration in disguise, and it drifts the
+#: same way.
+_COUNT_RE = re.compile(r"\bthe\s+([a-z]+)\s+`acl_status`\s+values", re.IGNORECASE)
+
+#: Enough cardinals to frame an evolution; **a word absent from this table fails**,
+#: rather than letting an unverified count through.
 _CARDINALS = {
-    "dix": 10, "onze": 11, "douze": 12, "treize": 13, "quatorze": 14,
-    "quinze": 15, "seize": 16,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
 }
 
 
-class ReadmeAnchoredToTheSingleSourceTest(unittest.TestCase):
-    """C-2 - the enumeration of the shipped README is derived from `ACL_STATUSES`.
+def _read_document(relative_path):
+    with open(os.path.join(REPO_ROOT, relative_path), encoding="utf-8") as handle:
+        return handle.read()
+
+
+class ShippedDocumentationAnchoredToTheSingleSourceTest(unittest.TestCase):
+    """C-2 - the enumeration of the shipped documentation is derived from the code.
 
     The README used to copy the twelve values by hand: exact on the day of the audit,
     and with no link whatsoever to the source. That is the error class of D-35, on the
     shipped-documentation side. These tests establish the missing link.
 
-    Reach: they anchor the **enumeration**, the **count** and the **state machine** of
-    `README.md`. They say nothing about the correctness of the wording that describes
-    each status elsewhere in the document, nor about the specification, which no test
-    of the repository can reach.
+    **Where each copy lives, since the split of D-45.** The README is the operator
+    document: it carries the enumeration itself, in the output field table, because the
+    set of values an operator may read in `acl_status` is part of the output contract
+    and must not require opening a design document. `docs/DESIGN.md` is the developer
+    document: it carries the state machine, because that diagram shows the normative
+    ranks and the internal transitions, which is design material. One copy each, one
+    anchoring test each - a value duplicated in both documents would be one more thing
+    to keep in step, for nothing.
+
+    Reach: they anchor the **enumeration**, the **count**, the **mention of each value**
+    in the README, and the **state machine** of `docs/DESIGN.md`. They say nothing about
+    the correctness of the wording that describes each status, nor about the
+    specification, which no test of this repository can reach.
     """
 
     @classmethod
     def setUpClass(cls):
-        with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as handle:
-            cls.readme = handle.read()
+        cls.readme = _read_document(README)
+        cls.design = _read_document(DESIGN)
 
     def _table_row(self):
         rows = [
@@ -694,7 +712,7 @@ class ReadmeAnchoredToTheSingleSourceTest(unittest.TestCase):
     def test_the_count_announced_by_the_readme_is_right(self):
         """The README spells the size of the enumeration out in words, which is an
         enumeration disguised as a number."""
-        words = _README_COUNT.findall(self.readme)
+        words = _COUNT_RE.findall(self.readme)
         self.assertTrue(
             words, "the README no longer announces the number of `acl_status` values "
                    "in words; if the wording changed, this control must be readjusted, "
@@ -713,19 +731,59 @@ class ReadmeAnchoredToTheSingleSourceTest(unittest.TestCase):
                     "carries %d." % (word, len(ACL_STATUSES)),
                 )
 
-    def test_the_readme_state_machine_covers_every_status(self):
-        """The diagram is the third copy of the enumeration in the document."""
+    def test_every_status_is_mentioned_in_the_readme(self):
+        """The enumeration is one row; the operator also needs each value explained.
+
+        A status added to the table row and nowhere else would leave the operator with
+        a name and no meaning. This is the broad net under the exact check above: every
+        value must appear at least once as an inline-code token somewhere in the
+        document.
+        """
+        missing = sorted(
+            status for status in ACL_STATUSES
+            if not re.search(r"(?<![\w.])%s(?![\w.])" % re.escape(status), self.readme)
+        )
+        self.assertEqual(
+            [], missing,
+            "status(es) declared in ACL_STATUSES that the README never mentions "
+            "outside its enumeration row: %s. Add the case, or say why it cannot "
+            "occur." % missing,
+        )
+
+    def test_the_design_state_machine_covers_every_status(self):
+        """The state machine of `docs/DESIGN.md` is the second copy, and the last one."""
         blocks = [
-            block for block in re.findall(r"```mermaid\n(.*?)```", self.readme, re.S)
+            block for block in re.findall(r"```mermaid\n(.*?)```", self.design, re.S)
             if "stateDiagram" in block
         ]
-        self.assertEqual(1, len(blocks), "exactly one state diagram expected")
+        self.assertEqual(
+            1, len(blocks),
+            "exactly one state diagram expected in %s; %d found." % (DESIGN, len(blocks)),
+        )
         targets = set(re.findall(r"-->\s*([A-Za-z_][A-Za-z0-9_]*)", blocks[0]))
         missing = sorted(set(ACL_STATUSES) - targets)
         self.assertEqual(
             [], missing,
             "status(es) declared in ACL_STATUSES and absent from the state machine of "
-            "the README: %s." % missing,
+            "%s: %s." % (DESIGN, missing),
+        )
+
+    def test_the_readme_carries_no_state_machine(self):
+        """The state machine lives in one document, and the split says which one.
+
+        Without this, a well-meaning contributor puts the diagram back into the README
+        "for convenience", the anchoring test above keeps watching the other file, and
+        the copy nobody checks is the one everybody reads.
+        """
+        blocks = [
+            block for block in re.findall(r"```mermaid\n(.*?)```", self.readme, re.S)
+            if "stateDiagram" in block
+        ]
+        self.assertEqual(
+            [], blocks,
+            "the README carries a state diagram again. The enumeration of the states "
+            "belongs to %s, which is where the anchoring test looks; either move it "
+            "back or extend that test to cover both." % DESIGN,
         )
 
 

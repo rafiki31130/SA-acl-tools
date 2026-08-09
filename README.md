@@ -1,192 +1,200 @@
 # SA-acl-tools
 
-Application Splunk fournissant la commande de recherche personnalisée **`editacl`**,
-qui réécrit en masse les ACL (permissions de lecture et d'écriture, portée de partage)
-d'objets de connaissance Splunk arbitraires, via l'API REST, à partir d'un pipeline SPL
-décrivant l'état cible.
+Splunk application shipping the custom search command **`editacl`**, which rewrites in
+bulk the ACLs (read and write permissions, sharing scope, owner) of arbitrary Splunk
+knowledge objects, through the REST API, from an SPL pipeline describing the target
+state. It also ships an inventory macro, a rollback macro, four saved searches and a
+run monitoring view.
 
-Cas d'usage moteur : le décommissionnement d'un jeu de rôles hérités, par
-**substitution** (remplacement par les rôles d'une nouvelle structure de droits) ou par
-**dépréciation** (renommage en `deprecated_<nom>` avant retrait).
+Driving use case: decommissioning a set of legacy roles, either by **substitution**
+(replacement with the roles of a new entitlement structure) or by **deprecation**
+(renaming to `deprecated_<name>` before removal).
 
-> **L'opération est irréversible.** Le journal write-ahead et la macro de restauration
-> sont le seul filet de sécurité. Lire la section [Retour arrière](#retour-arrière)
-> **avant** la première écriture réelle, pas après.
+> **The operation is irreversible.** The write-ahead journal and the rollback macro are
+> the only safety net. Read [Rollback](#rollback) **before** the first real write, not
+> after.
+
+This document is for whoever **runs** the tool. The reasoning behind the design, the
+measurements it rests on and the traps found along the way live in
+[`docs/DESIGN.md`](docs/DESIGN.md), which is not shipped in the deployable archive.
 
 ---
 
-## Sommaire
+## Contents
 
-- [Ce que fait la commande](#ce-que-fait-la-commande)
-- [Fabrication de l'archive déployable](#fabrication-de-larchive-déployable)
+- [What the command does](#what-the-command-does)
+- [Building the deployable archive](#building-the-deployable-archive)
 - [Installation](#installation)
-- [Habilitation](#habilitation)
-- [Syntaxe](#syntaxe)
-- [Contrat d'entrée](#contrat-dentrée)
-- [Fusion et normalisation](#fusion-et-normalisation)
-- [Objets dérivés — l'écriture s'abstient](#objets-dérivés--lécriture-sabstient)
-- [Sortie](#sortie)
-- [Machine à états](#machine-à-états)
+- [Entitlements](#entitlements)
+- [Syntax](#syntax)
+- [Input contract](#input-contract)
+- [Output](#output)
 - [Journal](#journal)
-- [Retour arrière](#retour-arrière)
-- [Inventaire des objets à traiter](#inventaire-des-objets-à-traiter)
-- [Recherches livrées](#recherches-livrées)
-- [Table de correspondance et re-validation sur socle cible](#table-de-correspondance-et-re-validation-sur-socle-cible)
+- [Rollback](#rollback)
+- [Run monitoring view](#run-monitoring-view)
+- [Inventory of the objects to process](#inventory-of-the-objects-to-process)
+- [Shipped searches](#shipped-searches)
+- [Mapping table and re-validation on the target platform](#mapping-table-and-re-validation-on-the-target-platform)
 - [Tests](#tests)
-- [Dépendances vendorisées](#dépendances-vendorisées)
-- [Limites connues](#limites-connues)
+- [Vendored dependencies](#vendored-dependencies)
+- [Known limits](#known-limits)
+- [Troubleshooting](#troubleshooting)
 - [Licence](#licence)
 
 ---
 
-## Ce que fait la commande
+## What the command does
 
 ```mermaid
 flowchart LR
-  SPL["Pipeline SPL<br/>un evenement = un objet"] --> CMD
+  SPL["SPL pipeline<br/>one event = one object"] --> CMD
 
   subgraph CMD["editacl (search head, local)"]
     direction TB
-    PRE["Preflight (une fois)<br/>parametres, capability,<br/>temps reel, roles, table"]
-    RES["Resolution d'endpoint<br/>id, sinon eai:type<br/>contexte FIXE nobody"]
-    RM1{"Rang -1<br/>portee courante = user,<br/>ou namespace de id nominatif ?"}
-    SKP(["skipped_private<br/>ni GET ni POST"])
-    GET["GET etat courant<br/>ou memoire d'execution 10.8"]
-    R0{"Rang 0<br/>derive d'un eventtype ?"}
-    SKD(["skipped_derived<br/>aucun POST"])
-    MER["Fusion<br/>la PRESENCE de la colonne decide QUOI,<br/>la cellule decide LA VALEUR"]
-    CTL["Controles ordonnes 1 a 7<br/>+ idempotence"]
-    WAL["Journal : ligne intent<br/>write + flush + fsync"]
+    PRE["Preflight, once per run:<br/>parameters, capability,<br/>real time, roles, mapping table"]
+    RES["Endpoint resolution<br/>from id, otherwise from eai:type<br/>FIXED addressing context"]
+    RM1{"Is the object private?"}
+    SKP(["Abstain: no GET, no POST"])
+    GET["GET current state<br/>(the platform is authoritative)"]
+    R0{"Is the object derived<br/>from an eventtype?"}
+    SKD(["Abstain: no POST"])
+    MER["Merge<br/>the PRESENCE of the column decides WHAT,<br/>the cell decides THE VALUE"]
+    CTL["Ordered pre-write checks<br/>+ idempotence"]
+    WAL["Journal: intent line<br/>write + flush + fsync"]
     POST["POST /acl"]
-    OUT["Journal : ligne outcome<br/>+ evenement de sortie"]
+    OUT["Journal: outcome line<br/>+ output event"]
     PRE --> RES --> RM1
-    RM1 -->|"oui"| SKP --> OUT
-    RM1 -->|"non"| GET --> R0
-    R0 -->|"oui"| SKD --> OUT
-    R0 -->|"non"| MER --> CTL --> WAL --> POST --> OUT
+    RM1 -->|"yes"| SKP --> OUT
+    RM1 -->|"no"| GET --> R0
+    R0 -->|"yes"| SKD --> OUT
+    R0 -->|"no"| MER --> CTL --> WAL --> POST --> OUT
   end
 
-  GET -. "lecture" .-> SPLUNKD[("splunkd<br/>API REST")]
-  POST -. "ecriture" .-> SPLUNKD
+  GET -. "read" .-> SPLUNKD[("splunkd<br/>REST API")]
+  POST -. "write" .-> SPLUNKD
   WAL --> FILE[["editacl_journal_&lt;sid&gt;.log"]]
   OUT --> FILE
-  FILE -- "monitor + sourcetype dedie" --> IDX[("index _internal<br/>sourcetype editacl:journal")]
-  IDX --> RB["macro de restauration"]
-  CMD --> RESULT["Evenements de sortie<br/>champs acl_*"]
+  FILE -- "monitor + dedicated sourcetype" --> IDX[("index _internal<br/>sourcetype editacl:journal")]
+  IDX --> RB["rollback macro"]
+  IDX --> DASH["run monitoring view"]
+  CMD --> RESULT["Output events<br/>acl_* fields"]
 ```
 
-Points structurants du schéma, tous vérifiés par la suite de tests :
+Four properties of that picture matter in daily use:
 
-- **La ligne `intent` précède le POST** et est synchronisée sur disque. Si elle échoue,
-  le POST est annulé. C'est ce qui rend l'opération réversible.
-- **Le GET fait autorité** : les valeurs ACL portées par l'événement d'entrée sont
-  considérées comme potentiellement périmées et ne servent qu'à alimenter les attributs
-  dont la colonne est présente dans le jeu de résultats.
-- **L'adressage se fait par un contexte fixe**, jamais par le propriétaire de l'objet.
-  Aucune fonction du code ne prend de propriétaire d'adressage : la garantie est
-  structurelle (voir [Contrat d'entrée](#contrat-dentrée)).
-- **Aucune parallélisation.** Les appels REST sont sérialisés, l'ordre de sortie suit
-  l'ordre d'entrée.
-- **Le rang 0 est en amont de la fusion**, et il s'applique quelle que soit l'origine de
-  l'état lu — GET réel ou mémoire d'exécution. Un objet dérivé d'un `eventtype` ressort
-  donc en `skipped_derived` sans jamais atteindre la fusion ni le journal `intent`
-  (voir [Objets dérivés](#objets-dérivés--lécriture-sabstient)).
+- **The intent line precedes the POST** and is synchronised to disk. If it cannot be
+  written, the POST is cancelled. That is what makes the operation reversible.
+- **The GET is authoritative.** The ACL values carried by the input event are treated as
+  possibly stale; they only feed the attributes whose column is present in the result
+  set.
+- **Addressing uses a fixed context**, never the owner of the object. No parameter names
+  an addressing owner.
+- **Nothing runs in parallel.** REST calls are serialised, the output order follows the
+  input order. One input event always produces exactly one output event.
 
 ---
 
-## Fabrication de l'archive déployable
+## Building the deployable archive
 
-L'archive se fabrique depuis le dépôt, à partir d'une **référence git**, jamais depuis
-le répertoire de travail — ce qui rend le contenu livré traçable à un commit et
-reproductible par quiconque :
+The archive is built from the repository, from a **git reference**, never from the
+working tree - which makes the shipped content traceable to a commit and reproducible by
+anyone:
 
 ```sh
 git archive --format=tar.gz --prefix=SA-acl-tools/ \
     -o SA-acl-tools-$(git rev-parse --short HEAD).tar.gz HEAD
 ```
 
-Le périmètre est porté par les attributs `export-ignore` de `.gitattributes`, pas par
-la mémoire de l'opérateur : `tests/` et `tools/` en sont **écartés** — ils vivent dans
-le dépôt, jamais dans l'app installée — de même que les fichiers de service du dépôt.
-`bin/lib/` y est en revanche **inclus** : l'archive doit être déployable sans réseau.
-Le fichier d'override de la table n'y figure jamais non plus, n'étant pas versionné.
+The scope is carried by the `export-ignore` attributes of `.gitattributes`, not by the
+memory of whoever builds it: `tests/`, `tools/` and `docs/` are **left out** - they live
+in the repository, never in the installed app - together with the repository's own
+service files. `bin/lib/` is on the contrary **included**: the archive must be
+deployable with no network access. The override file of the mapping table never appears
+either, since it is not versioned.
 
-Contrôle du contenu avant déploiement :
+Checking the content before deployment:
 
 ```sh
-tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/(tests|tools)/'   # vide
+tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/(tests|tools|docs)/'   # empty
 ```
+
+> **Anchor the pattern.** The archive prefix is `SA-acl-tools/`, which itself contains
+> the substring `tools/`: an unanchored `grep 'tools/'` matches every single entry and
+> looks like a catastrophic failure. The `^SA-acl-tools/` anchor above is what makes the
+> check mean something.
 
 ---
 
 ## Installation
 
-1. Déposer le répertoire `SA-acl-tools/` sous `$SPLUNK_HOME/etc/apps/` du **search
-   head** (jamais sur un indexeur : la commande est déclarée `local = true`).
-2. Redémarrer `splunkd`. Le redémarrage est **nécessaire** : sans lui la capability
-   déclarée par l'app n'entre pas au référentiel et ne peut pas être attribuée.
-3. Vérifier l'intégrité des dépendances vendorisées :
+1. Drop the `SA-acl-tools/` directory under `$SPLUNK_HOME/etc/apps/` of the **search
+   head** (never on an indexer: the command is declared `local = true`).
+2. Restart `splunkd`. The restart is **required**: without it the capability declared by
+   the app does not enter the repository and cannot be granted.
+3. Check the integrity of the vendored dependencies:
 
    ```sh
    sh tools/verify_vendor.sh $SPLUNK_HOME/bin/python3
    ```
 
-   `tools/` **n'est pas dans l'archive** — il vit dans le dépôt (voir
-   [Fabrication de l'archive](#fabrication-de-larchive-déployable)). Récupérer le
-   répertoire depuis le dépôt et le déposer dans
-   `$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/`, où les deux scripts de cette procédure
-   d'installation trouveront l'app **réellement installée**.
+   `tools/` **is not in the archive** - it lives in the repository (see
+   [Building the deployable archive](#building-the-deployable-archive)). Fetch the
+   directory from the repository and drop it into
+   `$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/`, where the two scripts of this
+   installation procedure will find the app **as actually installed**.
 
-4. Attribuer la capability `edit_acl_bulk` (voir [Habilitation](#habilitation)).
-5. **Exécuter la procédure de re-validation de la table** sur le socle cible — c'est un
-   **prérequis à tout usage réel**, pas une précaution (voir
-   [Table de correspondance](#table-de-correspondance-et-re-validation-sur-socle-cible)).
-6. Première exécution **en simulation** (`dryrun=t`, valeur par défaut) sur un
-   périmètre restreint.
+4. Grant the `edit_acl_bulk` capability (see [Entitlements](#entitlements)).
+5. **Run the mapping table re-validation procedure** on the target platform - that is a
+   **prerequisite to any real use**, not a precaution (see
+   [Mapping table](#mapping-table-and-re-validation-on-the-target-platform)).
+6. Grant read access to the journal index to whoever must use the monitoring view - see
+   [Run monitoring view](#run-monitoring-view). That step is outside this app.
+7. First run **in simulation** (`dryrun=t`, the default value) on a restricted scope.
 
-### Vérification TLS
+### TLS verification
 
-Par défaut, la vérification du certificat de `splunkd` est **activée**, avec le CA
-bundle de `$SPLUNK_HOME/etc/auth/cacert.pem` s'il est présent. Sur un socle à
-certificats auto-signés dont le bundle n'est pas exploitable, créer
-`local/editacl.conf` :
+By default, verification of the `splunkd` certificate is **on**, using the CA bundle of
+`$SPLUNK_HOME/etc/auth/cacert.pem` when it is present. On a platform with self-signed
+certificates whose bundle is not usable, create `local/editacl.conf`:
 
 ```ini
 [editacl]
 verify_ssl = false
 ```
 
-La commande émet alors un avertissement à chaque exécution. Ce fichier n'est **pas**
-livré dans l'archive : une montée de version ne peut donc pas l'écraser.
+The command then emits a warning on every run. This file is **not** shipped in the
+archive: an app upgrade therefore cannot overwrite it.
 
-**Symptôme si le réglage manque.** L'échec se produit sur le premier appel REST de
-l'exécution — le contrôle d'habilitation — et la commande s'interrompt par une erreur
-fatale qui désigne explicitement TLS et le paramètre :
+**Symptom when the setting is missing.** The failure happens on the first REST call of
+the run - the entitlement check - and the command stops on a fatal error that names TLS
+and the setting explicitly:
 
 ```
-echec de la verification TLS du certificat de splunkd. Socle a certificat auto-signe :
-creer le fichier local/editacl.conf de l'app SA-acl-tools avec [editacl] puis
-verify_ssl = false, ou installer le CA de la plateforme dans
-$SPLUNK_HOME/etc/auth/cacert.pem. (detail : transport:SSLCertVerificationError: ...)
+editacl: TLS verification of the splunkd certificate failed. Platform with a
+self-signed certificate: create local/editacl.conf in the SA-acl-tools app with
+[editacl] then verify_ssl = false, or install the platform CA into
+$SPLUNK_HOME/etc/auth/cacert.pem. (detail: transport:SSLCertVerificationError: ...)
 ```
 
-Un échec de transport **non** imputable à TLS (splunkd injoignable, connexion refusée)
-produit un message distinct, qui ne mentionne pas `verify_ssl` : les deux causes ne se
-traitent pas de la même façon.
+A transport failure **not** caused by TLS (splunkd unreachable, connection refused)
+produces a different message, which does not mention `verify_ssl`: the two causes are
+not handled the same way.
 
 ---
 
-## Habilitation
+## Entitlements
 
-Deux habilitations distinctes, qui ne se remplacent pas.
+Three distinct entitlements. None of them replaces another.
 
-| Habilitation | Rôle | Conséquence si absente |
+| Entitlement | Role | Consequence if missing |
 |---|---|---|
-| `edit_acl_bulk` | Autorise l'usage de `editacl` | **Erreur fatale**, la recherche s'interrompt |
-| `admin_all_objects` | Permet à l'inventaire de remonter les objets privés d'autrui, et à splunkd d'accepter l'écriture sur un objet non possédé | **Aucune erreur** : le périmètre est silencieusement tronqué |
+| `edit_acl_bulk` | Authorises the use of `editacl` | **Fatal error**, the search stops |
+| `admin_all_objects` | Lets the inventory return other people's private objects, and lets splunkd accept a write on an object the operator does not own | **No error**: the scope is silently truncated |
+| Read access to the journal index | Lets the rollback macro, the change-journal search and the monitoring view see anything at all | **No error**: empty result, which looks exactly like "nothing happened" |
 
-`edit_acl_bulk` est déclarée **et attribuée au rôle `admin`** par
-`default/authorize.conf` :
+### `edit_acl_bulk`
+
+Declared **and granted to the `admin` role** by `default/authorize.conf`:
 
 ```ini
 [capability::edit_acl_bulk]
@@ -195,258 +203,254 @@ Deux habilitations distinctes, qui ne se remplacent pas.
 edit_acl_bulk = enabled
 ```
 
-L'outil est donc utilisable **dès le déploiement** par les comptes qui portent déjà
-`admin_all_objects` — lequel est de toute façon requis pour l'essentiel des écritures.
-Un redémarrage de `splunkd` reste nécessaire pour que la capability apparaisse dans
-`current-context`. Toute attribution à **d'autres** rôles relève de la chaîne de gestion
-des rôles, hors de l'app ; l'héritage `imported_roles` y est résolu côté serveur.
+The tool is therefore usable **as soon as it is deployed** by the accounts that already
+carry `admin_all_objects` - which is required anyway for most writes. A `splunkd`
+restart is still needed for the capability to show up in `current-context`. Granting it
+to **other** roles belongs to the role management chain, outside the app;
+`imported_roles` inheritance is resolved server side.
 
-Splunk n'offre **pas** de gating natif des commandes de recherche par capability : le
-contrôle est implémenté dans le code, en tête d'exécution, et constitue une erreur
-fatale. Un contournement par appel direct au script est sans effet — sans
-`admin_all_objects` ou possession de l'objet, splunkd rejettera les écritures.
+Splunk offers **no** native gating of search commands by capability: the check is
+implemented in the code, at the head of the run, and a failed check is a fatal error.
+Bypassing it by calling the script directly buys nothing - without `admin_all_objects`
+or ownership of the object, splunkd rejects the writes.
 
-> **La troncature par capability est la première des deux troncatures d'inventaire.**
-> Sans `admin_all_objects`, l'opérateur traite un sous-ensemble **sans le moindre
-> message**. Elle se cumule à celle décrite dans
-> [Inventaire](#inventaire-des-objets-à-traiter).
+> **Truncation by capability is the first of the two inventory truncations.** Without
+> `admin_all_objects`, the operator processes a subset **with no message whatsoever**.
+> It adds up with the one described in
+> [Inventory](#inventory-of-the-objects-to-process).
+
+### Read access to the journal index
+
+The rollback macro, the `ACL - change journal` saved search and the monitoring view all
+read the index the journal lands in - `_internal` by default, or the dedicated index if
+you redirected it (see [Journal](#journal)).
+
+**Granting that access is a deployment prerequisite, and it is outside this app.** The
+app declares no index entitlement of any kind: no `srchIndexesAllowed`, no
+`srchIndexesDefault`, no `srchFilter`. Without the access, the view triggers its own
+guard rail and says so instead of showing an empty page - but the rollback macro says
+nothing, and returns an empty rollback set reported as a success.
+
+### The `editacl_auditor` role
+
+The app **declares** a role dedicated to reading the monitoring view and **grants it to
+nobody**. Accounts holding `admin_all_objects` already read the view, so granting it
+would add no access and would widen a population nobody asked to widen.
+
+The role carries the `search` capability, and explicitly refuses `run_collect`,
+`run_mcollect` and `schedule_rtsearch`.
+
+Three facts to know before diagnosing anything:
+
+- **An account without the role gets a `404`, not a `403`.** Without warning, an
+  operator concludes that the deployment is broken. It is not: the view exists and the
+  account simply may not read it.
+- **`admin_all_objects` short-circuits the read restriction.** "Readable by a single
+  role" only holds for non-administrator accounts. No declaration in this app can
+  prevent that.
+- **The `[default]` stanza belongs to the platform, not to this app.** A bare role is
+  not an empty role: it inherits whatever `[default]` carries on your install. The app
+  refuses what it knows it must refuse; it can guarantee nothing beyond that.
 
 ---
 
-## Syntaxe
+## Syntax
 
 ```
-| editacl [title=<champ>] [app=<champ>] [id=<champ>] [type=<champ>] [sharing=<champ>]
-          [new_perms_read=<champ>] [new_perms_write=<champ>]
-          [new_sharing=<champ>] [new_owner=<champ>]
+| editacl [title=<field>] [app=<field>] [id=<field>] [type=<field>] [sharing=<field>]
+          [new_perms_read=<field>] [new_perms_write=<field>]
+          [new_sharing=<field>] [new_owner=<field>]
           [dryrun=<bool>] [validate_roles=<bool>] [journal=<bool>]
-          [max_objects=<entier>]
+          [max_objects=<int>]
 ```
 
-**Chaque paramètre nomme le champ SPL où lire une information**, et prend pour défaut la
-nomenclature native. Un pipeline bâti sur `acl_inventory` n'a donc besoin **d'aucun
-paramètre** : `| editacl` suffit, et `| editacl dryrun=f` écrit.
+**Every parameter names the SPL field to read one piece of information from**, and
+defaults to the platform's native field name. A pipeline built on `acl_inventory`
+therefore needs **no parameter at all**: `| editacl` is enough, and `| editacl dryrun=f`
+writes.
 
-Champs de **référence** — ils désignent l'objet :
+**Reference** fields - they designate the object:
 
-| Paramètre | Défaut | Rôle |
+| Parameter | Default | Role |
 |---|---|---|
-| `title` | `title` | Nom de l'objet, dernier segment du chemin REST. Requis en valeur. |
-| `app` | `eai:acl.app` | Application du namespace. Requise en valeur. |
-| `id` | `id` | URI complète, voie de résolution primaire |
-| `type` | `eai:type` | Type d'objet, voie de résolution par la table |
-| `sharing` | `eai:acl.sharing` | Portée **courante**, qui sert à écarter les objets privés. Facultative. |
+| `title` | `title` | Name of the object, last segment of the REST path. Required, with a value. |
+| `app` | `eai:acl.app` | Application of the namespace. Required, with a value. |
+| `id` | `id` | Full URI, primary resolution path |
+| `type` | `eai:type` | Object type, resolution path through the mapping table |
+| `sharing` | `eai:acl.sharing` | **Current** scope, used to skip private objects. Optional. |
 
-**Valeurs cibles** — elles décrivent l'état voulu :
+**Target values** - they describe the wanted state:
 
-| Paramètre | Défaut | Attribut ACL |
+| Parameter | Default | ACL attribute |
 |---|---|---|
 | `new_perms_read` | `eai:acl.perms.read` | `perms.read` |
 | `new_perms_write` | `eai:acl.perms.write` | `perms.write` |
 | `new_sharing` | `eai:acl.sharing` | `sharing` |
 | `new_owner` | `eai:acl.owner` | `owner` |
 
-Paramètres fonctionnels :
+Functional parameters:
 
-| Paramètre | Type | Défaut | Description |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `dryrun` | booléen | `true` | Aucune écriture. Le GET est effectué, la fusion calculée, le résultat émis et journalisé. |
-| `validate_roles` | booléen | `true` | Contrôle de l'existence des rôles **ajoutés** avant écriture. |
-| `journal` | booléen | `true` | Consignation dans le journal indexé. |
-| `max_objects` | entier | `10` | Nombre maximal d'objets **écrits** par exécution. Sans effet en simulation. |
+| `dryrun` | boolean | `true` | No write at all. The GET happens, the merge is computed, the result is emitted and journalled. |
+| `validate_roles` | boolean | `true` | Checks that the **added** roles exist before writing. |
+| `journal` | boolean | `true` | Records into the indexed journal. |
+| `max_objects` | integer | `10` | Maximum number of objects **written** per run. No effect in simulation. |
 
-> **Il n'y a pas de paramètre désignant un propriétaire d'adressage.** L'adressage se
-> fait par un contexte fixe, et la valeur transmise au POST est celle lue par le GET
-> tant que `new_owner` n'est pas fourni. `new_owner` est une **valeur cible**, jamais
-> une adresse.
+> **There is no parameter naming an addressing owner.** Addressing uses a fixed context,
+> and the value sent in the POST is the one read by the GET for as long as `new_owner`
+> is not supplied. `new_owner` is a **target value**, never an address.
 
-Cette syntaxe est également servie par l'**assistant de recherche** de l'interface :
-`default/searchbnf.conf` décrit la commande, ses treize options et quatre exemples
-d'usage, ce qui donne aussi la coloration syntaxique du nom de commande dans la barre
-de recherche. Deux conditions sont nécessaires, et il faut les deux — le fichier, et
-sa **visibilité hors de l'app** (`[searchbnf] export = system` dans
-`metadata/default.meta`) : l'assistant lit `configs/conf-searchbnf` dans le contexte
-applicatif de la **page**, c'est-à-dire l'app depuis laquelle l'opérateur saisit sa
-recherche, pas `SA-acl-tools`. Un `searchbnf.conf` confiné à son app est chargé,
-exposé, et sans le moindre effet visible — sans qu'aucune erreur ne soit levée. Un
-redémarrage de `splunkd` est nécessaire à sa prise en compte.
+That syntax is also served by the **search assistant** of the interface:
+`default/searchbnf.conf` describes the command, its thirteen options and four usage
+examples, which also gives the command name its syntax colouring in the search bar. A
+`splunkd` restart is needed for it to be taken into account.
 
-### La simulation se signale d'elle-même
+### Simulation announces itself
 
-`dryrun` vaut `true` par défaut. Une exécution en simulation rend une table de
-résultats **pleine**, exactement comme une exécution qui a tout écrit ; seule la
-colonne `acl_status` les distingue. La commande émet donc, en tête d'exécution, un
-avertissement au niveau de la recherche :
+`dryrun` defaults to `true`. A simulation run returns a **full** result table, exactly
+like a run that wrote everything; only the `acl_status` column tells them apart. The
+command therefore emits, at the head of the run, a search-level warning:
 
 ```
-MSG[WARN] simulation active (dryrun=true, valeur par defaut) : AUCUNE modification ne
-          sera ecrite. Les objets ressortent en acl_status=dryrun. Pour appliquer
-          reellement les changements, relancer la meme recherche avec dryrun=false.
+editacl: simulation active (dryrun=true, the default value): NOTHING will be written.
+         Objects come out with acl_status=dryrun. To really apply the changes, replay
+         the same search with dryrun=false.
 ```
 
-Il est émis **une fois par exécution**, jamais par événement : sur plusieurs centaines
-d'objets, un avertissement répété est du bruit, et le bruit se filtre mentalement.
-C'est un `MSG[WARN]` — il ne change ni le statut du job, ni le nombre de résultats.
+It is emitted **once per run**, never per event: over several hundred objects a repeated
+warning is noise, and noise gets filtered out mentally. It is a `MSG[WARN]` - it changes
+neither the job status nor the result count.
 
-### `max_objects` est un compteur d'écritures, pas une pré-condition sur le lot
+> **In simulation, an object that is already compliant comes out `noop`, not `dryrun`.**
+> The `dryrun` status only designates the objects a real run **would have changed**.
+> Counting the `dryrun` rows of a simulation therefore does **not** give you the size of
+> the batch; it gives you the number of objects that would change. That is usually the
+> number you actually want - but a panel labelling that column "simulated objects" would
+> be lying.
 
-Une commande *streaming* reçoit ses événements par lots successifs et ne connaît à
-aucun moment la cardinalité totale de son entrée. Conséquences, toutes voulues :
+### `max_objects` counts writes; it is not a precondition on the batch
 
-- le compteur est incrémenté à chaque POST **émis**, qu'il aboutisse ou échoue ; les
-  statuts sans POST ne comptent pas ;
-- **la simulation n'entre jamais dans le compteur.** `dryrun` n'émet aucun POST : un
-  `dryrun` porte donc sur **l'intégralité** du lot, quel qu'en soit le volume. C'est ce
-  qui rend tenable un défaut aussi bas que dix — la friction porte sur l'écriture
-  réelle, jamais sur l'examen ;
-- un lot comportant **exactement** `max_objects` objets à écrire n'écarte rien ;
-- **les objets écrits avant le plafond ne sont pas annulés.** Il n'y a aucune atomicité
-  de lot, et il n'y en aura pas : sur plusieurs centaines d'objets, un abandon global
-  sur échec unitaire produirait un état partiel non caractérisé.
+A streaming command receives its events in successive chunks and never knows the total
+cardinality of its input. Consequences, all of them intended:
 
-#### Pourquoi dix, et pas cinq cents
+- the counter is incremented on every POST **sent**, whether it succeeds or fails;
+  statuses with no POST do not count;
+- **simulation never enters the counter.** `dryrun` sends no POST: a `dryrun` therefore
+  covers the **whole** batch, whatever its volume. That is what makes a default as low
+  as ten workable - the friction sits on the real write, never on the examination;
+- a batch holding **exactly** `max_objects` objects to write skips nothing;
+- **objects written before the ceiling are not rolled back.** There is no batch
+  atomicity, and there will not be one.
 
-Une correction ponctuelle — quelques objets identifiés, vérifiés en simulation — passe
-sans que l'opérateur ait à s'occuper du plafond. Au-delà, il doit l'écrire, donc
-**énoncer le volume qu'il s'apprête à muter**. Un plafond de cinq cents laissait passer
-sans un mot des opérations de plusieurs centaines d'objets sur une plateforme de
-production, ce qui revenait à ne rien garder du garde-fou dans la plupart des cas réels.
+#### On reaching the ceiling, the command stops writing without stopping the search
 
-#### À l'atteinte du plafond, la commande cesse d'écrire — sans interrompre la recherche
-
-La sortie de recherche reste **complète** : un événement de sortie par événement
-d'entrée, comme toujours. Les objets écartés ressortent en `acl_status =
-"skipped_ceiling"`, **sans GET ni POST**, avec leur ligne de journal. Le job n'est
-**pas** marqué en échec, et un avertissement unique dit ce qui s'est passé :
+The search output stays **complete**: one output event per input event, as always.
+Skipped objects come out with `acl_status = "skipped_ceiling"`, **with no GET and no
+POST**, with their journal line. The job is **not** marked failed, and a single warning
+says what happened:
 
 ```
-MSG[WARN] plafond max_objects=10 atteint : 30 objet(s) ecarte(s) sans GET ni POST, en
-          acl_status=skipped_ceiling. Les objets deja ecrits ne sont pas annules et la
-          sortie de cette recherche est complete. Pour traiter le reste, relancer avec
-          un max_objects superieur.
+editacl: max_objects=10 ceiling reached: 30 object(s) skipped with no GET and no POST,
+         with acl_status=skipped_ceiling. Objects already written are not rolled back
+         and the output of this search is complete. To process the rest, replay with a
+         higher max_objects.
 ```
 
-Il est émis **une fois par exécution**, en fin de lot — seul moment où le nombre
-d'objets écartés est connu d'une commande qui reçoit son entrée par chunks.
+It is emitted **once per run**, at the end of the batch - the only moment at which the
+number of skipped objects is known to a command that receives its input in chunks.
 
-> **Ce que ce comportement remplace.** Dans sa forme antérieure, l'atteinte du plafond
-> levait une erreur fatale : la recherche s'interrompait, la sortie était
-> **intégralement perdue** (`resultCount = 0`), et l'opérateur se retrouvait avec une
-> mutation partielle **et** l'aveuglement sur ce qui venait de se passer. Le garde-fou
-> produisait donc, à l'instant précis où il se déclenchait, le pire des deux mondes.
->
-> Sa valeur réelle est ailleurs, étroite mais légitime : il borne le rayon d'action de
-> l'opérateur qui lance une écriture réelle **sans avoir simulé**. Cette fonction est
-> intégralement conservée par l'arrêt des écritures. Ce qui disparaît, c'est la cécité.
-> **Un garde-fou doit informer, pas aveugler.**
+#### Resuming a batch interrupted by the ceiling
 
-#### Reprendre un lot interrompu par le plafond
-
-Il suffit de **relancer la même recherche** avec un plafond explicite. Les objets déjà
-écrits ressortent `noop` par idempotence, seuls les écartés sont traités, et il n'y a
-aucun risque de double écriture :
+Just **replay the same search** with an explicit ceiling. Objects already written come
+out `noop` through idempotence, only the skipped ones are processed, and there is no
+risk of a double write:
 
 ```
 | `acl_inventory(savedsearch)` | search ... | eval ...
-| editacl dryrun=f                          ← 10 updated, 30 skipped_ceiling
-| editacl dryrun=f max_objects=100          ← 10 noop,    30 updated
+| editacl dryrun=f                          <- 10 updated, 30 skipped_ceiling
+| editacl dryrun=f max_objects=100          <- 10 noop,    30 updated
 ```
 
-Le journal caractérise par ailleurs intégralement l'état partiel, et reste le moyen de
-l'annuler :
+The journal fully characterises the partial state, and remains the way to undo it:
 
 ```
-| `editacl_rollback(<sid>)`          ← prévisualiser ce qui serait rétabli
-| `editacl_rollback_apply(<sid>)`    ← rétablir
+| `editacl_rollback(<sid>)`          <- preview what would be restored
+| `editacl_rollback_apply(<sid>)`    <- restore
 ```
 
-Le `sid` s'obtient par l'inspecteur de recherche ou par le nom du fichier de journal.
+The `sid` comes from the search inspector or from the name of the journal file.
 
-#### Le job reste marqué en échec sur une erreur fatale
+#### The job is still marked failed on a fatal error
 
-Le plafond n'en est plus une, mais la liste du §*Erreurs fatales* subsiste — capability
-absente, paramètre invalide, temps réel, journal non ouvrable. Sur celles-là, le job
-ressort `dispatchState = FAILED`, `isFailed = true`. Le marquage tient à un seul fait,
-mesuré sur Splunk 9.4.6 : la commande n'émet **pas** de chunk final `finished: true`
-avant de quitter en code non nul. Conséquence à connaître, la liste des messages du job
-porte alors deux entrées — celle de la commande, explicite, et celle de splunkd,
-générique (« External search command exited unexpectedly with non-zero error code 1 »).
-La seconde est exacte et attendue.
+The ceiling is no longer one, but the list under [Fatal errors](#fatal-errors) remains.
+On those, the job comes out `dispatchState = FAILED`, `isFailed = true`. Something worth
+knowing: the job message list then carries two entries - the one from the command,
+explicit, and the one from splunkd, generic ("External search command exited
+unexpectedly with non-zero error code 1"). The second one is accurate and expected.
 
-### Le paramètre `fields` n'existe plus
+### What column presence means for your pipeline
 
-La v1 exposait un paramètre `fields` énumérant les attributs à modifier. Il a disparu,
-et avec lui sa classe d'erreur la plus grave : une liste non quotée était **tronquée
-par SPL à sa première valeur**, sans erreur ni avertissement, si bien qu'une
-restauration rétablissait `perms.read`, laissait `perms.write` et `sharing` mutés, et
-rapportait un succès.
-
-Chaque paramètre ne porte désormais qu'un **nom de champ unique**, sans virgule : la
-troncature silencieuse n'a plus d'objet. Le défaut est éliminé **par construction**
-plutôt que par une consigne de vigilance. Une virgule dans un paramètre de nommage est
-d'ailleurs refusée explicitement, pour attraper l'opérateur qui raisonne encore en v1.
-
-### Ce que la présence de la colonne implique pour votre pipeline
-
-> **La présence est une propriété du *jeu de résultats*, pas de l'événement.**
+> **Presence is a property of the *result set*, not of the event.**
 >
-> Sur un lot hétérogène, un objet qui ne porte pas le champ reçoit la **chaîne vide**
-> dès lors qu'un autre objet du lot le porte — la colonne existe pour tout le monde.
+> On a heterogeneous batch, an object that does not carry the field receives the **empty
+> string** as soon as another object of the batch carries it - the column exists for
+> everybody.
 >
-> **Un pipeline qui ne valorise un champ que pour une partie de ses lignes viderait donc
-> l'attribut sur les autres.**
+> **A pipeline that only fills a field on some of its rows would therefore empty the
+> attribute on the others.**
 
-Le pipeline décrit **l'état cible de chaque ligne qu'il émet**. Un pipeline bâti sur la
-macro d'inventaire satisfait cette exigence par construction : chaque ligne porte la
-valeur courante de son objet, et l'opérateur ne surcharge que ce qu'il veut changer.
+The pipeline describes **the target state of every row it emits**. A pipeline built on
+the inventory macro satisfies that by construction: every row carries the current value
+of its object, and the operator only overrides what they want to change.
 
-Le contre-exemple à ne pas écrire :
+The counter-example not to write:
 
 ```
 | `acl_inventory(savedsearch)`
-| eval "eai:acl.perms.write" = if('eai:type'="savedsearch", "nouveau_role_admin", null())
+| eval "eai:acl.perms.write" = if('eai:type'="savedsearch", "new_role_admin", null())
 | editacl dryrun=f max_objects=1000
 ```
 
-Les lignes qui ne satisfont pas la condition sortent avec `eai:acl.perms.write` **nul**,
-mais la colonne existe — et leur `perms.write` sera **vidé**. La forme correcte conserve
-la valeur courante sur la branche `else` :
+Rows that do not satisfy the condition come out with `eai:acl.perms.write` null, but the
+column exists - and their `perms.write` will be **emptied**. The correct form keeps the
+current value on the `else` branch:
 
 ```
-| eval "eai:acl.perms.write" = if('eai:type'="savedsearch", "nouveau_role_admin",
+| eval "eai:acl.perms.write" = if('eai:type'="savedsearch", "new_role_admin",
                                   'eai:acl.perms.write')
 ```
 
-Ou, plus simplement, ne touche pas la colonne du tout et laisse le filtre en amont :
+Or, more simply, does not touch the column at all and leaves the filtering upstream:
 
 ```
 | `acl_inventory(savedsearch)` | search "eai:type"="savedsearch"
-| eval "eai:acl.perms.write" = "nouveau_role_admin"
+| eval "eai:acl.perms.write" = "new_role_admin"
 ```
 
-Simuler avant d'écrire suffit à voir le problème : les colonnes `acl_before_*` et
-`acl_after_*` de la sortie montrent exactement ce qui serait appliqué.
+Simulating before writing is enough to see the problem: the `acl_before_*` and
+`acl_after_*` columns of the output show exactly what would be applied.
 
-### Exemples
+### Examples
 
-Substitution d'un rôle obsolète, **en simulation**, sur l'inventaire complet. Aucun
-paramètre : la macro émet la nomenclature native, que les défauts reprennent.
+Substituting an obsolete role, **in simulation**, over the complete inventory. No
+parameter: the macro emits the native field names, which the defaults pick up.
 
 ```
 | `acl_inventory`
-| search "eai:acl.perms.write"="ancien_role" OR "eai:acl.perms.read"="ancien_role"
+| search "eai:acl.perms.write"="legacy_role" OR "eai:acl.perms.read"="legacy_role"
 | eval "eai:acl.perms.read" = mvmap('eai:acl.perms.read',
-        if('eai:acl.perms.read'="ancien_role", "nouveau_role_lecture",
+        if('eai:acl.perms.read'="legacy_role", "new_role_read",
            'eai:acl.perms.read'))
 | eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
-        if('eai:acl.perms.write'="ancien_role", "nouveau_role_admin",
+        if('eai:acl.perms.write'="legacy_role", "new_role_admin",
            'eai:acl.perms.write'))
 | editacl
 | stats count by acl_status "eai:type" "eai:acl.app"
 ```
 
-Dépréciation par préfixage, **en écriture réelle**, restreinte aux recherches
-sauvegardées et aux vues. Le plafond est explicité parce que le lot dépasse dix objets :
+Deprecation by prefixing, **writing for real**, restricted to saved searches and views.
+The ceiling is spelled out because the batch is larger than ten objects:
 
 ```
 | `acl_inventory(savedsearch,views)`
@@ -458,745 +462,406 @@ sauvegardées et aux vues. Le plafond est explicité parce que le lot dépasse d
 | where acl_status!="noop"
 ```
 
-**Vider `perms.write`** — le pipeline nominal du décommissionnement. Le `mvmap` qui
-retire la dernière valeur laisse la colonne en place avec une cellule nulle, et
-l'attribut est vidé :
+**Emptying `perms.write`** - the nominal decommissioning pipeline. An `mvmap` that
+removes the last value leaves the column in place with a null cell, and the attribute is
+emptied:
 
 ```
 | `acl_inventory(savedsearch)`
-| search "eai:acl.perms.write"="ancien_role"
+| search "eai:acl.perms.write"="legacy_role"
 | eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
-        if('eai:acl.perms.write'="ancien_role", null(), 'eai:acl.perms.write'))
+        if('eai:acl.perms.write'="legacy_role", null(), 'eai:acl.perms.write'))
 | editacl dryrun=f max_objects=1000
 ```
 
-**Préserver un attribut** — il suffit de retirer sa colonne du jeu de résultats :
+**Preserving an attribute** - just drop its column from the result set:
 
 ```
 | `acl_inventory(savedsearch)`
 | fields - "eai:acl.perms.read"
-| eval "eai:acl.perms.write" = "nouveau_role_admin"
+| eval "eai:acl.perms.write" = "new_role_admin"
 | editacl dryrun=f max_objects=1000
 ```
 
-**Champs renommés par le pipeline amont**, et changement de propriétaire :
+**Fields renamed by the upstream pipeline**, plus a change of owner:
 
 ```
 | `acl_inventory(savedsearch)`
 | rename "eai:acl.perms.write" AS write, "eai:type" AS object_type
-| eval nouveau_proprietaire = "nobody"
-| editacl type=object_type new_perms_write=write new_owner=nouveau_proprietaire
+| eval target_owner = "nobody"
+| editacl type=object_type new_perms_write=write new_owner=target_owner
 ```
 
-**Restauration** d'une exécution, une fois le journal indexé :
+**Restoring** a run, once the journal is indexed:
 
 ```
 | `editacl_rollback(1754483000.1)`
 | `editacl_rollback_apply(1754483000.1)`
 ```
 
-La première prévisualise le jeu de restauration, la seconde l'applique.
+The first previews the rollback set, the second applies it.
 
-La forme paramétrée de l'inventaire est le levier de coût pour un usage interactif : on
-n'énumère que les familles visées. Voir [Inventaire](#inventaire-des-objets-à-traiter).
+The parameterised form of the inventory is the cost lever for interactive use: only the
+families you aim at get enumerated. See
+[Inventory](#inventory-of-the-objects-to-process).
 
 ---
 
-## Contrat d'entrée
+## Input contract
 
-Chaque événement d'entrée désigne **un** objet, et chaque information est lue dans le
-champ que le paramètre correspondant nomme (voir [Syntaxe](#syntaxe)).
+Every input event designates **one** object, and every piece of information is read from
+the field named by the matching parameter (see [Syntax](#syntax)).
 
-`title` et `app` sont requis : le champ désigné doit exister et porter une valeur. Au
-moins l'une des deux voies de résolution, `id` ou `type`, doit être exploitable.
+`title` and `app` are required: the designated field must exist and carry a value. At
+least one of the two resolution paths, `id` or `type`, must be usable.
 
-### La sémantique de présence — ce qui décide de modifier ou de préserver
+### Presence semantics - what decides between modifying and preserving
 
-**C'est le cœur du contrat.** La décision « modifier ou préserver un attribut » repose
-sur la **présence de la colonne** dans le jeu de résultats, et sur rien d'autre.
+**This is the heart of the contract.** The decision "modify or preserve an attribute"
+rests on the **presence of the column** in the result set, and on nothing else.
 
-| Situation | Effet |
+| Situation | Effect |
 |---|---|
-| Colonne **absente** du jeu de résultats | Attribut **préservé**, tel que lu par le GET |
-| Colonne **présente**, cellule **vide** | Attribut **vidé** |
-| Colonne **présente**, cellule **valuée** | Valeur appliquée |
+| Column **absent** from the result set | Attribute **preserved**, as read by the GET |
+| Column **present**, cell **empty** | Attribute **emptied** |
+| Column **present**, cell **valued** | Value applied |
 
-**Le discriminant est la présence de la clé, jamais le type ni la valeur.** Mesuré sur
-9.4.6 : la commande reçoit soit une clé absente de l'enregistrement, soit une clé
-présente valant la chaîne vide. Jamais `None`, jamais une liste vide. Et un champ
-multivalué **réduit à une seule valeur arrive en chaîne**, pas en liste d'un élément —
-s'y fier conduirait à des conclusions fausses.
+The usage clause that follows from it is described above:
+[What column presence means for your pipeline](#what-column-presence-means-for-your-pipeline).
 
-> La v1 supposait cette distinction impossible, au motif qu'un `mvmap` vidant un
-> multivalué produit un null indiscernable d'un champ jamais mentionné. La mesure
-> infirme la conclusion sans infirmer la prémisse : un `mvmap` vidé **est** bien nul au
-> sens SPL, mais **un champ nul n'est pas retiré du jeu de résultats**. La colonne
-> subsiste, y compris lorsque le champ est vide sur la totalité des lignes.
->
-> Règle positive : la colonne n'est perdue que si le champ n'a porté de valeur **nulle
-> part, à aucun moment** du pipeline. « `eval X=null()` supprime le champ » est faux en
-> général — il ne le supprime que s'il n'avait jamais été valorisé.
+**Two attributes cannot be emptied**, because their empty value does not exist on the
+platform side:
 
-La clause d'usage qui en découle est décrite plus haut :
-[Ce que la présence de la colonne implique pour votre pipeline](#ce-que-la-présence-de-la-colonne-implique-pour-votre-pipeline).
-
-**Deux attributs ne se vident pas**, parce que leur valeur vide n'existe pas côté
-plateforme :
-
-| Attribut | Cellule vide sur la colonne désignée | `acl_error` |
+| Attribute | Empty cell on the designated column | `acl_error` |
 |---|---|---|
-| `sharing` | événement **rejeté**, aucun POST | `sharing_empty_not_allowed` |
-| `owner` | événement **rejeté**, aucun POST | `owner_empty_not_allowed` |
+| `sharing` | event **rejected**, no POST | `sharing_empty_not_allowed` |
+| `owner` | event **rejected**, no POST | `owner_empty_not_allowed` |
 
-Une portée hors de `{user, app, global}` est rejetée de même
-(`invalid_sharing:<valeur>`). Ces refus sont bruyants et c'est voulu : ils sont visibles
-et non destructifs, l'inverse ne l'est pas.
+A scope outside `{user, app, global}` is rejected likewise
+(`invalid_sharing:<value>`). Those refusals are noisy on purpose: they are visible and
+non-destructive, the opposite is not.
 
-### La reprise de propriété
+### Taking ownership
 
-`new_owner` est une **valeur cible**, et la sémantique de présence s'y applique comme aux
-autres. Un pipeline bâti sur la macro d'inventaire porte le propriétaire courant sur
-chaque ligne, ce qui produit un `noop` sur cet attribut tant que l'opérateur ne le
-surcharge pas.
+`new_owner` is a **target value**, and presence semantics apply to it like to the
+others. A pipeline built on the inventory macro carries the current owner on every row,
+which produces a `noop` on that attribute for as long as the operator does not override
+it.
 
-Deux conditions de plateforme, mesurées : la reprise requiert `admin_all_objects` — un
-compte porteur du seul droit sur ses propres objets reçoit un refus **même sur son
-propre objet** — et le propriétaire cible doit **exister**, faute de quoi la plateforme
-refuse sans muter.
+Two platform conditions: taking ownership requires `admin_all_objects` - an account
+carrying only the right over its own objects is refused **even on its own object** - and
+the target owner must **exist**, failing which the platform refuses without mutating.
 
-Sont **hors périmètre** : le déplacement d'application et le renommage. Le premier
-existe mais un paramètre mal choisi rend l'objet **inatteignable en écriture**,
-suppression comprise — inacceptable sur un outil dont la réversibilité est l'unique
-justification. Le second n'existe pas : vingt-sept handlers exposent dix-huit actions,
-aucune de renommage.
+Moving an object between applications and renaming an object are **out of scope**.
 
-### L'adressage se fait par un contexte fixe
+### Addressing uses a fixed context
 
 ```
-<endpoint_objet> = <splunkd_uri>/servicesNS/nobody/<enc(app)>/<handler_path>/<enc(title)>
+<object_endpoint> = <splunkd_uri>/servicesNS/nobody/<enc(app)>/<handler_path>/<enc(title)>
 ```
 
-Mesuré : un objet partagé appartenant à un tiers est atteignable par ce contexte, **en
-lecture comme en écriture**, aux deux portées de partage, et la réponse du GET porte
-**toujours le propriétaire réel** — jamais le contexte d'adressage.
+A shared object belonging to somebody else is reachable through that context, for
+reading as well as for writing, at both sharing scopes, and the GET response always
+carries the **real owner** - never the addressing context.
 
-> **Ce que l'adressage fixe corrige.** La v1 adressait par `eai:acl.owner`. Or **un
-> objet privé masque un objet partagé homonyme dans le namespace de son détenteur** : si
-> le propriétaire d'un objet partagé possédait aussi un objet privé de même nom dans la
-> même application, la commande atteignait **l'objet privé** et écrivait son ACL — `200`
-> au GET, fusion calculée, POST abouti, ligne rapportée `updated`. Une écriture
-> silencieuse sur la mauvaise cible.
+### Private objects are out of scope
 
-Le contexte joker `-` n'est **jamais** employé : il refuse l'écriture, et sur deux objets
-homonymes il renvoie deux entrées sur un chemin mono-objet, où un client lisant la
-première choisirait à l'aveugle.
+An object with `sharing=user` is only visible to its owner and to administrators. Any
+permission it carried would grant nothing to anybody: they are inert.
 
-### Les objets privés sortent du périmètre
+Detected through the **current** scope (the `sharing` parameter), private objects come
+out with `acl_status = "skipped_private"`, **with no GET and no POST**, counter not
+incremented, with their journal line like any other status.
 
-Un objet en `sharing=user` n'est visible que de son propriétaire et des administrateurs.
-Les permissions qu'il porterait n'accordent donc rien à personne : elles sont **inertes**
-— mesuré, les objets privés n'en portent aucune.
+**Second detection path.** When the scope column is absent from the result set - or
+present and empty, which tells no more - the command falls back on the **namespace
+carried by `id`**. splunkd emits `/servicesNS/nobody/...` for a shared object and
+`/servicesNS/<owner>/...` for a private one: a named namespace is therefore enough to
+skip the object without consulting its scope. It then comes out `skipped_private` with
+the warning `private_detected_by_id_namespace`, which says at the same time what the
+pipeline is missing.
 
-Détectés par la portée **courante** (paramètre `sharing`), ils ressortent en
-`acl_status = "skipped_private"`, **sans GET ni POST**, compteur non incrémenté, avec
-leur ligne de journal comme tout autre statut.
+**If neither the scope nor a usable `id` is available, the command cannot know.** It
+then holds only a name and an application, resolves through the fixed context, and
+therefore reaches the **shared** object if one of that name exists - while the input row
+may have designated a private homonym. The behaviour is made visible: the event carries
+`acl_warning = "scope_undetermined"`.
 
-**Seconde voie de détection, et elle est nécessaire.** Lorsque la colonne de portée est
-absente du jeu de résultats — ou présente et vide, ce qui ne renseigne pas davantage —
-la commande s'appuie sur le **namespace porté par `id`**. Splunkd émet
-`/servicesNS/nobody/…` pour un objet partagé et `/servicesNS/<propriétaire>/…` pour un
-objet privé : un namespace nominatif suffit donc à écarter l'objet, sans consulter sa
-portée. L'objet ressort alors en `skipped_private` avec l'avertissement
-`private_detected_by_id_namespace`, qui dit du même coup ce qui manque au pipeline.
+**Build the pipeline on the inventory macro**, which always emits both designations and
+makes that case unreachable.
 
-> **Pourquoi ce n'est pas un confort.** Le repli annoncé jusqu'ici — « le GET par
-> contexte fixe répond `404` et l'objet ressort en `not_found` » — **est faux dès qu'un
-> homonyme partagé existe** : l'adressage fixe atteint alors le partagé, et la commande
-> lit puis écrirait **un objet autre que celui désigné en entrée**. C'est la même classe
-> de défaut que celui de la v1, que l'adressage fixe est censé avoir clos, réintroduite
-> par le repli.
->
-> La donnée sur laquelle repose cette seconde voie est **émise par la plateforme**,
-> jamais une convention posée par l'outil : mesuré sur 9.4.6, trois objets homonymes
-> d'une même application listés par `/servicesNS/-/-/…` ressortent avec
-> `ns = nobody` pour le partagé — **alors même que son propriétaire est un compte
-> nommé** — et `ns = <propriétaire>` pour chacun des deux privés. Le segment de
-> namespace n'est pas le propriétaire : c'est la portée, telle que splunkd l'écrit.
->
-> L'erreur possible est bornée et conservatrice : un objet partagé dont l'`id` aurait été
-> moissonné dans un contexte nominatif ressortirait `skipped_private` à tort.
-> **L'abstention, jamais une écriture fautive** — c'est la même discipline qu'au rang 0.
+The inventory keeps listing private objects: the rule bears on writing, not on the view.
 
-**Si ni la portée ni un `id` exploitable ne sont disponibles, la commande ne peut pas
-savoir.** Elle ne dispose alors que d'un nom et d'une application, résout par le contexte
-fixe, et atteint donc **l'objet partagé** s'il en existe un de ce nom — alors que la
-ligne d'entrée désignait peut-être un privé homonyme. Ce n'est pas un défaut de
-l'adressage : sans désignation de portée, aucune information ne permet de distinguer les
-deux.
+### Endpoint resolution
 
-Le comportement n'est donc pas modifié, il est **rendu visible** : l'événement porte
-`acl_warning = "scope_undetermined"`. L'opérateur voit qu'il opère sans discrimination,
-au lieu de le déduire. L'avertissement ne se déclenche que là où la discrimination est
-réellement impossible : dès que la portée courante est exploitable, ou que l'`id` porte
-un namespace — nominatif comme `nobody` —, la portée est établie et rien n'est signalé.
+Two **complementary and disjoint** paths, not a primary one and a fallback:
 
-> Les versions antérieures de cette section promettaient un `not_found` dans ce cas.
-> **C'était faux**, mesuré : dès qu'un homonyme partagé existe, le GET aboutit sur lui.
+1. **From `id`**, if the extracted path does not point at `admin/directory` - that
+   aggregation handler can list, not write an ACL.
+2. **From `eai:type`**, through the mapping table. Unknown type gives an explicit
+   rejection, `acl_error = "unresolved_endpoint:<type>"`. **No derivation heuristic** is
+   admitted: naming analogy breaks in practice (`commands` gives `admin/commandsconf`,
+   `conf-times` gives `data/ui/times`).
 
-**Bâtissez le pipeline sur la macro d'inventaire**, qui émet toujours les deux
-désignations et rend ce cas inatteignable.
+In both cases the URI is **rebuilt**, never reused as is: the native `id` field
+double-encodes the slash but not the other special characters.
 
-L'inventaire, lui, continue de les lister : la règle porte sur l'écriture, pas sur la
-vue.
+Encoding of the `title` segment follows a **single rule**: plain percent-encoding of the
+whole segment, with no reserved character. The slash becomes `%2F` and calls for no
+special treatment.
 
-### Résolution de l'endpoint
-
-Deux voies **complémentaires et disjointes**, pas primaire et repli :
-
-1. **Depuis `id`**, si le chemin extrait ne pointe pas sur `admin/directory` — le
-   handler d'agrégation sait lister, pas écrire une ACL.
-2. **Depuis `eai:type`**, par la table de correspondance. Type inconnu → rejet
-   explicite, `acl_error = "unresolved_endpoint:<type>"`. **Aucune heuristique de
-   dérivation** n'est admise : l'analogie de nommage casse en pratique
-   (`commands` → `admin/commandsconf`, `conf-times` → `data/ui/times`).
-
-Dans les deux cas l'URI est **reconstruite**, jamais reprise telle quelle : le champ
-`id` natif double-encode la barre oblique mais pas les autres caractères spéciaux.
-
-L'encodage du segment `title` suit une **règle unique**, établie empiriquement : simple
-`%`-encodage du segment entier, sans caractère réservé. La barre oblique devient `%2F`
-et n'appelle aucun traitement particulier.
-
-| Classe | Forme retenue | Exemple |
+| Class | Form | Example |
 |---|---|---|
-| espace | `%20` | `Ma recherche` → `Ma%20recherche` |
-| barre oblique | `%2F` | `Rapport/Mensuel` → `Rapport%2FMensuel` |
-| non-ASCII | UTF-8 puis `%`-encodage | `éàü` → `%C3%A9%C3%A0%C3%BC` |
-| pourcent | `%25` | `Taux 100%` → `Taux%20100%25` |
+| space | `%20` | `My search` gives `My%20search` |
+| slash | `%2F` | `Report/Monthly` gives `Report%2FMonthly` |
+| non-ASCII | UTF-8 then percent-encoding | three accented letters give `%C3%A9%C3%A0%C3%BC` |
+| percent | `%25` | `Rate 100%` gives `Rate%20100%25` |
 
-Le double encodage est un **piège asymétrique** : il fonctionne pour la barre oblique
-seule et casse espace, accent et pourcent.
+### Merge and normalisation
 
----
+The merge applies presence semantics attribute by attribute. Permission fields are
+accepted as multivalue or as a comma-separated string. Systematic normalisation: split
+on comma, `trim`, **removal of empty elements**, deduplication, lexicographic sort,
+reassembly as a comma-separated string for the POST.
 
-## Fusion et normalisation
+An empty attribute is **never** materialised as `*`, nor as any other default value.
 
-La fusion applique la [sémantique de présence](#la-sémantique-de-présence--ce-qui-décide-de-modifier-ou-de-préserver),
-attribut par attribut : colonne absente, valeur du GET ; colonne présente et vide,
-attribut vidé ; colonne présente et valuée, valeur appliquée.
+**All four attributes are always sent.** The `/acl` endpoint operates as a full
+replacement: any omission is an erasure. The POST body therefore always carries `owner`,
+`sharing`, `perms.read` and `perms.write`, including those that are not being changed.
 
-Les champs de permissions sont acceptés en multivalué ou en chaîne séparée par virgules.
-Normalisation systématique : découpage sur virgule, `trim`, **suppression des éléments
-vides**, déduplication, tri lexicographique, réassemblage en chaîne séparée par virgules
-pour la requête POST.
+### Order of the pre-write checks
 
-Un attribut vide n'est **jamais** matérialisé en `*`, ni en aucune autre valeur par
-défaut.
+The order is normative: it decides which status wins when several conditions hold at
+once.
 
-### Les quatre attributs sont toujours transmis
-
-L'endpoint `/acl` opère en **remplacement intégral** : toute omission équivaut à un
-effacement. Le corps du POST porte donc toujours `owner`, `sharing`, `perms.read` et
-`perms.write`, y compris ceux qui ne sont pas modifiés. Une valeur vide est sérialisée
-`perms.read=` — clé présente, valeur vide, jamais l'omission de la clé.
-
-**Le propriétaire est transmis dans tous les cas** — l'omettre du corps produit un refus
-de la plateforme — mais il vient du GET tant que la colonne de `new_owner` est absente.
-
-### Ordre des contrôles
-
-L'ordre est normatif : il détermine quel statut l'emporte quand plusieurs conditions
-sont réunies.
-
-| Rang | Contrôle | Statut | POST |
+| Rank | Check | Status | POST |
 |---|---|---|---|
-| −1 | La portée courante vaut `user`, ou — à défaut de portée — le namespace porté par `id` est nominatif | `skipped_private` | non |
-| 0 | L'objet est un dérivé d'un `eventtype` | `skipped_derived` | non |
-| 1 | `can_change_perms = 0` dans la réponse du GET | `skipped_immutable` | non |
-| 2 | Colonne de `new_sharing` présente, cellule vide | `rejected` / `sharing_empty_not_allowed` | non |
-| 3 | Portée cible hors `{user, app, global}` | `rejected` / `invalid_sharing:<valeur>` | non |
-| 3bis | Colonne de `new_owner` présente, cellule vide | `rejected` / `owner_empty_not_allowed` | non |
-| 4 | Portée cible = `user` et propriétaire cible = `nobody` | `rejected` / `sharing_user_requires_named_owner` | non |
-| 5 | `validate_roles=true` et rôle **ajouté** absent du référentiel | `invalid_role` | non |
-| 6 | État fusionné == état lu, après normalisation | `noop` | non |
-| 7 | `dryrun=true` | `dryrun` | non |
+| -1 | The current scope is `user`, or - lacking a scope - the namespace carried by `id` is a named one | `skipped_private` | no |
+| 0 | The object is derived from an `eventtype` | `skipped_derived` | no |
+| 1 | `can_change_perms = 0` in the GET response | `skipped_immutable` | no |
+| 2 | `new_sharing` column present, cell empty | `rejected` / `sharing_empty_not_allowed` | no |
+| 3 | Target scope outside `{user, app, global}` | `rejected` / `invalid_sharing:<value>` | no |
+| 3bis | `new_owner` column present, cell empty | `rejected` / `owner_empty_not_allowed` | no |
+| 4 | Target scope = `user` and target owner = `nobody` | `rejected` / `sharing_user_requires_named_owner` | no |
+| 5 | `validate_roles=true` and an **added** role is absent from the repository | `invalid_role` | no |
+| 6 | Merged state == read state, after normalisation | `noop` | no |
+| 7 | `dryrun=true` | `dryrun` | no |
 
-Le plafond `max_objects` précède l'ensemble : une fois atteint, l'objet ressort en
-`skipped_ceiling` sans même un GET.
+The `max_objects` ceiling comes before all of it: once reached, the object comes out
+`skipped_ceiling` without even a GET.
 
-**Le rang 6 précède le rang 7** : un objet déjà conforme est un `noop` **même en
-simulation**. C'est l'information utile, et c'est ce qui permet de mesurer la
-convergence d'un lot sans écrire.
+**Rank 6 precedes rank 7**: an object that is already compliant is a `noop` **even in
+simulation**. That is the useful information, and it is what lets you measure the
+convergence of a batch without writing.
 
-Une modification effective de `sharing` est signalée par `acl_warning =
-"sharing_change"`, une reprise de propriété par `acl_warning = "owner_change"` : dans
-les deux cas, ce qui change dépasse les permissions.
+An effective change of `sharing` is signalled by `acl_warning = "sharing_change"`, a
+change of owner by `acl_warning = "owner_change"`: in both cases what changes goes
+beyond permissions.
 
-### Idempotence
+**`validate_roles` only bears on added roles.** An unknown role already present on the
+object and untouched by the operation does not block the write; it is signalled by
+`acl_warning = "stale_role_preserved:<list>"`. The role `*` is a legitimate value and is
+**never** expanded into a list of roles.
 
-L'état fusionné est comparé à l'état lu après normalisation identique des deux côtés —
-découpage, `trim`, **suppression des éléments vides**, déduplication, tri. La
-comparaison porte sur `owner`, `sharing`, `perms.read` et `perms.write`, sur les
-collections triées : une permutation d'ordre des rôles est un `noop`.
+### Derived objects - writing abstains
 
-`owner` y entre depuis que la reprise de propriété est au périmètre. L'en exclure — ce
-que faisait la v1, au motif qu'il n'était jamais modifié — rendrait `new_owner`
-inopérant : un lot ne changeant que le propriétaire ressortirait intégralement en
-`noop`, sans un seul POST.
+Some knowledge objects are not autonomous: they are the **internal materialisation** of
+a function carried by another object. That is the case of the `fvtags` object produced
+by tagging an `eventtype`.
 
-> La suppression des éléments vides n'est pas cosmétique. Après un POST portant
-> `perms.read=` vide, le GET suivant ne renvoie ni `[]` ni `null` mais **`[""]`** — une
-> liste contenant une chaîne vide. Sans ce filtrage, la détection d'idempotence
-> échouerait sur **tout** objet à permission vide, et une seconde passe réécrirait.
-
-#### Portée réelle de ce contrôle
-
-**Un lot vert en seconde passe n'établit pas que son jeu de restauration est juste.**
-
-L'idempotence ne détecte qu'**un des deux modes de défaillance connus**. Elle signale le
-cas où l'**état** est faux — la seconde passe ne converge pas, des objets ressortent
-`updated` alors qu'ils devraient tous être `noop`. Elle reste **totalement silencieuse**
-sur le cas où c'est le **jeu de restauration** qui est faux : ce cas ressort à cent pour
-cent `noop`, exactement comme un lot sain.
-
-La raison est mécanique : l'idempotence compare l'état cible à l'état lu **maintenant**.
-Elle ne compare jamais l'état journalisé comme antérieur à l'état qui était réellement
-antérieur. Un `before_*` capté après qu'un autre objet du même lot a déjà muté celui-ci
-est un `before_*` faux, et rien dans une seconde passe ne le révèle.
-
-Cette limite **dépasse le cas des objets dérivés**. Elle vaut pour toute situation où
-l'état d'un objet peut changer entre son préflight et la fin du lot. Vérifier un retour
-arrière suppose de le **rejouer** et de comparer champ à champ, pas de constater un taux
-de `noop`.
-
-### `validate_roles` ne porte que sur les rôles ajoutés
-
-Un rôle inconnu **déjà présent** sur l'objet et non modifié par l'opération ne bloque
-pas l'écriture ; il est signalé par `acl_warning = "stale_role_preserved:<liste>"`.
-
-La lecture inverse rendrait l'outil inutilisable sur exactement la plateforme qu'il
-vise : bloquer une écriture au motif qu'un rôle mort traîne dans `perms.read` alors
-qu'on modifie `perms.write` empêche le correctif sans faire disparaître la référence
-morte. L'audit de la dette préexistante relève des recherches d'inventaire, pas du
-garde-fou.
-
-Le rôle `*` est une valeur légitime du référentiel et n'est **jamais** développé en
-liste de rôles.
-
----
-
-## Objets dérivés — l'écriture s'abstient
-
-Certains objets de connaissance ne sont pas autonomes : ils sont la **matérialisation
-interne** d'une fonction portée par un autre objet. C'est le cas de l'objet `fvtags`
-engendré par la pose d'un tag sur un `eventtype`.
-
-Écrire l'ACL de l'`eventtype` **propage** cette ACL au dérivé — sans POST, sans réponse
-HTTP, donc sans que la commande puisse l'observer. La commande **refuse donc de modifier
-un objet identifié comme dérivé d'un `eventtype`** :
+Writing the ACL of the `eventtype` **cascades** that ACL to the derived object - with no
+POST, no HTTP response, therefore with no way for the command to observe it. The command
+therefore **refuses to modify an object identified as derived from an `eventtype`**:
 
 ```
 acl_status = "skipped_derived"
-acl_error  = "derived_object:<nom du porteur>"
+acl_error  = "derived_object:<name of the carrier>"
 ```
 
-Aucun POST n'est émis, `max_objects` n'est pas décompté, et une ligne de journal
-`phase=outcome` est écrite comme pour tout autre statut. Le contrôle est au **rang 0** :
-il précède tous les autres.
+No POST is sent, `max_objects` is not decremented, and an `outcome` journal line is
+written as for any other status.
 
-### Pourquoi s'abstenir plutôt que traiter
+**Favourable side effect**: when the carrier is written, the cascade **aligns** the
+derived object on it. The tool therefore makes the estate converge towards a consistent
+state batch after batch, without ever writing the derived object itself. That alignment
+has a counterpart when the derived object was diverging: it is not reversible, see
+[Limits of the rollback](#limits-of-the-rollback).
 
-Écrire le dérivé conduit, selon l'ordre du pipeline, soit à un **état final faux** — la
-cascade du porteur écrase la valeur qu'on vient d'écrire — soit à un **jeu de
-restauration faux** — le préflight du dérivé lit un état déjà cascadé et journalise une
-valeur antérieure qui n'a jamais existé. **Aucun ordre ne donne les deux corrects.**
-L'abstention élimine les deux modes.
+**A `fvtags` object with no carrier stays modifiable.** The relation is discovered from
+the platform, not computed from a name: an orphan derived object cannot be reached by
+any cascade, so there is no reason to abstain. If the confirming GET can neither
+establish nor rule out the existence of the carrier (`403`, `5xx`, transport failure),
+the abstention is pronounced anyway and traced by
+`acl_warning = "carrier_probe_inconclusive:<code>"`.
 
-**Effet favorable** : quand le porteur est écrit, la cascade **aligne** le dérivé sur
-lui. L'outil fait donc converger le parc vers l'état cohérent au fil des lots, sans
-jamais écrire l'objet dérivé lui-même. Cet alignement a une contrepartie quand le
-dérivé était divergent : il n'est pas réversible, voir
-[Limites du retour arrière](#limites-du-retour-arrière).
+**The blind spot.** A diverging derived object **whose carrier does not enter the batch**
+is reached by no cascade. If it carries a reference to a decommissioned role that its
+carrier does not carry, a batch filtered on that role does not return the carrier,
+nothing fires, and **that reference survives**. Run the shipped
+`ACL - eventtype / derived object divergences` search **before** a decommissioning
+campaign: it says exactly what the campaign will not be able to reach. The fix is
+upstream, on the deployer side.
 
-### La relation de dérivation est découverte, pas construite
-
-La commande ne recompose **jamais** un nom d'objet dérivé par concaténation à partir du
-nom d'un porteur. Un lien deviné produirait un jour un homonyme, avec les mêmes
-conséquences qu'un endpoint deviné. Le sens de parcours est **inverse**, et chacune de
-ses trois étapes s'appuie sur une donnée fournie par splunkd :
-
-1. **la famille** vient du chemin de handler résolu, lui-même issu du champ `id` émis
-   par l'endpoint natif ou de la table de correspondance validée par GET réel ;
-2. **l'identité de l'objet** est celle que splunkd renvoie dans la réponse du GET
-   (`entry[0].name`), jamais le champ `title` de l'événement d'entrée — qu'un `eval` en
-   amont peut avoir forgé. C'est la clé composite de la famille, dont la grammaire
-   `<champ>=<valeur>` est celle de la plateforme : c'est sous cette forme que splunkd
-   nomme l'objet, l'adresse, le crée et l'écrit dans `tags.conf` ;
-3. **l'existence du porteur est confirmée par un GET réel** sur `saved/eventtypes` dans
-   le même namespace. C'est l'étape qui fait de la relation une observation.
-
-Conséquence directe et vérifiable : un `fvtags` **orphelin** — dont le porteur désigné
-n'existe pas — reste **modifiable**. Aucune cascade ne peut l'atteindre, il n'y a donc
-aucune raison de s'en abstenir. Une heuristique de nommage, elle, l'écarterait à tort.
-
-Si le GET de confirmation ne peut ni établir ni infirmer l'existence du porteur — `403`,
-`5xx`, échec de transport — l'abstention est prononcée quand même, et tracée par
-`acl_warning = "carrier_probe_inconclusive:<code>"`. C'est délibérément conservateur :
-écrire un dérivé dont le porteur pourrait exister fausse le jeu de restauration **en
-silence**, tandis qu'une abstention de trop est visible et sans effet sur l'état du parc.
-
-### L'inventaire, lui, reste exhaustif
-
-`acl_inventory` continue de lister les objets dérivés. **Aucun filtrage à l'inventaire :
-c'est la modification qui s'abstient, pas la vue.** Un opérateur doit pouvoir constater
-l'existence de ce que l'outil ne traite pas.
-
-### L'angle mort, et son traitement
-
-Un objet dérivé divergent **dont le porteur n'entre pas dans le lot** n'est atteint par
-aucune cascade. S'il porte une référence à un rôle décommissionné que son porteur ne
-porte pas, le lot filtré sur ce rôle ne remonte pas le porteur, rien ne se déclenche, et
-**cette référence survit**. C'est le seul endroit où l'objectif de disparition effective
-des références n'est pas tenu par la commande seule.
-
-Cette divergence relève de la **configuration amont** — typiquement un `eventtype` poussé
-par un deployer avec une stanza de métadonnée qui lui est propre, sans que la mécanique
-de matérialisation du dérivé ait tourné. Elle **se traite en amont, côté deployer**,
-avant la reprise des configurations locales : c'est là que la stanza manquante doit être
-ajoutée, ou la stanza du seul porteur retirée pour laisser la cascade faire son travail.
-
-La recherche livrée **`ACL — divergences eventtype / objets dérivés`** rend ce volume
-mesurable sur le socle cible : elle liste les couples dont l'ACL diverge et signale
-nommément les rôles suivis qu'un dérivé référence sans que son porteur les référence.
-La lancer **avant** une campagne de décommissionnement dit exactement ce que la campagne
-ne pourra pas atteindre.
-
-### Portée
-
-La règle est bornée aux dérivés d'un `eventtype`. Le motif « écrire l'ACL de A modifie
-l'ACL de B » a été cherché sur 11 des 27 familles et ne se retrouve nulle part hors de la
-grappe des tags ; les 16 familles restantes sont **inférées** exemptes, non observées.
-
-Elle ne s'étend pas non plus à la famille `tags` (`admin/tags`), bien que ses objets
-soient eux aussi dérivés d'un `eventtype`. Un objet `admin/tags` acquiert une stanza de
-métadonnée propre dès sa première écriture d'ACL et cesse alors d'être exposé à la
-cascade : s'en abstenir définitivement le soustrairait au décommissionnement **sans
-qu'aucune cascade ne vienne l'aligner en contrepartie**.
+The inventory keeps listing derived objects: it is the modification that abstains, not
+the view.
 
 ---
 
-## Sortie
+## Output
 
-Chaque événement d'entrée produit **exactement un** événement de sortie, conservant
-l'intégralité de ses champs, augmenté de :
+Each input event produces **exactly one** output event, keeping all of its fields, plus:
 
-| Champ | Contenu |
+| Field | Content |
 |---|---|
 | `acl_status` | `updated`, `noop`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_immutable`, `skipped_derived`, `skipped_private`, `skipped_ceiling`, `error` |
-| `acl_endpoint` | Chemin de l'objet ciblé, **sans** schéma, hôte, port ni suffixe `/acl`. **Vide** sur les abstentions qui n'adressent rien — `skipped_private`, `skipped_ceiling` — où il désignerait un objet autre que celui de la ligne d'entrée |
-| `acl_http_code` | Code HTTP du POST, ou du GET en cas d'échec amont. **Sentinelle `0`** en l'absence de tout échange HTTP |
-| `acl_error` | Message d'erreur, tronqué à 512 caractères |
-| `acl_warning` | Avertissements non bloquants, **concaténés par `;`** dans un ordre stable |
-| `acl_before_owner`, `acl_after_owner` | Propriétaire avant et après. Identiques tant que `new_owner` n'est pas employé |
-| `acl_before_perms_read`, `acl_before_perms_write`, `acl_before_sharing` | État antérieur, normalisé |
-| `acl_after_perms_read`, `acl_after_perms_write`, `acl_after_sharing` | État transmis |
-| `acl_journaled` | Ligne `intent` écrite **et synchronisée sur disque** |
+| `acl_endpoint` | Path of the targeted object, **without** scheme, host, port or `/acl` suffix. **Empty** on the abstentions that address nothing - `skipped_private`, `skipped_ceiling` - where it would designate an object other than the one on the input row |
+| `acl_http_code` | HTTP code of the POST, or of the GET on an upstream failure. **Sentinel `0`** when no HTTP exchange took place |
+| `acl_error` | Error message, truncated at 512 characters |
+| `acl_warning` | Non-blocking warnings, **joined by `;`** in a stable order |
+| `acl_before_owner`, `acl_after_owner` | Owner before and after. Identical for as long as `new_owner` is unused |
+| `acl_before_perms_read`, `acl_before_perms_write`, `acl_before_sharing` | Prior state, normalised |
+| `acl_after_perms_read`, `acl_after_perms_write`, `acl_after_sharing` | State sent |
+| `acl_journaled` | `intent` line written **and synchronised to disk** |
 
-Avertissements possibles : `sharing_change`, `owner_change`, `app_disabled`,
-`stale_role_preserved:<liste>`, `journal_outcome_failed`,
-`duplicate_post_suppressed`, `runtime_divergence_possible`,
-`carrier_probe_inconclusive:<code>`, `private_detected_by_id_namespace`,
-`scope_undetermined`.
+Those are the twelve `acl_status` values, and the enumeration above is checked against
+the code by the test suite rather than maintained by hand.
 
-> **Le jeu de champs de sortie est déclaré, jamais inféré.** Le writer du SDK construit
-> l'en-tête du flux à partir des clés du **premier enregistrement émis**, puis y projette
-> tous les suivants : un champ absent de ce premier enregistrement **disparaît de la
-> sortie entière**, sans erreur ni avertissement. Or les huit champs `acl_before_*` /
-> `acl_after_*` ne sont portés que par les enregistrements dont la fusion a été calculée
-> — un `skipped_private`, un `skipped_derived`, un `skipped_ceiling` ou un rejet amont
-> n'en porte aucun. Un lot dont la première ligne relève d'un de ces statuts privait donc
-> l'opérateur de **tout** ce que la simulation existe pour montrer, et la macro
-> d'inventaire, qui liste les objets privés et dérivés au même titre que les autres,
-> produit couramment de tels lots.
->
-> La commande **déclare** en conséquence l'intégralité de son jeu de champs au writer,
-> indépendamment du contenu du premier enregistrement. Les quatorze colonnes ci-dessus
-> sont donc présentes quel que soit l'ordre du lot ; celles qu'un statut ne porte pas
-> sont **vides**, jamais absentes. La déclaration ajoute la colonne, elle n'invente pas
-> de contenu.
->
-> La symétrie mérite d'être vue : toute la sémantique de présence repose, en **entrée**,
-> sur le fait que le jeu de colonnes est celui du jeu de résultats et non de l'événement.
-> La sortie obéit à une contrainte de même nature — figée, mais sur le **premier
-> enregistrement** au lieu du jeu complet.
+Possible warnings: `sharing_change`, `owner_change`, `app_disabled`,
+`stale_role_preserved:<list>`, `journal_outcome_failed`, `duplicate_post_suppressed`,
+`runtime_divergence_possible`, `carrier_probe_inconclusive:<code>`,
+`private_detected_by_id_namespace`, `scope_undetermined`.
 
-`runtime_divergence_possible` est émis sur **tout** POST répondant en `5xx`, pas sur le
-seul `500` : la divergence tient à ce que le handler a muté son état en mémoire avant
-d'échouer à le persister, ce qu'un `502`, un `503` ou un `507` produisent aussi bien.
+The fourteen columns above are present whatever the order of the batch; the ones a given
+status does not carry are **empty**, never absent.
 
-### Déduplication : un objet n'est soumis qu'une fois au même état cible
+`runtime_divergence_possible` is emitted on **any** POST answering `5xx`, not on `500`
+alone - see [Known limits](#known-limits).
 
-Le pipeline d'entrée peut présenter deux fois le même objet. Une **déduplication
-interne par URI** couvre la portée de l'exécution : elle économise le GET et le POST,
-jamais un événement de sortie ni une ligne `outcome`.
+### Deduplication
 
-Elle vaut que le premier POST ait abouti **ou non**. Si l'écriture a été refusée,
-l'objet n'a pas changé d'état ; le doublon ressort avec le **résultat du premier
-envoi** — même `acl_status`, même `acl_error`, même `acl_http_code` — augmenté de
-`acl_warning = "duplicate_post_suppressed"`, sans nouvelle ligne `intent`, sans nouveau
-POST et sans consommer une unité de `max_objects`. Un doublon demandant un état cible
-**différent** est, lui, une demande distincte et donne bien lieu à une seconde
-écriture.
+The input pipeline may present the same object twice. An internal **deduplication by
+URI** covers the scope of the run: it saves the GET and the POST, never an output event
+nor an `outcome` line. The duplicate comes out with the **result of the first send** -
+same `acl_status`, same `acl_error`, same `acl_http_code` - plus
+`acl_warning = "duplicate_post_suppressed"`. A duplicate asking for a **different**
+target state is a distinct request and does give rise to a second write.
 
----
+### Fatal errors
 
-## Machine à états
+Exhaustive list. Any other error bearing on a given object is a per-event error, and the
+pipeline carries on.
 
-Les états terminaux en minuscules sont les douze `acl_status`. Chacun produit
-**exactement une** ligne `outcome` puis **un** événement de sortie — plafond compris.
-Seule une erreur fatale interrompt la recherche, et elle ne produit alors ni ligne
-`intent`, ni ligne `outcome`, ni événement de sortie.
+- `edit_acl_bulk` capability missing;
+- invalid parameter: a field-naming parameter designating an empty field identifier or
+  carrying a comma, or `max_objects` not a positive integer;
+- run detected as a real-time search;
+- `splunkd_uri` or `session_key` unavailable;
+- mapping table unreadable;
+- journal file not openable while `journal=true` **and** `dryrun=false`.
 
-```mermaid
-stateDiagram-v2
-  direction TB
-  [*] --> Recu
-  Recu --> skipped_ceiling : compteur d ecritures deja a max_objects
-  Recu --> Resolution : title et app presents
-  Recu --> rejected : title ou app absent, ou app = system
+**Reaching `max_objects` is not among them**: it produces a per-event status,
+`skipped_ceiling`, and the search ends normally.
 
-  Resolution --> Prive : endpoint resolu, contexte fixe nobody
-  Resolution --> rejected : unresolved_endpoint
-
-  Prive --> skipped_private : rang -1 portee courante = user
-  Prive --> skipped_private : rang -1 namespace de id nominatif
-  Prive --> Lecture : portee non privee et namespace nobody
-
-  Lecture --> Fusion : GET 2xx
-  Lecture --> Fusion : objet deja ecrit dans cette execution
-  Lecture --> not_found : GET 404
-  Lecture --> forbidden : GET 403
-  Lecture --> error : GET 5xx apres une reprise, ou transport
-
-  Lecture --> skipped_derived : rang 0 derive d un eventtype
-  Fusion --> skipped_immutable : rang 1 can_change_perms = 0
-  Fusion --> rejected : rang 2 sharing vide
-  Fusion --> rejected : rang 3 sharing hors user app global
-  Fusion --> rejected : rang 3bis owner vide
-  Fusion --> rejected : rang 4 sharing user sur owner cible nobody
-  Fusion --> invalid_role : rang 5 role AJOUTE inconnu
-  Fusion --> noop : rang 6 etat cible egal a etat lu
-  Fusion --> dryrun : rang 7 dryrun = true
-  Fusion --> Intention : ecriture requise
-
-  Intention --> error : echec write + flush + fsync, POST ANNULE
-  Intention --> Ecriture : ligne intent persistee
-
-  Ecriture --> updated : POST 2xx
-  Ecriture --> error : POST non-2xx ou transport
-
-  Fatal --> [*] : erreur fatale, recherche interrompue
-```
-
-**L'ordre des rangs −1 à 7 est normatif** : il détermine quel statut l'emporte quand
-plusieurs conditions sont réunies. Quatre conséquences à connaître :
-
-- le plafond précède tout, y compris le GET : une fois atteint, chaque objet suivant
-  ressort en `skipped_ceiling` sans le moindre échange HTTP, et **la recherche
-  continue** ;
-- le rang −1 écarte les objets privés avant toute lecture, et le rang 0 précède tous les
-  contrôles suivants : un objet dérivé d'un `eventtype` ressort en `skipped_derived`
-  même s'il est immuable, même en simulation, même s'il est déjà conforme (voir
-  [Objets dérivés](#objets-dérivés--lécriture-sabstient)) ;
-- `can_change_perms` est lu **dans la réponse du GET**, jamais dans l'événement
-  d'entrée — s'en remettre à l'événement rendrait le garde-fou contournable par un
-  `eval` en amont ;
-- le rang 6 précède le rang 7 : **un objet déjà conforme est un `noop` même en
-  simulation.** C'est l'information utile, et c'est ce qui permet de mesurer la
-  convergence d'un lot sans écrire.
-
-### Erreurs fatales
-
-Liste **limitative**. Toute autre erreur portant sur un objet donné est une erreur par
-événement, et le pipeline se poursuit.
-
-- capability `edit_acl_bulk` absente ;
-- paramètre invalide : un paramètre de nommage désignant un identifiant de champ vide
-  ou portant une virgule, ou `max_objects` non entier positif ;
-- exécution en recherche temps réel détectée ;
-- `splunkd_uri` ou `session_key` indisponibles ;
-- table de correspondance illisible ;
-- fichier de journal non ouvrable alors que `journal=true` **et** `dryrun=false`.
-
-**L'atteinte de `max_objects` n'y figure plus** : elle produit un statut par événement,
-`skipped_ceiling`, et la recherche se termine normalement.
-
-### Refus d'exécution en recherche temps réel
-
-Le garde-fou lit `isRealTimeSearch` sur `GET /services/search/jobs/<sid>`, avec repli
-sur l'inspection de `earliest_time` / `latest_time`.
-
-**La détection est éprouvée sur Splunk 9.4.6** — recherche soumise en `search_mode =
-realtime`, bornes `rt-60s` → `rt` : `isRealTimeSearch = True` est bien exposé, et
-l'exécution est refusée par erreur fatale. Le refus reste donc une erreur fatale, et
-non un avertissement.
-
-Elle n'est pas re-validée sur un autre socle. Si l'information n'était pas exposée et
-que le repli n'aboutissait pas, la commande émettrait un **avertissement** signalant
-que le garde-fou n'a pas pu s'appliquer, et poursuivrait — `run_in_preview = false` et
-l'idempotence restent les deux premières lignes de défense.
+On a fatal error the search output is lost (`resultCount = 0`): events already emitted
+disappear. The journal stays complete and remains the way to resume and to undo.
 
 ---
 
 ## Journal
 
-Deux fichiers sous `$SPLUNK_HOME/var/log/splunk/`, collectés vers `_internal` sous des
-sourcetypes dédiés.
+Two files under `$SPLUNK_HOME/var/log/splunk/`, collected into `_internal` under
+dedicated sourcetypes.
 
-| Fichier | Rotation | Contenu | Sourcetype |
+| File | Rotation | Content | Sourcetype |
 |---|---|---|---|
-| `editacl_journal_<sid>.log` | **aucune — un fichier par exécution** | Deux lignes JSON par objet écrit. Jeu de restauration. | `editacl:journal` |
-| `editacl.log` | 5 Mo × 5 | Diagnostic d'exécution | `editacl:diag` |
+| `editacl_journal_<sid>.log` | **none - one file per run** | JSON lines per object. Rollback set. | `editacl:journal` |
+| `editacl.log` | 5 MB x 5 | Run diagnostic | `editacl:diag` |
 
-**Un fichier par `sid`** : un handler rotatif partagé n'est pas sûr entre processus.
-Deux exécutions concurrentes sur le même membre — une recherche planifiée qui croise
-une recherche manuelle — peuvent perdre des lignes au moment d'une rotation. Le journal
-étant le **seul** filet de sécurité d'une opération irréversible, une fenêtre connue de
-perte de lignes n'est pas acceptable quand le correctif coûte un nom de fichier.
+**One file per `sid`**, with no size-based rotation: a shared rotating handler is not
+safe across processes, and two concurrent runs on the same member could lose lines at
+rotation time. The journal is the **only** safety net of an irreversible operation.
 
-> **Les deux fichiers n'ont pas la même nature, et c'est délibéré.** Le journal de
-> restauration porte l'état antérieur d'objets mutés : sa perte est inacceptable, d'où
-> l'absence de rotation. Le fichier de diagnostic ne porte aucun état restaurable : sa
-> perte n'est **pas** critique, il reste donc unique et rotatif. Conséquence directe :
-> **aucun échec du diagnostic n'est fatal**, et aucun ne diffère ni n'annule une
-> écriture. Un diagnostic qui interromprait l'opération qu'il observe ajouterait une
-> défaillance à celle qu'il signale.
+The diagnostic file, on the other hand, carries no restorable state: it stays single and
+rotating, and **no diagnostic failure is ever fatal**.
 
-### `editacl.log` — diagnostic d'exécution
+### Lines written
 
-Texte brut, une ligne par enregistrement, horodatage ISO 8601 avec fuseau et
-millisecondes, `sid` en tête de chaque message pour distinguer des exécutions
-concurrentes :
+- `intent`, before each POST, with `flush()` then `os.fsync()`. Its failure **cancels**
+  the POST for that object.
+- `outcome`, after processing **each** event, whatever the status - including `noop`,
+  `dryrun` and the rejections. Its failure cancels nothing but is signalled by
+  `acl_warning = "journal_outcome_failed"`.
+- `summary`, **once**, at the end of a normal run, carrying one counter per status. Its
+  **absence** is what marks an interrupted run.
 
-```
-2026-08-06T16:29:53.030+00:00 INFO sid=1786033792.6 demarrage editacl version=1.0.0 user=... splunkd=...
-2026-08-06T16:29:53.031+00:00 INFO sid=1786033792.6 parametres dryrun=false validate_roles=true journal=true max_objects=10
-2026-08-06T16:29:53.032+00:00 INFO sid=1786033792.6 nommage title=title app=eai:acl.app id=id type=eai:type sharing=eai:acl.sharing new_perms_read=eai:acl.perms.read new_perms_write=eai:acl.perms.write new_sharing=eai:acl.sharing new_owner=eai:acl.owner
-2026-08-06T16:29:53.190+00:00 INFO sid=1786033792.6 controle d'habilitation : capability accordee
-2026-08-06T16:29:53.240+00:00 INFO sid=1786033792.6 controle temps reel : batch
-2026-08-06T16:29:53.310+00:00 INFO sid=1786033792.6 table de correspondance : 28 entrees (28 livrees, 0 d'override, 0 surchargees, 0 ecartees)
-2026-08-06T16:29:53.350+00:00 INFO sid=1786033792.6 journal de restauration ouvert : .../editacl_journal_1786033792.6.log
-2026-08-06T16:29:54.020+00:00 WARNING sid=1786033792.6 plafond max_objects=10 atteint : 30 objet(s) ecarte(s) ...
-```
+An `intent` line with no `outcome` signals an interruption between the disk
+synchronisation and the POST response - **the POST may have succeeded**. Settle it
+against `splunkd_access.log`.
 
-Il porte ce qu'énumère le cahier des charges : **démarrage** (version de l'app,
-utilisateur, membre, `splunkd_uri`, état de la vérification TLS), **paramètres** validés
-et leurs avertissements, **les neuf paramètres de nommage** — sans eux, une exécution
-dont un nom de champ a été redirigé serait illisible a posteriori —, **contrôle
-d'habilitation**, contrôle du mode temps réel,
-**résolution de la table de correspondance** — décompte et entrées écartées, override
-compris —, ouverture du journal de restauration, et **erreurs fatales**.
+### Retention and routing
 
-> **Aucun secret n'y entre.** La garantie est d'abord structurelle : le module de
-> diagnostic ne reçoit jamais la clé de session — aucune de ses méthodes n'a de
-> paramètre qui la porte, et le client REST ne lui parle pas. Une rédaction couvre en
-> seconde ligne les messages d'erreur recopiés depuis la plateforme : en-tête
-> `Authorization`, `session_key`, `token`, `password`, `api_key` et apparentés sont
-> remplacés par `[redige]`, **jamais tronqués** — un secret tronqué reste un secret
-> partiellement divulgué. Ce fichier est collecté vers un index : il est lu par bien
-> plus de monde que le disque du search head.
+- **Retention.** `_internal` is frozen at 28 days by default. If the operational window
+  of the journal must exceed that, redefine `index` in `local/inputs.conf` towards a
+  dedicated index - and read the next paragraph, which is not optional.
+- **Routing.** The journal is only searchable from the search head if that search head
+  forwards its internal logs to the indexers - a common configuration, but not a
+  universal one. Failing that, `_internal` stays local to the member that ran the
+  command, and multi-member consolidation falls away.
 
-C'est la seule trace d'une erreur fatale qui survive à la fin de la recherche : le
-message utilisateur est éphémère et le job disparaît à son expiration.
+### Redirecting the journal index takes TWO overrides, not one
 
-### Deux lignes par écriture
+`inputs.conf` governs **ingestion**. Reading is governed by the `acl_journal_source` and
+`acl_diag_source` macros of `default/macros.conf`.
 
-```mermaid
-sequenceDiagram
-  participant P as editacl
-  participant J as journal (disque)
-  participant S as splunkd
+| File to override | What it rules |
+|---|---|
+| `local/inputs.conf` | Where the journal is **ingested** |
+| `local/macros.conf` | Where it is **read** |
 
-  Note over P: plafond max_objects controle AVANT toute ecriture
-  P->>J: ligne intent (etat anterieur + charge utile)
-  J-->>P: write + flush + fsync
-  alt fsync en echec
-    P-->>P: POST ANNULE, statut error, acl_journaled=false
-  else fsync OK
-    P->>S: POST <endpoint>/acl
-    S-->>P: code HTTP
-  end
-  P->>J: ligne outcome (statut, code, erreur)
-  Note over J: une intent sans outcome = interruption entre fsync et reponse ;<br/>le POST peut avoir abouti — trancher par splunkd_access.log
-```
+**Overriding only one of the two leaves every shipped search - the monitoring view, the
+change journal, the rollback macro - looking at the old index and returning an empty
+result without saying so.** On the rollback macro, that means an empty rollback set
+reported as a success, on the only safety net of an irreversible operation. Two
+configuration points, each of them single; no Simple XML construct brings it down to
+one.
 
-- `intent` est écrite **avant** chaque POST, avec `flush()` puis `os.fsync()`. Son échec
-  **annule** le POST pour l'objet concerné.
-- `outcome` est écrite après traitement de **chaque** événement, quel que soit le
-  statut — y compris `noop`, `dryrun` et les rejets. Son échec n'annule rien mais est
-  signalé par `acl_warning = "journal_outcome_failed"`.
-- Le champ `title` est journalisé **non encodé** : la restauration le réinjecte tel
-  quel.
-- La chaîne `endpoint` est un **contrat** : rigoureusement identique sur `intent` et
-  `outcome`, calculée une seule fois, sans schéma ni hôte ni port ni suffixe `/acl`.
+### Purge policy
 
-**Invariants vérifiables**, chacun couvert par un test unitaire :
+The number of `editacl_journal_<sid>.log` files grows with the number of runs, **with no
+automatic ceiling**. The unit volume is marginal, but growth is monotonic.
 
-1. une ligne `outcome` par événement de sortie, sans exception ;
-2. une ligne `intent` par POST tenté ;
-3. une ligne `intent` sans `outcome` signale une interruption entre la synchronisation
-   sur disque et la réponse du POST — **le POST peut avoir abouti**.
-
-### Rétention et acheminement
-
-Deux points à vérifier à l'installation :
-
-- **Rétention.** `_internal` est par défaut gelé à 28 jours. Si la fenêtre
-  d'exploitation du journal doit excéder cette durée, redéfinir `index` dans
-  `local/inputs.conf` vers un index dédié. C'est le **seul** point de configuration à
-  modifier.
-- **Acheminement.** Le journal n'est interrogeable depuis le search head que si
-  celui-ci transfère ses logs internes vers les indexeurs — configuration courante mais
-  pas universelle. À défaut, `_internal` reste local au membre ayant exécuté la
-  commande, et la consolidation multi-membres tombe.
-
-### Politique de purge
-
-Le nombre de fichiers `editacl_journal_<sid>.log` croît avec le nombre d'exécutions,
-**sans plafond automatique**. Le volume unitaire est marginal (deux lignes JSON par
-objet écrit), mais la croissance est monotone.
-
-Purge recommandée **par ancienneté**, jamais par taille ni par nombre :
+Purge by **age**, never by size and never by count:
 
 ```sh
-# A planifier hors fenetre d'exploitation, apres s'etre assure que les executions
-# concernees sont indexees ET que leur fenetre de restauration est close.
+# To be scheduled outside the operating window, after making sure the runs concerned
+# are indexed AND that their restore window is closed.
 find "$SPLUNK_HOME/var/log/splunk" -name 'editacl_journal_*.log' -mtime +90 -delete
 ```
 
-Choisir l'ancienneté en fonction de la **rétention réelle de l'index cible**, pas de
-l'espace disque : tant que les événements ne sont pas indexés, le fichier est la seule
-voie de restauration ; une fois indexés, il en reste la voie de secours immédiate.
+Choose the age from the **real retention of the target index**, not from disk space: as
+long as the events are not indexed, the file is the only restore path; once indexed, it
+remains the immediate fallback.
 
 ---
 
-## Retour arrière
+## Rollback
 
-Deux macros, deux gestes distincts.
+Two macros, two distinct gestures.
 
-| Macro | Ce qu'elle fait | Écrit ? |
+| Macro | What it does | Writes? |
 |---|---|---|
-| `editacl_rollback(<sid>)` | **prévisualise** le jeu de restauration — les objets à rétablir et leur état antérieur | non |
-| `editacl_rollback_apply(<sid>)` | le même jeu, **suivi de l'invocation `\| editacl` complète** | **oui** |
+| `editacl_rollback(<sid>)` | **previews** the rollback set - the objects to restore and their prior state | no |
+| `editacl_rollback_apply(<sid>)` | the same set, **followed by the complete `\| editacl` invocation** | **yes** |
 
-`editacl_rollback(<sid>)` est la porte d'entrée par défaut : on regarde avant d'écrire.
+`editacl_rollback(<sid>)` is the default entry point: look before you write.
 
 ```
 | `editacl_rollback(1754483000.1)`
 ```
 
-Une fois le jeu de restauration vérifié, l'appliquer. Deux formes équivalentes — la
-seconde est préférable :
+Once the rollback set has been checked, apply it. Two equivalent forms - the second one
+is preferable:
 
 ```
 | `editacl_rollback(1754483000.1)`
@@ -1207,519 +872,452 @@ seconde est préférable :
 | `editacl_rollback_apply(1754483000.1)`
 ```
 
-**Pourquoi préférer la seconde.** Elle porte l'invocation dans la macro, plafond
-compris : le défaut valant dix, une restauration saisie à la main s'interromprait
-d'écrire dès le onzième objet. Le volume a déjà été décidé par l'opérateur au moment de
-l'aller, et le `sid` délimite le jeu.
+**Why prefer the second.** It carries the invocation inside the macro, ceiling included:
+the default being ten, a rollback typed by hand would stop writing at the eleventh
+object.
 
-`editacl_rollback(<sid>)` émet sept champs — `title`, `eai:acl.app`, `eai:acl.owner`,
-`eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` — soit
-exactement la nomenclature native que les défauts de la commande reprennent. **Aucun
-paramètre n'est donc à écrire**, `new_owner` compris : `eai:acl.owner` porte le
-propriétaire **antérieur**, et le défaut de `new_owner` l'applique. C'est ce que le
-modèle de paramètres rend exprimable et que la v1 ne pouvait pas faire — le propriétaire
-y était une adresse, jamais une valeur cible.
+`editacl_rollback(<sid>)` emits seven fields - `title`, `eai:acl.app`, `eai:acl.owner`,
+`eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` - exactly the
+native field names that the command's defaults pick up. **No parameter therefore has to
+be written**, `new_owner` included: `eai:acl.owner` carries the **previous** owner, and
+the default of `new_owner` applies it.
 
-Elle ne restaure que les objets dont une ligne `outcome` atteste que l'écriture a **bien
-abouti** : un objet dont le POST a échoué n'a pas été modifié et ne doit pas être
-« restauré » vers un état qu'il n'a jamais quitté.
+It only restores objects for which an `outcome` line attests that the write **did**
+succeed: an object whose POST failed was not modified and must not be "restored" to a
+state it never left.
 
-> **La plage temporelle de la recherche appelante doit couvrir l'exécution à
-> restaurer.** La macro interroge un index ; lancée sur les quinze dernières minutes,
-> elle ne verra pas une exécution de la veille et ne restaurera rien — sans erreur.
+> **The time range of the calling search must cover the run to be restored.** The macro
+> queries an index; run over the last fifteen minutes, it will not see yesterday's run
+> and will restore nothing - with no error.
 
-Le `sid` s'obtient par `| eval sid=$sid$`, par l'inspecteur de recherche, ou par le nom
-du fichier de journal de l'exécution (`editacl_journal_<sid>.log`).
+The `sid` comes from `| eval sid=$sid$`, from the search inspector, or from the name of
+the journal file of the run (`editacl_journal_<sid>.log`).
 
-**La restauration d'une permission vide fonctionne, et il faut savoir pourquoi.**
+### Limits of the rollback
 
-Le risque était réel dans son principe : depuis la refonte du contrat d'entrée, une
-colonne **absente préserve** l'attribut au lieu de le vider. Si la chaîne de
-journalisation perdait une permission vide en chemin, la restauration ne restaurerait
-rien tout en rapportant un succès.
+- It is **not transactional**.
+- It does not bring back an object deleted in the meantime.
+- It is only usable **after the journal has been indexed** - a latency of a few seconds
+  to a few tens of seconds depending on the load of the ingestion chain. The file on
+  disk remains the immediate fallback.
+- It relies on resolution through `eai:type`, since `id` is not journalled: **the
+  coverage of the mapping table directly conditions the ability to roll back.**
+- It does **not cover** an object refused with an `HTTP 500` on persistence, whose
+  observable state may nevertheless have changed - see below.
+- It is **not reversible for a derived object that was diverging** and that the cascade
+  aligned - see below.
 
-**Mesuré sur 9.4.6, elle ne la perd pas — et la mesure a été faite deux fois, par deux
-profils distincts.** Une permission sérialisée `""` dans le journal est **extraite** à
-l'indexation — champ présent, valeur chaîne vide, un témoin `isnull()` sur un champ
-inexistant établissant que l'instrument sait bien distinguer « absent » de « présent et
-vide » — **et elle survit à l'agrégation** : le `stats earliest(...) BY endpoint` de la
-macro, exécuté sans le `coalesce` et filtré sur un objet dont les deux permissions sont
-vides sur cent pour cent des lignes agrégées, émet bien les deux colonnes.
+### A derived object aligned by cascade cannot be restored
 
-La macro conserve néanmoins une matérialisation explicite des deux colonnes de
-permissions, **en défense en profondeur et non en correctif d'un défaut observé** :
+Writing an `eventtype` whose derived object was **diverging** aligns that derived object
+by cascade: the platform applies to it the value written on the carrier, with no POST
+from the command and therefore **with no journal line**. Restoring the carrier rewrites
+the prior value **of the carrier**, which is not the one the derived object carried.
+**The operation is not reversible for that object.**
 
-```
-| eval "eai:acl.perms.read"  = coalesce('eai:acl.perms.read',  ""),
-       "eai:acl.perms.write" = coalesce('eai:acl.perms.write', "")
-```
+On an **aligned** pair - carrier and derived object already carrying the same ACL, which
+is the nominal case - the round trip is correct. The guard is upstream: run the
+divergence audit search before a batch and treat what it reports.
 
-Elle coûte une ligne et protège d'un comportement que rien n'oblige une autre version de
-la plateforme à conserver — même prudence que la re-validation de la table de
-correspondance sur le socle cible. `eai:acl.sharing` et `eai:acl.owner` ne sont
-délibérément **pas** traités de même : leur valeur vide n'existe pas côté plateforme, un
-objet restaurable en porte toujours une, et matérialiser une colonne vide n'y
-transformerait qu'une préservation correcte en rejet. Un test unitaire fige l'ensemble.
+### An `HTTP 500` on persistence does not mean "nothing changed"
 
-> **Ce que cet épisode enseigne.** Une version antérieure de ce document affirmait que la
-> colonne disparaissait et en tirait une démonstration élégante sur les comportements
-> « justes pour une mauvaise raison ». Cette affirmation n'avait jamais été mesurée. Une
-> exigence fondée sur une supposition reste une supposition, quelle que soit l'élégance
-> du raisonnement qu'on bâtit dessus.
-
-### Limites du retour arrière
-
-- Il **n'est pas transactionnel**.
-- Il ne rétablit pas un objet supprimé entre-temps.
-- Il n'est exploitable **qu'après indexation** du journal — latence de quelques
-  secondes à quelques dizaines de secondes selon la charge de la chaîne d'ingestion. Le
-  fichier sur disque reste la voie de secours immédiate.
-- Il s'appuie sur la résolution par `eai:type`, `id` n'étant pas journalisé : **la
-  couverture de la table conditionne directement la capacité de retour arrière.**
-- Il **ne couvre pas** un objet refusé en `HTTP 500` de persistance, dont l'état
-  observable a pourtant pu changer — voir ci-dessous. L'exclusion est correcte, la
-  remise en état passe par une autre voie.
-- Il **n'est pas réversible pour un objet dérivé qui était divergent** et que la
-  cascade a aligné — voir ci-dessous.
-
-### Un objet dérivé aligné par cascade n'est pas restaurable
-
-Écrire un `eventtype` dont l'objet dérivé était **divergent** aligne ce dérivé par
-cascade : la plateforme lui applique la valeur écrite sur le porteur, sans POST de la
-commande et donc **sans ligne de journal**. Restaurer le porteur lui réécrit la valeur
-antérieure **du porteur**, qui n'est pas celle que le dérivé portait. **L'opération
-n'est pas réversible pour cet objet.**
-
-Le comportement est voulu — c'est l'« effet favorable » décrit à
-[Objets dérivés — l'écriture s'abstient](#objets-dérivés--lécriture-sabstient), qui
-fait converger le parc vers l'état cohérent. Il n'en constitue pas moins une limite du
-retour arrière, et c'est à ce titre qu'il figure ici.
-
-**Ce à quoi la limite ne s'applique pas.** Sur un couple **aligné** — porteur et dérivé
-portant déjà la même ACL, qui est le cas nominal — l'aller-retour est correct : la
-cascade réécrit au dérivé la valeur du porteur à l'aller, la restauration du porteur la
-lui réécrit au retour, et le dérivé retrouve exactement son état antérieur.
-
-La parade est en amont, pas en aval : la
-[recherche d'audit des divergences](#recherches-livrées) énumère les couples divergents.
-La passer **avant** un lot d'écriture, et traiter les divergences relevées, ramène le
-parc au cas nominal — donc au cas où la restauration est fidèle.
-
-### Un `HTTP 500` de persistance ne veut pas dire « rien n'a changé »
-
-Il veut dire « rien n'a été **persisté** ». Mesuré : lorsque splunkd refuse le POST par
+It means "nothing was **persisted**". When splunkd refuses the POST with
 
 ```
-In handler '<famille>': Could not flush changes to disk: ... metadata/local.meta
+In handler '<family>': Could not flush changes to disk: ... metadata/local.meta
 ```
 
-le fichier `local.meta` est **intact** — empreinte inchangée — mais la **vue runtime**
-de splunkd a déjà été mutée. C'est cette vue que servent les GET, que voient les
-utilisateurs et les recherches, et sur laquelle portent les contrôles d'accès, jusqu'au
-prochain rechargement de configuration ou redémarrage du membre.
+the `local.meta` file is **intact** - but the **runtime view** of splunkd has already
+been mutated. That runtime view is what the GETs serve, what users and searches see, and
+what access control is enforced on, until the next configuration reload or member
+restart.
 
-La commande ne peut pas empêcher cette divergence : elle est produite par la
-plateforme. Elle la **signale** :
+The command cannot prevent that divergence: it is produced by the platform. It signals
+it - `acl_status = "error"`, `acl_http_code = 500`, the splunkd message carried whole in
+`acl_error`, `acl_warning = "runtime_divergence_possible"`, plus one `MSG[WARN]` per run.
 
-- l'événement ressort en `acl_status = "error"`, `acl_http_code = 500`, le message
-  d'erreur de splunkd étant remonté intégralement dans `acl_error` — il nomme la cause
-  racine (permissions, disque plein, système de fichiers en lecture seule) ;
-- il porte `acl_warning = "runtime_divergence_possible"` ;
-- la recherche émet, **une fois par exécution**, un `MSG[WARN]` explicite.
-
-**La remise en état ne passe pas par `editacl_rollback`.** La macro ne retient que les
-lignes `outcome` de statut `updated` : elle exclut donc l'objet, et c'est correct au
-regard du disque — restaurer un objet que le disque n'a jamais vu changer serait une
-écriture de trop. Le levier de résorption est un **rechargement de configuration** de
-la famille concernée, qui réaligne le runtime sur le disque, lequel fait foi :
+**Recovery does not go through `editacl_rollback`.** The macro only keeps `outcome`
+lines with status `updated`, so it excludes the object - which is correct with respect
+to the disk. The lever is a **configuration reload** of the family concerned, which
+realigns the runtime on the disk:
 
 ```
-POST /servicesNS/nobody/<app>/admin/<famille>/_reload
+POST /servicesNS/nobody/<app>/admin/<family>/_reload
 ```
 
-à défaut, un redémarrage du membre. Traiter la cause racine du refus d'écriture
-**avant** de rejouer le lot.
-
-> **Non tranché.** Sur un cluster de search heads, un état runtime muté mais non
-> persisté se réplique-t-il vers les autres membres ? La question n'a pas pu être
-> observée sur une instance autonome.
+failing that, a restart of the member. Treat the root cause of the write refusal
+**before** replaying the batch.
 
 ---
 
-## Inventaire des objets à traiter
+## Run monitoring view
 
-C'est le point sur lequel un opérateur se trompe silencieusement. Deux troncatures
-indépendantes se cumulent.
+`editacl - run monitor`, a Simple XML view shipped under
+`default/data/ui/views/editacl_runs.xml` and exported to the system so that it opens
+from any app context.
 
-### 1. Troncature par capability
+It answers two questions: **which runs took place**, and **how did the one you select
+go**. A run is identified by its `sid`.
 
-Sans `admin_all_objects`, l'inventaire ne remonte pas les objets privés d'autrui —
-ceux dont l'ACL porte `sharing = user` et un `owner` différent de l'opérateur.
-**Aucune erreur n'est émise.**
+**Prerequisites**, in this order:
 
-**Aucun chiffre de référence n'est donné ici, et c'est délibéré.** Contrairement à la
-troncature suivante, qui est une propriété **structurelle** de `admin/directory` et se
-mesure donc une fois pour toutes, celle-ci est une propriété de la **population**
-d'objets du socle : elle vaut zéro sur une instance sans objets privés et peut valoir
-l'essentiel du parc sur un search head à forte activité utilisateur. Un chiffre relevé
-sur une instance de référence ne s'y transposerait pas — il rassurerait à tort.
+1. The reader must hold the `editacl_auditor` role, or `admin_all_objects`. An account
+   holding neither gets a **`404`**, not a `403`.
+2. The reader must be **entitled to search the index the journal lands in**. That
+   entitlement is outside this app - see [Entitlements](#entitlements). Without it, the
+   view triggers its own guard rail: the *Entitlement check* panel says whether the
+   journal is readable, distinguishing "no run recorded" from "no searchable index".
+   **Read that panel before concluding anything from an empty view.**
+3. A view exported to the system does **not** appear in the menu of another app: a `nav`
+   entry is still needed there. That is a fact to know, not a defect to fix in the app.
 
-Elle se mesure sur le socle cible, depuis un compte qui **détient**
-`admin_all_objects` :
+Panels, in order: entitlement check, legacy-format lines excluded, runs started with no
+journal line, the run list, then - once a run is selected - its summary, the status
+breakdown observed against declared, the HTTP code breakdown, the breakdown by
+application and object type, the resolved objects with their before/after state, the
+events refused before endpoint resolution, and the errors.
+
+### What the view cannot show
+
+- **A run launched with `journal=false` produces no journal file** and therefore appears
+  in no panel built on it. It is not invisible for all that: the **diagnostic
+  sourcetype** keeps its trace, and the *Runs started with no journal line* panel
+  surfaces it from there. Do not read the run list as exhaustive.
+- **Objects filtered out upstream** of `editacl` never reached the command and appear
+  nowhere - neither as a candidate volume nor as a selection rate.
+- **`acl_warning` is not journalled.** The output warnings cannot be recovered after the
+  fact.
+- **The calling search is not in the journal.** It is in the platform audit index, out
+  of reach of the read role of this view.
+- **The direction of a batch** - outbound change or rollback - is not journalled: both
+  look like writes.
+- **The journal format is not versioned.** Lines written before a schema change coexist
+  in the retention window with later ones. The view detects the previous format and
+  **excludes** those lines from every other panel, saying so in a dedicated panel: they
+  carry no end-of-run line and would all be reported as interrupted, and their `error`
+  field holds the literal string `null` and would report them all as failed.
+
+---
+
+## Inventory of the objects to process
+
+This is where an operator gets it silently wrong. Two independent truncations add up.
+
+### 1. Truncation by capability
+
+Without `admin_all_objects`, the inventory does not return other people's private
+objects - those whose ACL carries `sharing = user` and an `owner` other than the
+operator. **No error is emitted.**
+
+**No reference figure is given here, and that is deliberate.** Unlike the next
+truncation, which is a **structural** property of `admin/directory` and therefore
+measured once and for all, this one is a property of the **population** of objects on
+your platform: it is zero on an instance with no private objects and can be most of the
+estate on a search head with heavy user activity. A figure taken from a reference
+instance would not carry over - it would reassure you wrongly.
+
+Measure it on the target platform, from an account that **holds**
+`admin_all_objects`:
 
 ```
 | `acl_inventory`
 | stats count AS total,
-        count(eval('eai:acl.sharing'=="user")) AS prives,
-        dc(eval(if('eai:acl.sharing'=="user", 'eai:acl.owner', null()))) AS proprietaires
-| eval part_invisible_pct = round(100 * prives / total, 1)
+        count(eval('eai:acl.sharing'=="user")) AS private,
+        dc(eval(if('eai:acl.sharing'=="user", 'eai:acl.owner', null()))) AS owners
+| eval invisible_share_pct = round(100 * private / total, 1)
 ```
 
-`prives` est le majorant de ce qu'un opérateur **sans** la capability ne verrait pas —
-majorant, puisque ses propres objets privés lui restent visibles. Un `prives` non nul
-signifie qu'il faut la capability, pas qu'il faut se contenter du reste.
+`private` is the upper bound of what an operator **without** the capability would not
+see - an upper bound, since their own private objects stay visible to them.
 
-### 2. Troncature structurelle de `admin/directory`
+### 2. Structural truncation of `admin/directory`
 
-`| rest /servicesNS/-/-/admin/directory` **ne remonte pas tous les objets de
-connaissance**, indépendamment des capabilities. Mesuré sur une instance Splunk
-Enterprise 9.4.6 standalone, opérateur en `admin_all_objects` :
+`| rest /servicesNS/-/-/admin/directory` **does not return all knowledge objects**,
+whatever the capabilities. Measured on a standalone Splunk Enterprise 9.4.6 instance,
+operator holding `admin_all_objects`:
 
-| Mesure | Valeur |
+| Measurement | Value |
 |---|---|
-| Objets vus par `admin/directory` | **894** |
-| Objets vus par l'union des endpoints natifs | **1 476** |
-| **Couverture** | **60,6 %** |
+| Objects seen by `admin/directory` | **894** |
+| Objects seen by the union of the native endpoints | **1 476** |
+| **Coverage** | **60.6 %** |
 
-Familles **totalement absentes** de `admin/directory` :
+Families **entirely absent** from `admin/directory`:
 
-| Famille | Objets non vus |
+| Family | Objects not seen |
 |---|---|
-| fichiers de lookup | **526** — la population la plus nombreuse de l'instance |
+| lookup files | **526** - the most numerous population of the instance |
 | `fields` | 29 |
-| champs calculés `EVAL-` | 12 |
-| actions d'alerte historiques | 6 |
-| modèles de données | 3 |
+| `EVAL-` calculated fields | 12 |
+| legacy alert actions | 6 |
+| data models | 3 |
 | `viewstates` | 2 |
 | `tags` | 2 |
 | `ntags` | 2 |
 
-La troncature est même **partielle à l'intérieur d'un endpoint** : les actions d'alerte
-modulaires figurent dans `admin/directory`, les six actions historiques non.
+The truncation is even **partial inside a single endpoint**: modular alert actions do
+appear in `admin/directory`, the six legacy actions do not.
 
-De plus, **100 %** des `id` émis par `admin/directory` sont auto-référents — ils
-pointent sur `.../admin/directory/<title>` et non sur l'objet. Avec cette source, la
-table de correspondance n'est pas un repli : c'est la voie **unique** de résolution.
+On top of that, the `id` values that endpoint emits under the field filter a canonical
+pipeline writes are self-referential - they point at `.../admin/directory/<title>` and
+not at the object. With that source, the mapping table is not a fallback: it is the
+**only** resolution path.
 
-Ces objets restent **adressables et leur `/acl` modifiable** : l'obstacle est
-l'inventaire, pas l'écriture.
+Those objects stay **addressable and their `/acl` modifiable**: the obstacle is the
+inventory, not the write.
 
-### La parade : la macro `acl_inventory`
+### The answer: the `acl_inventory` macro
 
-L'inventaire se bâtit sur les **endpoints natifs**. La macro `acl_inventory` les
-interroge famille par famille et normalise leur sortie sur le contrat d'entrée de la
-commande. Elle est **invocable en ligne**, dans n'importe quelle recherche :
+The inventory is built on the **native endpoints**. The `acl_inventory` macro queries
+them family by family and normalises their output onto the input contract of the
+command. It is **invocable inline**, in any search:
 
 ```
-| `acl_inventory`                                  <-- toutes les familles
-| `acl_inventory(savedsearch)`                     <-- une famille
-| `acl_inventory(savedsearch,views,eventtypes)`    <-- plusieurs familles
+| `acl_inventory`                                  <-- every family
+| `acl_inventory(savedsearch)`                     <-- one family
+| `acl_inventory(savedsearch,views,eventtypes)`    <-- several families
 ```
 
-Sa sortie porte **exactement** huit champs, dans cet ordre : `title`, `eai:acl.app`,
+Its output carries **exactly** eight fields, in this order: `title`, `eai:acl.app`,
 `eai:acl.owner`, `eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`,
-`eai:type`, `id`. Elle alimente `editacl` **sans transformation intermédiaire**.
+`eai:type`, `id`. It feeds `editacl` **with no intermediate transformation**.
 
 ```mermaid
 flowchart LR
-  ARG["acl_inventory<br/>ou acl_inventory(f1,...,fN)"] --> LK
-  LK[["lookup acl_object_families<br/>famille -> handler natif"]] --> SEL
-  SEL{"selection<br/>des familles"} -->|"famille demandee"| MAP["un | rest par handler natif"]
-  SEL -.->|"famille non demandee :<br/>AUCUN appel REST"| SKIP(["ignoree"])
-  MAP --> SYN["synthese de eai:type<br/>si l'endpoint n'en emet pas"]
-  SYN --> NORM["normalisation<br/>8 champs, contrat du §3"]
+  ARG["acl_inventory<br/>or acl_inventory(f1,...,fN)"] --> LK
+  LK[["lookup acl_object_families<br/>family -> native handler"]] --> SEL
+  SEL{"family<br/>selection"} -->|"family requested"| MAP["one | rest per native handler"]
+  SEL -.->|"family not requested:<br/>NO REST call"| SKIP(["ignored"])
+  MAP --> SYN["eai:type synthesised<br/>from the family"]
+  SYN --> NORM["normalisation<br/>8 fields, input contract"]
   NORM --> CMD["| editacl ..."]
-  NORM --> RS["recherches livrees"]
+  NORM --> RS["shipped searches"]
 ```
 
-**Trois points de conception.**
+Three things to know:
 
-1. **La sélection précède les appels REST.** Une famille non demandée ne coûte rien. Un
-   opérateur qui ne traite que des recherches sauvegardées ne paie pas l'énumération
-   des fichiers de lookup, qui sont souvent la population la plus nombreuse.
-2. **`eai:type` est synthétisé quand l'endpoint natif n'en émet pas** — ce qui est le
-   cas de la grande majorité d'entre eux. La valeur retenue est la clé de la table de
-   correspondance associée à la famille interrogée ; la valeur nativement émise, quand
-   il y en a une, est préservée telle quelle. **Sans cette synthèse, l'aller
-   fonctionnerait mais le retour arrière serait impossible** : `editacl_rollback`
-   résout par `eai:type`, `id` n'étant pas journalisé.
-3. **Les noms de famille sont les clés de la table**, portés par le lookup
-   `acl_object_families` (colonne `family`). Une famille par handler natif : deux clés
-   de la table qui visent le même handler ne donnent qu'une seule famille, sans quoi
-   l'inventaire énumérerait deux fois le même endpoint.
+1. **Selection happens before the REST calls.** A family that is not requested costs
+   nothing. An operator who only handles saved searches does not pay for the enumeration
+   of the lookup files, which are often the most numerous population.
+2. **`eai:type` is synthesised**, since most native endpoints do not emit one. The value
+   used is the mapping table key of the family being queried. **Without that synthesis
+   the outbound pass would work but rollback would be impossible**, since
+   `editacl_rollback` resolves through `eai:type`.
+3. **Family names are the mapping table keys**, carried by the `acl_object_families`
+   lookup (column `family`).
 
-**Coût.** L'inventaire complet émet un appel REST par famille. C'est l'ordre de
-grandeur de la trentaine d'appels, pas de l'appel unique — c'est le prix de la
-couverture intégrale. Sur un search head chargé, préférer la forme paramétrée en usage
-interactif, et la planification sur les gros périmètres.
+**Cost.** A complete inventory sends one REST call per family - on the order of thirty
+calls, not one. That is the price of full coverage. On a loaded search head, prefer the
+parameterised form for interactive use, and scheduling on large scopes.
 
-`| rest … /admin/directory` reste utilisable comme **voie rapide**, à la condition
-expresse d'assumer les chiffres ci-dessus : ce n'est pas un inventaire, c'est un
-sous-ensemble.
+`| rest ... /admin/directory` remains usable as a **fast path**, on the express
+condition of accepting the figures above: it is not an inventory, it is a subset.
 
 ---
 
-## Recherches livrées
+## Shipped searches
 
-Quatre recherches sauvegardées, **bâties sur la macro d'inventaire** et non sur
-`admin/directory`. Aucune n'est planifiée : l'inventaire est une macro invocable en
-ligne, la planification est un usage recommandé sur les gros périmètres, jamais la
-modalité d'accès. Pour en planifier une, activer `enableSched` dans
-`local/savedsearches.conf`.
+Four saved searches, **built on the inventory macro** and not on `admin/directory`. None
+of them is scheduled: the inventory is a macro invocable inline, and scheduling is a
+recommended usage on large scopes, never the access modality. To schedule one, turn
+`enableSched` on in `local/savedsearches.conf`.
 
-| Recherche | Ce qu'elle produit |
+| Search | What it produces |
 |---|---|
-| `ACL — inventaire par rôle` | Ventilation lecture/écriture par rôle, application et type d'objet. Point de départ d'un audit d'habilitation. |
-| `ACL — références aux rôles décommissionnés` | Objets dont l'ACL référence encore un rôle listé par le lookup `acl_decommissioned_roles`. Sa sortie porte le contrat d'entrée de `editacl` et **alimente directement le pipeline de modification**. |
-| `ACL — divergences eventtype / objets dérivés` | Couples porteur/dérivé dont l'ACL diverge, et **rôles suivis qu'un dérivé référence sans que son porteur les référence**. C'est exactement le périmètre que `editacl` n'atteint jamais : voir [Objets dérivés](#objets-dérivés--lécriture-sabstient). À lancer **avant** une campagne de décommissionnement. |
-| `ACL — journal des modifications` | Historique indexé par `sid`, statut, application et type. La colonne `restauration` porte la commande de retour arrière de l'exécution concernée. |
+| `ACL - inventory by role` | Read/write breakdown by role, application and object type. Starting point for an entitlement audit. |
+| `ACL - references to decommissioned roles` | Objects whose ACL still references a role listed by the `acl_decommissioned_roles` lookup. Its output carries the input contract of `editacl` and **feeds the modification pipeline directly**. |
+| `ACL - eventtype / derived object divergences` | Carrier/derived pairs whose ACL diverges, and **tracked roles that a derived object references without its carrier referencing them**. That is exactly the scope `editacl` never reaches. Run it **before** a decommissioning campaign. |
+| `ACL - change journal` | Indexed history by `sid`, status, application and type. The `rollback` column carries the rollback command for the run concerned. |
 
-Le lookup `acl_decommissioned_roles` livré ne contient que des **identifiants
-génériques d'exemple** (`ancien_role`, `role_a`, `role_b`). Le remplacer par la liste
-réelle — de préférence dans `lookups/` de l'app locale, qu'une mise à jour de l'app ne
-peut pas écraser.
+> **These four searches were renamed when the repository moved to English.** An app
+> upgrade does not migrate a renamed object: it creates a new one, and the old one stays
+> behind with whatever ACL and scheduling it had. If you are upgrading from a version
+> that shipped the French names, check `local/savedsearches.conf` and the saved search
+> list after the upgrade, and remove the stale entries yourself.
 
-### Limite de la recherche de divergences : l'appariement est cadré par application
+The shipped `acl_decommissioned_roles` lookup only holds **generic example identifiers**
+(`legacy_role`, `role_a`, `role_b`). Replace it with the real list - preferably in
+`lookups/` of the local app, which an app upgrade cannot overwrite.
 
-Le rapprochement porteur/dérivé s'appuie sur un `stats … BY "eai:acl.app",
-acl_carrier` : **deux objets ne sont appariés que s'ils sont rattachés à la même
-application.** Un `eventtype` partagé en `global` depuis une autre application que celle
-où réside son objet dérivé ne serait donc pas apparié, et la divergence correspondante
-ne serait pas remontée.
-
-Ce cas n'a **pas été observé** sur le socle de référence. Avant de tenir le décompte
-pour exhaustif sur le socle cible, le vérifier — par exemple en comparant le nombre de
-couples appariés au nombre de dérivés inventoriés :
+**Limit of the divergence search: pairing is scoped by application.** Two objects are
+only paired when they are attached to the same application. An `eventtype` shared
+globally from an application other than the one its derived object lives in would not be
+paired, and the matching divergence would not be reported. That case was not observed on
+the reference platform; check it on yours before treating the count as exhaustive:
 
 ```
 | `acl_inventory(eventtypes,fvtags)`
 | rex field=title "^(?<acl_pair_field>[^=]+)=(?<acl_pair_value>.*)$"
 | where 'eai:type'=="fvtags" AND acl_pair_field=="eventtype"
-| stats dc(title) AS derives_inventories
+| stats dc(title) AS inventoried_derived_objects
 ```
 
-Un écart avec le nombre de couples que la recherche de divergences apparie signale des
-dérivés dont le porteur réside dans une autre application.
+A gap with the number of pairs the divergence search reports signals derived objects
+whose carrier lives in another application.
 
 ---
 
-## Table de correspondance et re-validation sur socle cible
+## Mapping table and re-validation on the target platform
 
 `bin/acl_endpoint_map.json`, structure `{ "<eai:type>": "<handler_path>" }`.
 
-État de la table livrée, établie sur Splunk Enterprise 9.4.6 : **28 entrées, 28
-validées par un GET réel sur un objet témoin, aucun type non résolu**. Quatre entrées
-portent une réserve explicite — `tags`, `lookup-table-file`, `times` et `models` : leur
-handler est prouvé par GET, mais la clé n'a jamais été observée comme valeur d'`eai:type`
-en 9.4.6. Elles sont conservées par prudence de version.
+State of the shipped table, established on Splunk Enterprise 9.4.6: **28 entries, 28
+validated by a real GET on a witness object, no unresolved type**. Four entries carry an
+explicit reservation - `tags`, `lookup-table-file`, `times` and `models`: their handler
+is proven by GET, but the key was never observed as an `eai:type` value on 9.4.6. They
+are kept out of version caution.
 
-### Extension par l'exploitant, sans modification du code
+### Extension by the operator, with no code change
 
-Créer `lookups/acl_endpoint_map_override.csv` (colonnes `eai_type`, `handler_path`) à
-partir du modèle `acl_endpoint_map_override.csv.example`. Il est chargé **après** le
-JSON et le surcharge.
+Create `lookups/acl_endpoint_map_override.csv` (columns `eai_type`, `handler_path`) from
+the `acl_endpoint_map_override.csv.example` template. It is loaded **after** the JSON
+and overrides it.
 
-**L'archive ne contient jamais le fichier réel** : une mise à jour de l'app ne peut donc
-pas l'écraser, puisqu'elle ne le contient pas. Le conserver néanmoins hors de l'app
-comme ceinture.
+**The archive never contains the real file**: an app upgrade therefore cannot overwrite
+it, since it does not contain it. Keep a copy outside the app all the same, as a belt.
 
-Un `handler_path` non conforme au motif attendu est **écarté** avec une trace de
-diagnostic, jamais utilisé : le fichier est éditable, il constitue une entrée non
-fiable, et un chemin forgé pourrait viser un endpoint arbitraire.
+A `handler_path` that does not match the expected pattern is **discarded** with a
+diagnostic trace, never used: the file is editable, it is therefore untrusted input, and
+a forged path could aim at an arbitrary endpoint.
 
-### Re-validation — prérequis à tout usage réel
+### Re-validation - a prerequisite to any real use
 
-**La table n'est pas présumée valable sur une autre version que 9.4.6.** Comme la table
-est la voie de résolution unique dès que l'inventaire provient de `admin/directory`, une
-nomenclature qui a changé se traduit par des rejets — ou pire, par un endpoint valide
-mais faux.
+**The table is not presumed valid on any version other than 9.4.6.** Since the table is
+the only resolution path as soon as the inventory comes from `admin/directory`, a naming
+scheme that changed shows up as rejections - or worse, as a valid but wrong endpoint.
 
-La procédure de re-validation doit, sur le socle cible :
-
-1. énumérer les `eai:type` distincts effectivement présents ;
-2. les confronter à la table livrée ;
-3. produire trois listes — correspondances confirmées par un GET réel, correspondances
-   de la table introuvables sur le socle, types présents sur le socle et absents de la
-   table.
-
-La troisième liste se traite par le fichier d'override, sans modification du code.
-
-La procédure est livrée sous `tools/revalidate_mapping.py`. Elle s'exécute sur le socle
-cible, contre l'API REST de l'instance :
+The procedure ships as `tools/revalidate_mapping.py`. It runs on the target platform,
+against the REST API of the instance:
 
 ```sh
-<commande fournissant le mot de passe> | python3 tools/revalidate_mapping.py \
+<command supplying the password> | python3 tools/revalidate_mapping.py \
     [--user admin] [--splunkd-uri https://127.0.0.1:8089] [--insecure]
 ```
 
-Le mot de passe est lu sur la **première ligne de l'entrée standard** : jamais en
-argument de ligne de commande, jamais écrit sur disque, jamais imprimé. Code de retour
-`1` si la liste C n'est pas vide.
+The password is read from the **first line of standard input**: never as a command line
+argument, never written to disk, never printed. Return code `1` if the list of types
+present on the platform and absent from the table is not empty; treat that list through
+the override file, with no code change.
 
-`tools/` ne fait pas partie de l'archive déployable. Le script résout ses chemins
-relativement à son répertoire parent : pour l'exécuter sur le socle, le déposer dans
-`$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/` — il y trouve alors `bin/acltools`,
-`bin/acl_endpoint_map.json`, l'override éventuel et `lookups/acl_object_families.csv`
-de l'app **réellement installée**, ce qui est le seul état qui compte.
+`tools/` is not part of the deployable archive. The script resolves its paths relative to
+its parent directory: to run it on the platform, drop it into
+`$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/`, where it will find `bin/acltools`,
+`bin/acl_endpoint_map.json`, the override if any, and `lookups/acl_object_families.csv`
+of the app **as actually installed**, which is the only state that counts.
 
-Elle produit une **quatrième** section, non exigée mais nécessaire : le contrôle de
-cohérence entre `bin/acl_endpoint_map.json`, que lit le code Python, et
-`lookups/acl_object_families.csv`, que lit la macro d'inventaire — SPL ne sachant pas
-lire de JSON, la même information existe sous deux formes, et une divergence rendrait
-l'inventaire et la résolution incohérents.
-
-> **Pourquoi un script et non une recherche SPL.** La construction de l'URI d'un objet
-> obéit à une règle d'encodage unique et non évidente, implémentée une seule fois dans
-> `acltools/endpoint.py`. La réécrire en SPL créerait une seconde implémentation qui
-> divergerait — le défaut exact que la règle du point d'injection unique interdit. Le
-> script **réutilise** `Mapping.coverage()` et `build_object_path()` ; il ne
-> réimplémente rien.
+It also produces a consistency check between `bin/acl_endpoint_map.json`, read by the
+Python code, and `lookups/acl_object_families.csv`, read by the inventory macro - SPL
+cannot read JSON, so the same information exists in two forms, and a divergence would
+make the inventory and the resolution inconsistent.
 
 ---
 
 ## Tests
 
-Suite unitaire **exécutable hors Splunk, sans instance et sans réseau**. Aucune
-dépendance de développement : `unittest` de la bibliothèque standard suffit.
+Unit suite **runnable outside Splunk, with no instance and no network**. No development
+dependency: `unittest` from the standard library is enough.
 
 ```sh
 python -m unittest discover -s tests -t . -v
 ```
 
-Elle couvre notamment :
+The suite is not shipped in the archive. What it covers, and why it is built the way it
+is, is described in [`docs/DESIGN.md`](docs/DESIGN.md).
 
-- **les douze lignes de la matrice de présence** — quatre attributs cibles × trois
-  états de la colonne — une par test nommé, sans regroupement ni test paramétré ;
-- la **discrimination par présence de la clé et non par type** : un multivalué réduit à
-  une valeur, arrivant en chaîne, est traité comme une valeur et non comme une absence ;
-- l'**adressage sans propriétaire** : l'URI construite porte toujours le contexte fixe,
-  et la signature de `build_object_path` n'expose aucun paramètre de propriétaire ;
-- le **plafond non fatal** : sortie complète, `skipped_ceiling` sur les objets écartés,
-  compteur d'écartés tenu, aucun déclenchement en simulation, reprise sans double
-  écriture ;
-- la normalisation des listes de rôles, y compris le cas `[""]` ;
-- la reconstruction d'URI sur les quatre classes de caractères ;
-- l'ordre normatif des contrôles préalables à l'écriture, rangs −1 à 8 ;
-- `validate_roles` sur rôle ajouté contre rôle conservé ;
-- les trois invariants du journal, et le contrat de champs de la macro de restauration ;
-- l'**étanchéité des couches** : aucun module du noyau n'importe le réseau hors du
-  client REST, et aucun ne mentionne le SDK ;
-- l'**énumération des `acl_status`**, dérivée du code et non recopiée — y compris la
-  liste qui figure plus haut dans ce README, le nombre qu'il annonce et sa machine à
-  états, tous trois comparés à `ACL_STATUSES`.
+### Integration environment
 
-Ce dernier point mérite sa précision, parce qu'une garantie mal bornée coûte plus qu'elle
-ne rapporte. `tests/test_statuses.py` lit l'arbre syntaxique du noyau et range **toute**
-construction touchant un statut dans l'une de trois catégories : forme canonique (le
-statut est un littéral, il est collecté), propagation reconnue (la valeur est un statut né
-ailleurs), ou **opaque**. Une construction opaque **fait échouer la suite** en nommant le
-module, la ligne et le fragment de source — elle n'est jamais ignorée. C'est ce qui
-distingue ce contrôle de sa première version, qui reconnaissait deux formes d'écriture et
-laissait passer les autres en silence.
-
-Sa portée s'arrête où s'arrête la lecture d'une source : le contrôle ne voit ni les
-modules hors de la liste qu'il balaie, ni un statut fabriqué à l'exécution (`exec`,
-décorateur réécrivant un attribut), ni la valeur réelle derrière une propagation
-`<expr>.status`, dont il ne remonte pas l'origine. Les dérogations sont déclarées une à
-une, justifiées, et une dérogation devenue sans objet fait elle aussi échouer la suite.
-
-L'avant-dernier point n'est pas décoratif non plus : sans lui, la règle d'import n'est
-qu'une intention en commentaire, et il suffit d'un import ajouté à la va-vite pour que la
-matrice de fusion cesse d'être éprouvable sur une machine sans instance.
-
-### Environnement d'intégration
-
-Les tests d'intégration exigent une instance et une app jetable portant un objet de
-chaque grande famille, dans les trois portées de partage, avec et sans permissions
-explicites. Son amorçage est scripté, en deux volets — le second n'existe que parce que
-les objets **privés** (`sharing=user`, namespace utilisateur) et les objets à **nom
-spécial** (barre oblique, espace, accent, pourcent) ne se déclarent pas proprement en
-fichier de configuration :
+The integration tests need an instance and a throwaway app carrying one object of each
+major family, in all three sharing scopes, with and without explicit permissions. Its
+bootstrap is scripted, in two parts - the second exists only because **private** objects
+(`sharing=user`, user namespace) and objects with **special names** (slash, space,
+accent, percent) cannot be declared properly in a configuration file:
 
 ```sh
-bash tools/acl_probe_bootstrap.sh                    # objets declares en .conf
-# puis, apres redemarrage de splunkd :
-<mot de passe> | python3 tools/acl_probe_bootstrap_rest.py   # objets prives + noms speciaux
+bash tools/acl_probe_bootstrap.sh                    # objects declared in .conf
+# then, after restarting splunkd:
+<password> | python3 tools/acl_probe_bootstrap_rest.py   # private objects, special names
 ```
 
-Les deux scripts sont **idempotents** (écriture par gabarit, jamais d'ajout ; un objet
-déjà présent ressort en HTTP 409, traité comme un succès) et acceptent `--remove`. Le
-mot de passe est lu sur la première ligne de l'entrée standard. Les identifiants créés
-sont volontairement génériques.
-
-### Découpage
-
-| Couche | Contenu | Import autorisé |
-|---|---|---|
-| Noyau pur | normalisation, fusion, résolution d'endpoint, table, sérialisation du journal, machine à états | bibliothèque standard, **hors réseau** |
-| Adaptateurs | client REST (`acltools/rest.py`), écrivain de journal | bibliothèque standard, réseau autorisé **dans `rest.py` seulement** |
-| Enveloppe | `bin/editacl.py` | le SDK — surface volontairement minimale, **aucune règle métier** |
+Both scripts are **idempotent** (template writing, never appending; an object already
+present comes back as HTTP 409, treated as a success) and accept `--remove`. The
+password is read from the first line of standard input. The identifiers created are
+deliberately generic.
 
 ---
 
-## Dépendances vendorisées
+## Vendored dependencies
 
-`bin/lib/` contient **une seule** dépendance : le SDK Python de Splunk, en version
-figée au patch, installée à empreintes vérifiées. Le noyau `bin/acltools/` n'a **aucune**
-dépendance tierce — les appels REST sont écrits en HTTP brut sur `urllib` + `ssl`.
+`bin/lib/` holds **one** dependency: the Splunk Python SDK, pinned to a patch version,
+installed with verified hashes. The `bin/acltools/` core has **no** third-party
+dependency - the REST calls are written in raw HTTP on `urllib` + `ssl`.
 
-Le répertoire est **généré et versionné** : l'archive doit être déployable sans réseau.
-Sa reconstruction et sa vérification sont scriptées.
+The directory is **generated and versioned**: the archive must be deployable with no
+network. Its rebuild and its verification are scripted.
 
 ```sh
-sh tools/vendor.sh        /chemin/vers/python3   # reconstruit bin/lib/
-sh tools/verify_vendor.sh /chemin/vers/python3   # verifie le manifeste d'empreintes
+sh tools/vendor.sh        /path/to/python3   # rebuilds bin/lib/
+sh tools/verify_vendor.sh /path/to/python3   # checks the hash manifest
 ```
 
-Toute montée de version passe par `tools/requirements-vendor.txt` puis la réexécution
-des deux scripts — **jamais** par une édition directe dans `bin/lib/`, que
-`verify_vendor.sh` détecterait. Détail : [`bin/lib/VENDOR.md`](bin/lib/VENDOR.md).
+Any version bump goes through `tools/requirements-vendor.txt` then a re-run of both
+scripts - **never** through a direct edit inside `bin/lib/`, which `verify_vendor.sh`
+would detect. Detail: [`bin/lib/VENDOR.md`](bin/lib/VENDOR.md).
 
-Le manifeste décrit **ce que `tools/vendor.sh` installe**, pas le contenu brut du
-répertoire : les artefacts de compilation de l'interpréteur (`__pycache__/`, `*.pyc`,
-`*.pyo`) sont exclus du parcours, à l'écriture comme à la vérification. Ils
-apparaissent dès le premier import du SDK — c'est-à-dire dès la première exécution de
-la commande sur une app déployée — et les compter comme une divergence rendrait le
-contrôle inexploitable là où il sert. Une modification réelle d'un fichier vendorisé,
-son ajout ou sa disparition restent détectés.
+The manifest describes **what `tools/vendor.sh` installs**, not the raw content of the
+directory: the interpreter's compilation artefacts (`__pycache__/`, `*.pyc`, `*.pyo`)
+are excluded from the walk, on writing as on verification. They appear on the first
+import of the SDK - that is, on the first run of the command on a deployed app. A real
+modification of a vendored file, an addition or a disappearance are still detected.
 
 ---
 
-## Limites connues
+## Known limits
 
-| Limite | Conséquence | Parade |
+| Limit | Consequence | Guard |
 |---|---|---|
-| **Table établie sur 9.4.6** | Une nomenclature différente sur un autre socle produit des rejets, voire un endpoint valide mais faux | Re-validation sur le socle cible, **prérequis à tout usage réel** ; fichier d'override |
-| **Double troncature d'inventaire** | L'opérateur traite un sous-ensemble sans le moindre message | `admin_all_objects` + inventaire par endpoints natifs |
-| **Aucune atomicité de lot** | Un arrêt en cours laisse un état partiel | Le journal caractérise intégralement l'état partiel |
-| **Sortie de recherche perdue sur erreur fatale** | Sur une erreur fatale — capability, paramètre, temps réel, journal — `resultCount = 0` : les événements déjà émis disparaissent. Non modifiable depuis une commande de recherche. **L'atteinte de `max_objects` n'en fait plus partie** : elle produit `skipped_ceiling` et la sortie reste complète | Le journal reste complet et reste la voie de reprise et d'annulation ; `editacl.log` date l'interruption. Le job est marqué `isFailed = true`, ce qu'un ordonnanceur détecte |
-| **Aucune reprise sur le POST** | Un échec de transport après émission laisse une `intent` sans `outcome` | Contrôle croisé avec `splunkd_access.log` pour déterminer si l'écriture a eu lieu. Une reprise ne distinguerait pas « le POST n'est pas parti » de « le POST a abouti et la réponse s'est perdue » |
-| **`HTTP 5xx` de persistance : vue runtime divergente** | Le POST est refusé, le disque est intact, mais la vue runtime de splunkd est mutée — et c'est elle qui fait autorité pour les utilisateurs, les recherches et les contrôles d'accès. L'objet est exclu du jeu de restauration | `acl_warning = "runtime_divergence_possible"` sur **toute** la classe `5xx` + `MSG[WARN]` par exécution. Résorption par rechargement de configuration (`admin/<famille>/_reload`) ou redémarrage du membre, **pas** par `editacl_rollback`. Traiter la cause racine du refus d'écriture avant de rejouer |
-| **`admin/ntags` refuse toute écriture d'ACL** | Mesuré : `HTTP 500`, « ACL modification not supported by this handler ». Les objets de cette famille ressortent systématiquement en `acl_status = "error"`, avec `runtime_divergence_possible` puisque le code est un `5xx` | **Aucun contournement** : c'est une limite du handler, pas de la commande. Exclure la famille du lot — `acl_inventory(...)` sans `ntags`, ou `\| search 'eai:type'!="ntags"`. Les tags restent adressables par les familles `tags` et `fvtags` |
-| **Un lot vert en seconde passe ne prouve pas que sa restauration est juste** | Le contrôle d'idempotence ne couvre **qu'un des deux modes de défaillance connus** | Voir [Portée réelle du contrôle d'idempotence](#portée-réelle-de-ce-contrôle) — la vérification d'un retour arrière passe par un rejeu de `editacl_rollback` et une comparaison champ à champ, jamais par un taux de `noop` |
-| **Angle mort sur les objets dérivés** | Un dérivé divergent dont le porteur n'entre dans aucun lot n'est atteint par aucune cascade : s'il référence un rôle décommissionné que son porteur ne référence pas, cette référence **survit** | La recherche livrée *ACL — divergences eventtype / objets dérivés* en mesure le volume. Le traitement est **en amont, côté deployer** — voir [Objets dérivés](#objets-dérivés--lécriture-sabstient) |
-| **Réplication en cluster de search heads** | Chaque écriture déclenche une réplication d'objet de connaissance | Lots bornés par `max_objects`, déroulement hors fenêtre de forte activité. La commande sérialise ses appels et n'implémente **aucune** temporisation automatique |
-| **Restauration postérieure à l'indexation** | Le journal n'est interrogeable qu'après ingestion | Le fichier de l'exécution est auto-contenu et exploitable immédiatement |
-| **`app_disabled` coûte un appel REST par app distincte** | Latence marginale sur un lot multi-apps | Mémoïsé par app |
-| **Reprise de propriété : deux conditions de plateforme** | `admin_all_objects` est requis — un compte porteur du seul droit sur ses propres objets reçoit un refus **même sur son propre objet** — et le propriétaire cible doit exister, faute de quoi la plateforme refuse sans muter | Vérifier les deux avant une campagne portant `new_owner`. Le refus est visible : `acl_status = "error"` avec le code de la plateforme |
-| **Déplacement d'application et renommage hors périmètre** | Le premier existe mais un paramètre mal choisi rend l'objet **inatteignable en écriture**, suppression comprise ; le second n'existe pas — vingt-sept handlers, dix-huit actions, aucune de renommage | Hors périmètre assumé. Le déplacement mérite son propre outil, avec son propre filet |
-| **Un pipeline hétérogène peut vider un attribut** | La présence est une propriété du **jeu de résultats**, pas de l'événement : valoriser un champ sur une partie des lignes seulement vide l'attribut sur les autres | Bâtir le pipeline sur `acl_inventory`, qui porte la valeur courante sur chaque ligne ; simuler et lire `acl_before_*` / `acl_after_*` avant d'écrire. Voir [Ce que la présence de la colonne implique](#ce-que-la-présence-de-la-colonne-implique-pour-votre-pipeline) |
-| **Coût de l'inventaire complet** | Un appel REST par famille, une trentaine au total | Forme paramétrée en usage interactif ; planification sur les gros périmètres |
-| **Familles d'inventaire figées par un lookup** | Une famille absente de `acl_object_families` n'est pas inventoriée | `tools/revalidate_mapping.py` compare le lookup à la table et signale toute divergence |
+| **Table established on 9.4.6** | A different naming scheme on another platform produces rejections, or a valid but wrong endpoint | Re-validation on the target platform, **a prerequisite to any real use**; override file |
+| **Double inventory truncation** | The operator processes a subset with no message whatsoever | `admin_all_objects` + inventory through the native endpoints |
+| **No batch atomicity** | A stop mid-batch leaves a partial state | The journal fully characterises the partial state |
+| **Search output lost on a fatal error** | `resultCount = 0`: events already emitted disappear. Not fixable from a search command. **Reaching `max_objects` is no longer part of this** | The journal stays complete and remains the way to resume and to undo; `editacl.log` timestamps the interruption. The job is marked `isFailed = true`, which a scheduler detects |
+| **No retry on the POST** | A transport failure after sending leaves an `intent` with no `outcome` | Cross-check with `splunkd_access.log`. A retry could not tell "the POST never left" from "the POST succeeded and the response was lost" |
+| **`HTTP 5xx` on persistence: diverging runtime view** | The POST is refused, the disk is intact, but the runtime view of splunkd is mutated - and it is the runtime view that is authoritative for users, searches and access control. The object is excluded from the rollback set | `acl_warning = "runtime_divergence_possible"` on the **whole** `5xx` class + one `MSG[WARN]` per run. Recovery through a configuration reload (`admin/<family>/_reload`) or a member restart, **not** through `editacl_rollback` |
+| **`admin/ntags` refuses every ACL write** | Measured: `HTTP 500`, "ACL modification not supported by this handler". Objects of that family systematically come out `acl_status = "error"`, with `runtime_divergence_possible` since the code is a `5xx` | **No workaround**: that is a limit of the handler, not of the command. Exclude the family from the batch - `acl_inventory(...)` without `ntags`, or `\| search 'eai:type'!="ntags"`. Tags stay addressable through the `tags` and `fvtags` families |
+| **A green second pass does not prove the rollback set is right** | The idempotence check only covers **one of the two known failure modes** | Verifying a rollback means replaying `editacl_rollback` and comparing field by field, never observing a `noop` rate |
+| **Blind spot on derived objects** | A diverging derived object whose carrier enters no batch is reached by no cascade: if it references a decommissioned role that its carrier does not, that reference **survives** | The shipped divergence search measures the volume. The treatment is **upstream, on the deployer side** |
+| **Search head cluster replication** | Every write triggers a knowledge object replication | Batches bounded by `max_objects`, run outside peak hours. The command serialises its calls and implements **no** automatic throttling |
+| **Restore only after indexing** | The journal is only queryable after ingestion | The file of the run is self-contained and usable immediately |
+| **Redirecting the journal index takes two overrides** | Overriding only `inputs.conf` leaves every shipped search returning an empty result **without saying so** | Override `local/inputs.conf` **and** `local/macros.conf` |
+| **Dashboard requires an index entitlement** | Without read access to the journal index the view shows nothing | The *Entitlement check* panel distinguishes "no run" from "no access". Granting the access is outside this app |
+| **`app_disabled` costs one REST call per distinct app** | Marginal latency on a multi-app batch | Memoised per app |
+| **Taking ownership: two platform conditions** | `admin_all_objects` is required - an account carrying only the right over its own objects is refused **even on its own object** - and the target owner must exist, failing which the platform refuses without mutating | Check both before a campaign carrying `new_owner`. The refusal is visible: `acl_status = "error"` with the platform code |
+| **Moving between applications and renaming are out of scope** | The first exists but a badly chosen parameter makes the object **unreachable for writing**, deletion included; the second does not exist at all | Out of scope, knowingly. Moving deserves its own tool, with its own safety net |
+| **A heterogeneous pipeline can empty an attribute** | Presence is a property of the **result set**, not of the event | Build the pipeline on `acl_inventory`; simulate and read `acl_before_*` / `acl_after_*` before writing |
+| **Cost of the complete inventory** | One REST call per family, around thirty in total | Parameterised form for interactive use; scheduling on large scopes |
+| **Inventory families frozen by a lookup** | A family absent from `acl_object_families` is not inventoried | `tools/revalidate_mapping.py` compares the lookup with the table and reports any divergence |
+
+---
+
+## Troubleshooting
+
+| Symptom | Most likely cause | What to do |
+|---|---|---|
+| The search stops immediately, `MSG[ERROR]` about the capability | `edit_acl_bulk` not granted, or `splunkd` not restarted since the install | Grant the capability, restart `splunkd`, check `current-context` |
+| Fatal error naming TLS on the first REST call | Self-signed platform certificate | [TLS verification](#tls-verification) |
+| Everything comes out `dryrun` | `dryrun` defaults to `true` | Replay with `dryrun=f`, after reading the simulation |
+| Everything comes out `noop` on a first pass | The batch is already compliant, or the pipeline does not actually change anything | Read `acl_before_*` / `acl_after_*` on a few rows |
+| Only ten objects were written | `max_objects` defaults to 10; the rest came out `skipped_ceiling` | Replay with an explicit `max_objects` |
+| `acl_before_*` / `acl_after_*` columns are empty on some rows | Those statuses never computed a merge (`skipped_private`, `skipped_derived`, `skipped_ceiling`, upstream rejections) | Expected. The columns are always present, empty where there is nothing to show |
+| An object comes out `unresolved_endpoint:<type>` | The type is absent from the mapping table | Add it through the override file; run the re-validation |
+| Objects of the `ntags` family always come out `error` | The handler refuses ACL writes | Exclude the family from the batch |
+| The monitoring view is a `404` | The account holds neither `editacl_auditor` nor `admin_all_objects` | Grant the role. It is not a deployment failure |
+| The monitoring view is empty | No index entitlement, or the journal index was redirected without overriding `local/macros.conf` | Read the *Entitlement check* panel first |
+| The rollback macro returns nothing | The search time range does not cover the run, or the journal index was redirected without overriding `local/macros.conf`, or no write succeeded in that run | Widen the time range; check both override points |
+| A run does not appear in the view at all | It ran with `journal=false` | The *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype |
+| A saved search seems duplicated after an upgrade | The searches were renamed when the repository moved to English | See [Shipped searches](#shipped-searches) |
 
 ---
 
 ## Licence
 
-[Apache License 2.0](LICENSE). Le SDK vendorisé sous `bin/lib/` est distribué sous la
-même licence.
+[Apache License 2.0](LICENSE). The SDK vendored under `bin/lib/` is distributed under
+the same licence.

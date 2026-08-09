@@ -4,10 +4,15 @@
 # conversion would invalidate bin/lib/MANIFEST.sha256 at clone time.
 bin/lib/** -text
 
-# Scope of the deployable archive (spec section 12.1): tests/ and tools/ live in the
-# repository, never in the installed app. `git archive` therefore leaves them out,
+# Scope of the deployable archive (spec section 12.1): tests/, tools/ and docs/ live in
+# the repository, never in the installed app. `git archive` therefore leaves them out,
 # along with the repository's own service files. See README, Tests section.
+#
+# docs/ carries the design documentation (D-45). It is written for whoever changes this
+# code, not for whoever runs it: it has no business inside an app installed on a search
+# head, and the operator README is self-sufficient without it.
 tests/         export-ignore
 tools/         export-ignore
+docs/          export-ignore
 .gitattributes export-ignore
 .gitignore     export-ignore
