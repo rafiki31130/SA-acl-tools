@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from acltools.errors import FatalJournalError
 from acltools import journal as journal_module
@@ -508,6 +509,137 @@ class JournalWriterTest(unittest.TestCase):
     def test_deterministic_test_clock(self):
         clock = FakeClock()
         self.assertNotEqual(clock(), clock())
+
+
+class _SyncSpy(object):
+    """Stand-in for `os.fsync` recording every durability barrier the writer raises.
+
+    It records **two** things per call: the descriptor the barrier is placed on, and
+    what an independent reader sees in the file **at that instant**. The second is what
+    makes the ordering observable from outside the writer: at the moment of the sync,
+    the line must already have left the interpreter's buffer. A `flush()` removed, or a
+    sync moved ahead of it, leaves nothing to read here - and syncing a buffer the
+    kernel has never been handed guarantees exactly nothing.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.calls = []
+        self._real = os.fsync
+
+    def __call__(self, fd):
+        with open(self.path, encoding="utf-8") as handle:
+            self.calls.append((fd, handle.read()))
+        return self._real(fd)
+
+    def contents_at_each_barrier(self):
+        return [content for _, content in self.calls]
+
+
+def _sync_that_cannot_complete(fd):
+    """`os.fsync` on a device that cannot take the write.
+
+    This is the failure section 8.4 turns into `acl_status = "error"` with **no POST
+    attempted**: the whole pipeline behaviour rests on this call reporting rather than
+    raising, and every pipeline test of it runs against a double that never touches a
+    disk.
+    """
+    raise OSError(28, "no space left on device")
+
+
+class TheDurabilityBarrierTest(unittest.TestCase):
+    """Section 8.4 on the real writer: the write-ahead barrier of the `intent` line.
+
+    S-1 of the second re-audit of 2026-08-09. The journal was covered abundantly for
+    what its lines **say**, and not at all for the one property that makes it a
+    write-ahead journal rather than a log file: `write_intent` could be turned from
+    `sync=True` to `sync=False` and all 713 tests stayed green. The lines were still
+    correct, the file was still written, and the guarantee section 8.4 rests on - the
+    prior state is on the platter before the POST is attempted - was gone. A power cut
+    between the write and the POST would then leave the mutation done and the state to
+    restore it from in a filesystem buffer.
+
+    Why nothing saw it: every test of that precondition runs at pipeline level against
+    `FakeJournal`, which returns `True` without touching a disk. Those doubles prove
+    what the pipeline does with the answer; they cannot prove that the answer means
+    anything. **The journal is the only safety net of an irreversible operation**, and
+    its most critical property was guarded by nothing.
+    """
+
+    RECORD = {"phase": "intent", "sid": "barrier_sid", "endpoint": "/x"}
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix="editacl_test_")
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        self.path = os.path.join(self.directory, journal_filename("barrier_sid"))
+        self.writer = JournalWriter(self.path)
+        self.addCleanup(self.writer.close)
+
+    def _spy_on(self, method, record):
+        spy = _SyncSpy(self.path)
+        with mock.patch.object(journal_module.os, "fsync", spy):
+            written = getattr(self.writer, method)(record)
+        self.assertTrue(written)
+        return spy
+
+    def test_the_intent_line_raises_a_durability_barrier(self):
+        spy = self._spy_on("write_intent", self.RECORD)
+        self.assertEqual(
+            len(spy.calls), 1, "no durability barrier raised on the intent line"
+        )
+
+    def test_the_intent_line_is_already_in_the_file_when_the_barrier_is_raised(self):
+        # The flush precedes the sync, seen from an independent descriptor.
+        spy = self._spy_on("write_intent", self.RECORD)
+        self.assertIn('"phase":"intent"', spy.contents_at_each_barrier()[0])
+
+    def test_the_barrier_is_raised_on_the_descriptor_of_the_journal_itself(self):
+        spy = self._spy_on("write_intent", self.RECORD)
+        fd = spy.calls[0][0]
+        witness = os.open(self.path, os.O_RDONLY)
+        try:
+            self.assertTrue(os.path.sameopenfile(fd, witness))
+        finally:
+            os.close(witness)
+
+    def test_the_outcome_line_does_not_pay_for_a_barrier(self):
+        # Section 8.4: the POST has already happened, there is nothing left to
+        # guarantee, and one fsync per object would double the write cost of an
+        # already serialized operation. The line is still flushed.
+        spy = self._spy_on("write_outcome", {"phase": "outcome", "status": "updated"})
+        self.assertEqual(spy.calls, [])
+        with open(self.path, encoding="utf-8") as handle:
+            self.assertIn('"phase":"outcome"', handle.read())
+
+    def test_the_summary_line_does_not_pay_for_a_barrier(self):
+        spy = self._spy_on("write_summary", {"phase": "summary"})
+        self.assertEqual(spy.calls, [])
+
+    def test_a_barrier_that_cannot_complete_is_reported_and_never_raised(self):
+        with mock.patch.object(
+            journal_module.os, "fsync", _sync_that_cannot_complete
+        ):
+            self.assertFalse(self.writer.write_intent(self.RECORD))
+        # And the writer stays usable: the pipeline writes the `outcome` line of the
+        # object it has just refused to POST (section 8.2, first invariant).
+        self.assertTrue(self.writer.write_outcome({"phase": "outcome"}))
+
+    def test_a_second_run_on_the_same_file_keeps_the_lines_already_there(self):
+        """The rollback set of an earlier run is not what a later one costs.
+
+        One file per `sid` (D-3), and a `sid` is not guaranteed unique for ever. The
+        file is opened for **appending**; opening it for writing would truncate a
+        journal that is by construction the only copy of a prior state.
+        """
+        self.writer.write_intent(dict(self.RECORD, rank=1))
+        self.writer.close()
+        again = JournalWriter(self.path)
+        self.addCleanup(again.close)
+        again.write_intent(dict(self.RECORD, rank=2))
+        again.close()
+        with open(self.path, encoding="utf-8") as handle:
+            lines = [json.loads(l) for l in handle if l.strip()]
+        self.assertEqual([line["rank"] for line in lines], [1, 2])
 
 
 if __name__ == "__main__":
