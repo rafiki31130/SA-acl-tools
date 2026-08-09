@@ -826,6 +826,15 @@ reported as a success, on the only safety net of an irreversible operation. Two
 configuration points, each of them single; no Simple XML construct brings it down to
 one.
 
+**And the monitoring view does not go empty - it goes stale.** Measured: with only
+`inputs.conf` overridden, the panels keep listing the runs that predate the redirection
+and simply stop at its date. The *Entitlement check* panel is what tells you, on two
+signals it reports without over-claiming: the index the journal **actually** lands in
+compared with the index this view **reads**, and the date of the most recent journal
+line compared with the window you asked for. Read [Run monitoring
+view](#run-monitoring-view) for what those two signals do **not** cover - the list is
+short and it matters.
+
 ### Purge policy
 
 The number of `editacl_journal_<sid>.log` files grows with the number of runs, **with no
@@ -889,6 +898,14 @@ state it never left.
 > **The time range of the calling search must cover the run to be restored.** The macro
 > queries an index; run over the last fifteen minutes, it will not see yesterday's run
 > and will restore nothing - with no error.
+
+> **The leading pipe is not cosmetic.** `editacl_rollback(<sid>)` is only valid in
+> **generating** position - its definition opens on the `search` keyword. Written
+> `` search `editacl_rollback(<sid>)` ``, it searches for the literal term `search` and
+> returns **zero rows, `HTTP 200`, without one message**. Measured: 0 rows in that form,
+> 160 in the correct one, on the same run. On the safety net of an irreversible
+> operation, that is the project's named class of error - an artifact that reports a
+> success without doing anything. Always `` | `editacl_rollback(<sid>)` ``.
 
 The `sid` comes from `| eval sid=$sid$`, from the search inspector, or from the name of
 the journal file of the run (`editacl_journal_<sid>.log`).
@@ -967,15 +984,51 @@ go**. A run is identified by its `sid`.
    entitlement is outside this app - see [Entitlements](#entitlements). Without it, the
    view triggers its own guard rail: the *Entitlement check* panel says whether the
    journal is readable, distinguishing "no run recorded" from "no searchable index".
-   **Read that panel before concluding anything from an empty view.**
+   **Read that panel before concluding anything from this view - empty or not.**
 3. A view exported to the system does **not** appear in the menu of another app: a `nav`
    entry is still needed there. That is a fact to know, not a defect to fix in the app.
 
+> ### Read this before you use the view
+>
+> **The view has never been opened in a browser.** Its structure, its token wiring and
+> its searches are covered by the test suite and were replayed against a real instance
+> through the REST API; what happens **in the page after it loads** - the `depends` /
+> `rejects` panels appearing and disappearing, the text input clearing the selection,
+> and above all **clicking a row of the run list to select a run** - has been exercised
+> by **no** measurement. That is the one validation debt left on this deliverable.
+>
+> Concretely: if the detail panels stay hidden after you click a run, type the `sid`
+> into the *Run (sid)* input instead - it drives the same token - and report it. It is
+> a plausible defect, not an impossible one.
+>
+> The same limit applies to the **rendering**: a panel can be syntactically correct and
+> unreadable, or hidden by a condition.
+
 Panels, in order: entitlement check, legacy-format lines excluded, runs started with no
-journal line, the run list, then - once a run is selected - its summary, the status
-breakdown observed against declared, the HTTP code breakdown, the breakdown by
-application and object type, the resolved objects with their before/after state, the
-events refused before endpoint resolution, and the errors.
+journal line, the run list, then - **for a run selected in the run list or typed into
+the `sid` input**, a selection mechanism that carries the debt stated just above - its
+summary, the status breakdown observed against declared, the HTTP code breakdown, the
+breakdown by application and object type, the resolved objects with their before/after
+state, the events refused before endpoint resolution, and the errors.
+
+### What the entitlement check does, and what it does not
+
+It answers one question - *can I trust the list below to be complete?* - on three
+signals, and it is worth knowing what each one is worth.
+
+| Signal | What it proves | What it does **not** prove |
+|---|---|---|
+| No searchable index | Your role has no index entitlement at all. Granting it is outside this app | - |
+| **Journal lines outside what this view reads** | Lines of the journal sourcetype sit, in this window, in an index the view does not read. The two index columns show which. This is what a redirection of `local/inputs.conf` alone produces | Nothing, if the index they went to is one **you are not entitled to search**: what you cannot search, you cannot count either. The signal is then silent, and only the next one is left. It also fires, legitimately, during a deliberate migration, until the old index ages out |
+| **The end of the window is silent** | The most recent journal line is older than the last quarter of the window you asked for. The date is displayed on every state, not only on this one | **Why** it is silent. A period with no run looks exactly the same as a journal that stopped arriving. The panel says so in as many words rather than guessing |
+
+Two consequences to keep in mind:
+
+- a redirection **more recent** than a quarter of the window does not yet trip the
+  silence signal. Narrow the time range to see it sooner;
+- the check covers the **journal** sourcetype. A redirection of the **diagnostic**
+  input alone is not detected, and the *Runs started with no journal line* panel would
+  then lose runs silently.
 
 ### What the view cannot show
 
@@ -1288,6 +1341,8 @@ modification of a vendored file, an addition or a disappearance are still detect
 | **Restore only after indexing** | The journal is only queryable after ingestion | The file of the run is self-contained and usable immediately |
 | **Redirecting the journal index takes two overrides** | Overriding only `inputs.conf` leaves every shipped search returning an empty result **without saying so** | Override `local/inputs.conf` **and** `local/macros.conf` |
 | **Dashboard requires an index entitlement** | Without read access to the journal index the view shows nothing | The *Entitlement check* panel distinguishes "no run" from "no access". Granting the access is outside this app |
+| **The monitoring view has never been opened in a browser** | Its **client-side** behaviour is unmeasured: the panels that appear once a run is selected, the input that clears the selection, and **the click on a row of the run list**. The detail panels may fail to appear | Structure, token wiring and searches are frozen by the test suite and were replayed through the REST API; **nothing after the page loads is measured**. Fallback: type the `sid` into the *Run (sid)* input, which drives the same token. See [Run monitoring view](#run-monitoring-view) |
+| **The entitlement check reports a silent window, it does not diagnose it** | A journal that stopped arriving and a period with no run produce the same reading | The panel states the ambiguity instead of guessing, and shows the date of the most recent line on every state. The index comparison beside it resolves the case **only** when the reader may search the index the lines went to |
 | **`app_disabled` costs one REST call per distinct app** | Marginal latency on a multi-app batch | Memoised per app |
 | **Taking ownership: two platform conditions** | `admin_all_objects` is required - an account carrying only the right over its own objects is refused **even on its own object** - and the target owner must exist, failing which the platform refuses without mutating | Check both before a campaign carrying `new_owner`. The refusal is visible: `acl_status = "error"` with the platform code |
 | **Moving between applications and renaming are out of scope** | The first exists but a badly chosen parameter makes the object **unreachable for writing**, deletion included; the second does not exist at all | Out of scope, knowingly. Moving deserves its own tool, with its own safety net |
@@ -1312,6 +1367,9 @@ modification of a vendored file, an addition or a disappearance are still detect
 | The monitoring view is a `404` | The account holds neither `editacl_auditor` nor `admin_all_objects` | Grant the role. It is not a deployment failure |
 | The monitoring view is empty | No index entitlement, or the journal index was redirected without overriding `local/macros.conf` | Read the *Entitlement check* panel first |
 | The rollback macro returns nothing | The search time range does not cover the run, or the journal index was redirected without overriding `local/macros.conf`, or no write succeeded in that run | Widen the time range; check both override points |
+| The rollback macro returns nothing, and the search was written `search \`editacl_rollback(<sid>)\`` | **The macro is only valid in generating position.** Its definition opens on the `search` keyword, so the other form searches for the literal term `search` and matches nothing. Measured: **0 rows** in the faulty form, **160** in the correct one, same `sid` - `HTTP 200`, not one message | Write it as `\| \`editacl_rollback(<sid>)\``, with the leading pipe and no `search` keyword. Every example in this document uses that form |
+| The monitoring view lists runs but stops at a date | The journal index was redirected in `local/inputs.conf` without overriding `local/macros.conf`, or ingestion stopped | Read the *Entitlement check* panel: it compares the index the journal lands in with the index the view reads, and shows the date of the most recent line. **The view does not go empty in this case, it goes stale** |
+| The detail panels stay hidden after clicking a run | The client-side behaviour of the view is **not validated** - see [Known limits](#known-limits) | Type the `sid` into the *Run (sid)* input, which drives the same token. Report it: it is a known unmeasured path |
 | A run does not appear in the view at all | It ran with `journal=false` | The *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype |
 | A saved search seems duplicated after an upgrade | The searches were renamed when the repository moved to English | See [Shipped searches](#shipped-searches) |
 

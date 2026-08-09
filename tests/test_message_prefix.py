@@ -39,6 +39,7 @@ zeros.
 import ast
 import importlib.util
 import os
+import re
 import sys
 import types
 import unittest
@@ -180,6 +181,24 @@ class SingleEmissionPointTest(unittest.TestCase):
             "the extractor found no call to an SDK message method in bin/editacl.py: "
             "it is reading nothing, or the file has changed shape",
         )
+
+    def test_the_emission_point_names_the_decision_that_founds_it(self):
+        """A-8 of the audit of 2026-08-09: the docstring named D-39, not D-41.
+
+        That comment is the only place in `bin/editacl.py` that names the decision behind
+        the rule it implements, so a wrong number there sends the next reader to a
+        decision about something else - D-39 bears on the degradation of `id` by the
+        field filter. The check is cheap and it closes the class: any renumbering of the
+        rule has to pass through here.
+        """
+        with open(EDITACL_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        docstring = re.search(
+            r"def _emit_message\(self[^)]*\):\s*\"\"\"(.*?)\"\"\"", source, re.S
+        )
+        self.assertIsNotNone(docstring, "the emission point has lost its docstring")
+        self.assertIn("D-41", docstring.group(1))
+        self.assertNotIn("D-39", docstring.group(1))
 
     def test_no_construct_is_opaque(self):
         """What the extractor cannot analyse fails the suite instead of passing."""

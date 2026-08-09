@@ -322,6 +322,17 @@ class PropsConfTest(unittest.TestCase):
     def test_truncation_disabled(self):
         self.assertEqual(self.conf.get("editacl:journal", "TRUNCATE"), "0")
 
+    def test_the_diagnostic_is_not_read_as_key_value(self):
+        # The diagnostic file is free text, and the automatic extractor invents fields
+        # out of whatever looks like `key=value` in a message. Measured consequence and
+        # full reasoning: `default/props.conf`, and `tests/test_dashboard.py`
+        # `TheDiagnosticIsReadAsFreeTextTest`.
+        self.assertEqual(self.conf.get("editacl:diag", "KV_MODE"), "none")
+
+    def test_the_diagnostic_declares_what_it_takes_back(self):
+        keys = [k for k in self.conf.options("editacl:diag") if k.startswith("extract-")]
+        self.assertTrue(keys, "KV_MODE=none with no declared extraction reads nothing")
+
 
 class SplArtifactsTest(unittest.TestCase):
     """SPL deliverables of phase 2b. Their content is exercised by

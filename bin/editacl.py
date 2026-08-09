@@ -295,7 +295,7 @@ class EditAclCommand(StreamingCommand):
     # -- single emission point of the operator-facing messages -------------- #
 
     def _emit_message(self, level, message):
-        """**The** point where a message reaches the search interface (D-39).
+        """**The** point where a message reaches the search interface (D-41).
 
         Every message the operator reads goes through here, and it is here - and
         nowhere else - that `MESSAGE_PREFIX` is applied. No other method of this file

@@ -1,6 +1,6 @@
 <form version="1.1">
   <label>editacl - run monitor</label>
-  <description>Which editacl runs took place, and how the selected one went. An empty view does not prove that no run took place: read the entitlement check first.</description>
+  <description>Which editacl runs took place, and how the selected one went. Neither an empty view nor a populated one proves that the list below is complete: read the entitlement check first, including the date of the most recent journal line.</description>
 
   <fieldset submitButton="false" autoRun="true">
     <input type="time" token="tr">
@@ -24,21 +24,73 @@
   </fieldset>
 
   <row>
+    <!-- The guard rail of section 15.5, and the ONLY panel of the view allowed to name
+         an index or a sourcetype literally.
+
+         Its first version only knew how to say "nothing here". That is not the failure
+         mode that costs the most. MEASURED on a lab: redirect the journal in
+         `local/inputs.conf` WITHOUT overriding `local/macros.conf`, and this panel used
+         to answer "OK - the journal is readable and carries events in this window",
+         because lines older than the redirection were still in reach - while the run
+         list below silently stopped at the date of the redirection. A view that lists
+         runs reassures; an empty one at least asks a question. The confident and wrong
+         state was the worse of the two, and it was the one the panel produced.
+
+         Two independent signals now answer, and each one is stated for exactly what it
+         proves - no more:
+
+           1. WHERE THE LINES ARE, against where this view reads. `tstats` locates the
+              journal sourcetype across every index the RUNNING ROLE may search, and the
+              first line of the pipeline reports which index the source macro actually
+              returned. Lines outside the second set are lines this view does not show.
+              This signal is blind to an index the reader is not entitled to search:
+              what the reader cannot search, the reader cannot count either.
+           2. HOW OLD THE LAST LINE IS, against the window asked for. A window whose
+              last quarter carries no journal line is displayed as such. This signal
+              does NOT diagnose: a quiet period with no run looks exactly the same, and
+              the wording says so rather than accusing a configuration.
+
+         `sourcetype=editacl:journal` is written out here, and nowhere else in the view.
+         Locating the journal REQUIRES naming it without naming an index - that is the
+         whole question. `tests/test_dashboard.py` ties the literal to the definition of
+         `acl_journal_source`, so the two cannot drift apart. -->
     <panel>
       <title>Entitlement check</title>
       <table>
         <search>
           <query>`acl_journal_source`
-| stats count AS journal_events
+| stats count AS journal_events, max(_time) AS last_journal_event,
+        values(index) AS journal_read_from
 | appendcols
     [| eventcount summarize=false index=* index=_*
      | stats count AS searchable_index_count, values(index) AS searchable_indexes]
+| appendcols
+    [| tstats count AS ingested_events, max(_time) AS last_ingested
+        WHERE (index=* OR index=_*) sourcetype=editacl:journal BY index
+     | stats sum(ingested_events) AS ingested_events, values(index) AS journal_found_in]
+| addinfo
 | eval searchable_index_count = coalesce(searchable_index_count, 0)
+| eval ingested_events = coalesce(ingested_events, 0)
+| eval unread_events = ingested_events - journal_events
+| eval read_index_count  = coalesce(mvcount(journal_read_from), 0)
+| eval found_index_count = coalesce(mvcount(journal_found_in), 0)
+| eval window_end = if(isnum(info_max_time), info_max_time, now())
+| eval window_s = if(isnum(info_min_time), window_end - info_min_time, null())
+| eval silent_tail_s = if(isnull(last_journal_event), null(),
+                          round(window_end - last_journal_event, 0))
+| eval silent_tail_pct = if(isnull(silent_tail_s) OR isnull(window_s) OR window_s &lt;= 0,
+                            null(), round(100 * silent_tail_s / window_s, 1))
 | eval state = case(
-      journal_events &gt; 0, "OK - the journal is readable and carries events in this window",
       searchable_index_count == 0, "NO SEARCHABLE INDEX - your role has no index entitlement. Granting it is a deployment prerequisite, outside this app. An empty view does NOT mean that no run took place.",
-      1==1, "NO EVENT IN THIS WINDOW - either no run was recorded, or the journal does not land in an index you may search. Check that the index listed opposite is the one inputs.conf sends the journal to.")
-| table state, journal_events, searchable_index_count, searchable_indexes</query>
+      unread_events &gt; 0 OR found_index_count &gt; read_index_count, "JOURNAL LINES SIT OUTSIDE WHAT THIS VIEW READS - compare the two index columns opposite. Redirecting local/inputs.conf without overriding local/macros.conf produces exactly this, and the panels below then stop at the date of the redirection without saying so. During a deliberate migration the same reading is expected until the old index ages out.",
+      journal_events == 0, "NO EVENT IN THIS WINDOW - either no run was recorded, or the journal does not land in an index you may search. Check that the index listed opposite is the one inputs.conf sends the journal to.",
+      silent_tail_pct &gt; 25, "READABLE, BUT THE END OF THIS WINDOW IS SILENT - the most recent journal line is opposite, and the last " . silent_tail_pct . "% of the window carries none. Either no run took place since then, or the journal stopped reaching this index. THIS PANEL CANNOT TELL THOSE TWO APART - it reports the silence, it does not diagnose it.",
+      1==1, "OK - the journal is readable, carries events in this window, and the most recent line is inside its last quarter")
+| eval last_journal_event = if(isnull(last_journal_event), "(none in this window)",
+                               strftime(last_journal_event, "%Y-%m-%d %H:%M:%S"))
+| table state, journal_events, last_journal_event, silent_tail_pct,
+        journal_read_from, journal_found_in, unread_events,
+        searchable_index_count, searchable_indexes</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>
@@ -71,17 +123,40 @@
         <option name="count">5</option>
       </table>
     </panel>
+    <!-- This panel aggregates BY sid over the DIAGNOSTIC sourcetype, whose file is free
+         text (section 8.1). Its fields must therefore be read from `_raw` by an anchored
+         `rex`, and never from an extracted field.
+
+         MEASURED, and it is the defect this construction closes: with the automatic
+         key/value extractor running over free text, a fatal line whose message carries
+         no later `key=value` sequence has the WHOLE SENTENCE swallowed into the value of
+         `sid` - 11 polluted values out of 259 on a lab, up to 144 characters. The panel
+         then rendered TWO rows for ONE run: a ghost carrying the fatal text and the
+         right cause, and the real sid carrying the WRONG cause, "killed before its first
+         write", because the word "fatal" had left with the ghost. `max_objects`, read
+         here too, was polluted the same way on 5 lines out of 241.
+
+         `default/props.conf` fixes that at the source, for every consumer, with
+         `KV_MODE = none` and three declared extractions. The `rex` below is not a
+         duplicate of that fix: it makes THIS panel independent of ANY extraction at all,
+         so a deployment carrying an older `local/props.conf` - or none - still gets one
+         row per run. The two agree by construction: same anchors, same expressions. -->
     <panel>
       <title>Runs started with no journal line</title>
       <table>
         <search>
           <query>search (`acl_journal_source`) OR (`acl_diag_source`)
+| eval diag_raw = if(sourcetype="editacl:diag", _raw, null())
+| rex field=diag_raw "^\S+\s+[A-Z]+\s+sid=(?&lt;diag_sid&gt;\S+)"
+| rex field=diag_raw "editacl startup version=\S+ user=(?&lt;diag_user&gt;\S+)\s"
+| rex field=diag_raw "parameters dryrun=\S+ validate_roles=\S+ journal=(?&lt;diag_journal&gt;\S+) max_objects=(?&lt;diag_max_objects&gt;\S+)"
+| eval sid = coalesce(diag_sid, sid)
 | stats count(eval(sourcetype="editacl:journal")) AS journal_lines,
         count(eval(sourcetype="editacl:diag"))    AS diag_lines,
         min(eval(if(sourcetype="editacl:diag", _time, null())))       AS started,
-        values(eval(if(sourcetype="editacl:diag", user, null())))     AS run_user,
-        values(eval(if(sourcetype="editacl:diag", journal, null())))  AS journal_param,
-        values(eval(if(sourcetype="editacl:diag", max_objects, null()))) AS max_objects,
+        values(diag_user)        AS run_user,
+        values(diag_journal)     AS journal_param,
+        values(diag_max_objects) AS max_objects,
         count(eval(sourcetype="editacl:diag" AND match(_raw, "fatal error:"))) AS fatal_lines,
         count(eval(sourcetype="editacl:diag" AND match(_raw, "rollback journal not openable"))) AS journal_open_failures
   BY sid

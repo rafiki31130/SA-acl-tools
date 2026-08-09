@@ -61,12 +61,75 @@ EXPECTED_PANEL_TITLES = (
 
 #: The one panel allowed to write `index=` in its query, named by its title.
 #:
-#: It is the entitlement guard, and its subsearch `| eventcount summarize=false
-#: index=* index=_*` enumerates the indexes the running role may search. That is not a
-#: source designation - there is nothing for a macro to carry - and no other
-#: construction answers the question D-48 asks. The exception is therefore named here
-#: rather than left to a reader's judgement.
+#: It is the entitlement guard, and its two subsearches enumerate what no macro can
+#: carry: `| eventcount summarize=false index=* index=_*` lists the indexes the running
+#: role may search, and `| tstats ... WHERE (index=* OR index=_*)
+#: sourcetype=editacl:journal BY index` locates the journal across them. Neither is a
+#: source designation - there is nothing for a macro to name - and no other construction
+#: answers the questions D-48 asks. The exception is therefore named here rather than
+#: left to a reader's judgement.
 INDEX_LITERAL_EXEMPT_PANEL = "Entitlement check"
+
+#: Title of the one panel that reads the diagnostic sourcetype.
+DIAGNOSTIC_PANEL = "Runs started with no journal line"
+
+#: The commands the view is allowed to use, exhaustively.
+#:
+#: A **positive** list, and the difference matters: a forbidden-command list only stops
+#: what it already knows about. The audit of 2026-08-09 established the cost of the
+#: negative form - a mutation adding `| collect index=summary` was caught, but nothing
+#: would have caught the next side-effecting command nobody had thought of. Any command
+#: outside this set has to be added here deliberately, which is exactly the review the
+#: rule exists to force.
+VIEW_ALLOWED_COMMANDS = frozenset(
+    (
+        "addinfo", "append", "appendcols", "convert", "eval", "eventcount",
+        "eventstats", "fields", "rename", "rex", "search", "sort", "stats",
+        "table", "transpose", "tstats", "where",
+    )
+)
+
+#: Commands that write, send, or run something. Applied to **every** shipped SPL, macros
+#: and saved searches included, where a positive list is impractical.
+SIDE_EFFECTING_COMMANDS = frozenset(
+    (
+        "collect", "mcollect", "meventcollect", "tscollect", "summaryindex",
+        "outputlookup", "outputcsv", "outputtext", "sendemail", "sendalert",
+        "script", "runshell", "run", "delete", "crawl", "dump", "external",
+    )
+)
+
+#: Attributes the view is allowed to carry, per element, exhaustively.
+#:
+#: Simple XML loads client-side code through `script` and `stylesheet` on the root, and
+#: through any `on*` handler. None of them is used, so the list is closed rather than
+#: the vectors enumerated: an attribute that appears without being declared here fails,
+#: whatever it is called.
+VIEW_ALLOWED_ATTRIBUTES = {
+    "form": frozenset(("version",)),
+    "fieldset": frozenset(("autoRun", "submitButton")),
+    "input": frozenset(("searchWhenChanged", "token", "type")),
+    "condition": frozenset(("match",)),
+    "set": frozenset(("token",)),
+    "unset": frozenset(("token",)),
+    "option": frozenset(("name",)),
+    "panel": frozenset(("depends", "rejects")),
+}
+
+
+def spl_commands(query):
+    """Command name opening each pipeline segment of `query`.
+
+    Deliberately crude - it is a control, not a parser. A leading `[` is stripped so
+    that subsearches are read too.
+    """
+    names = set()
+    for segment in query.split("|"):
+        token = segment.strip().lstrip("[").strip()
+        match = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)", token)
+        if match:
+            names.add(match.group(1))
+    return names
 
 
 def view_path():
@@ -325,12 +388,17 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
                 self.assertNotRegex(query, r"(?<![\w])index\s*=")
 
     def test_the_exempt_query_only_uses_the_index_literal_to_enumerate_indexes(self):
-        # The exemption is narrow on purpose: it covers `| eventcount ... index=* ...`
-        # and nothing else. Should the guard ever be rewritten into a plain search on a
-        # written-out index, this test fails.
+        # The exemption is narrow on purpose: it covers the two commands that enumerate
+        # - `eventcount`, which lists the searchable indexes, and `tstats`, which locates
+        # the journal across them - and nothing else. Should the guard ever be rewritten
+        # into a plain search on a written-out index, this test fails.
         query = dict((t, q) for t, q in self.queries)[INDEX_LITERAL_EXEMPT_PANEL]
         for occurrence in re.findall(r"[^|]*index\s*=[^|]*", query):
-            self.assertIn("eventcount", occurrence)
+            with self.subTest(occurrence=occurrence.strip()[:60]):
+                self.assertTrue(
+                    "eventcount" in occurrence or "tstats" in occurrence,
+                    "an index literal outside the two enumerating commands",
+                )
 
     def test_every_macro_invoked_is_declared(self):
         declared = set(read_splunk_conf("default", "macros.conf"))
@@ -486,17 +554,109 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
             with self.subTest(panel=title):
                 self.assertIn("isnotnull(member)", query)
 
-    def test_the_diagnostic_fields_are_qualified_by_their_sourcetype(self):
-        # The one query that reads both sourcetypes. It does not break D-49 - each one
-        # is named - but it reintroduces the homonym risk D-49 exists to close. Every
-        # field read from the diagnostic side is therefore qualified.
-        query = dict(self.queries)["Runs started with no journal line"]
+
+class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
+    """A-1 of the audit of 2026-08-09. The class of error is worth stating in full.
+
+    The diagnostic file is FREE TEXT (section 8.1). Qualifying its fields by their
+    sourcetype - what the first version of this panel did - closes the homonym risk of
+    D-49 and nothing else: it says which sourcetype a field is read FROM, never whether
+    the value is the one the line meant to carry.
+
+    MEASURED on a lab, 2 201 diagnostic lines: the automatic key/value extractor
+    swallows the whole message into `sid` on a fatal line - 11 polluted values out of
+    259 distinct, up to 144 characters - and into `max_objects` on 5 lines out of 241.
+    The panel rendered TWO rows for ONE run, and the row carrying the usable sid carried
+    the WRONG cause.
+
+    The fix has two layers, and this class checks both are present and agree:
+
+      - `default/props.conf` turns the automatic extractor off for the sourcetype and
+        declares what it gives back. That fixes it at the source, for every consumer;
+      - the panel rebuilds its own fields from `_raw` with the same anchored
+        expressions, so it holds even where the props stanza does not apply.
+    """
+
+    #: Fields the panel reads from the diagnostic, and the name it rebuilds them under.
+    DIAGNOSTIC_FIELDS = ("sid", "user", "journal", "max_objects")
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+        self.query = dict(queries(self.root))[DIAGNOSTIC_PANEL]
+        self.props = read_splunk_conf("default", "props.conf")
+
+    def test_the_diagnostic_sourcetype_has_automatic_extraction_turned_off(self):
+        # The single line that removes the class rather than one instance of it.
+        self.assertEqual(self.props["editacl:diag"].get("KV_MODE"), "none")
+
+    def test_every_field_the_panel_needs_has_a_declared_extraction(self):
+        declared = " ".join(
+            value
+            for key, value in self.props["editacl:diag"].items()
+            if key.startswith("EXTRACT-")
+        )
+        self.assertTrue(declared, "no declared extraction on the diagnostic sourcetype")
+        for field in self.DIAGNOSTIC_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn("(?<%s>" % field, declared)
+
+    def test_the_declared_sid_extraction_cannot_absorb_a_message(self):
+        # `\S+` is the whole guarantee: a sid carries no space, so a sentence cannot end
+        # up inside it. A `.*` or a `[^=]+` here would reopen the defect.
+        expression = self.props["editacl:diag"]["EXTRACT-editacl_diag_run"]
+        self.assertTrue(expression.startswith("^"), expression)
+        self.assertIn("sid=(?<sid>\\S+)", expression)
+
+    def test_the_panel_restricts_the_raw_line_to_the_diagnostic_sourcetype(self):
+        self.assertIn(
+            'eval diag_raw = if(sourcetype="editacl:diag", _raw, null())', self.query
+        )
+
+    def test_the_panel_rebuilds_the_aggregation_key_before_aggregating(self):
+        rebuild = self.query.find("eval sid = coalesce(diag_sid, sid)")
+        aggregate = self.query.find("BY sid")
+        self.assertNotEqual(rebuild, -1, "the panel does not rebuild sid")
+        self.assertNotEqual(aggregate, -1)
+        self.assertLess(rebuild, aggregate, "sid is rebuilt after it is aggregated on")
+
+    def test_the_panel_and_the_declared_extraction_use_the_same_expression(self):
+        # Two expressions that drift apart would make the panel and every other consumer
+        # disagree on what a sid is, without a message.
+        declared = self.props["editacl:diag"]["EXTRACT-editacl_diag_run"]
+        self.assertIn(declared.replace("(?<sid>", "(?<diag_sid>"), self.query)
+
+    def test_no_diagnostic_field_is_read_from_an_extracted_field(self):
+        for field in self.DIAGNOSTIC_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn("rex field=diag_raw", self.query)
+                self.assertNotRegex(
+                    self.query,
+                    r'if\(sourcetype="editacl:diag",\s*%s\s*,' % field,
+                    "%s is read from an extracted field, not from the raw line" % field,
+                )
+
+    def test_the_rebuilt_fields_are_the_ones_the_panel_aggregates(self):
         for field in ("user", "journal", "max_objects"):
             with self.subTest(field=field):
-                self.assertRegex(
-                    query,
-                    r'if\(sourcetype="editacl:diag",\s*%s\s*,' % field,
-                )
+                self.assertIn("values(diag_%s)" % field, self.query)
+
+
+class TheSearchesAvoidTheMeasuredTrapsAgainTest(unittest.TestCase):
+    """Continuation of `TheSearchesAvoidTheMeasuredTrapsTest`."""
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+        self.queries = queries(self.root)
+
+    def test_the_guard_names_the_sourcetype_its_source_macro_names(self):
+        # The guard locates the journal by naming its sourcetype without naming an
+        # index - the only way to answer "where do the lines actually land". The literal
+        # is therefore tied to the macro definition, so the two cannot drift apart.
+        macros = read_splunk_conf("default", "macros.conf")
+        definition = macros["acl_journal_source"]["definition"]
+        sourcetype = re.search(r"sourcetype=(\S+)", definition).group(1)
+        query = dict(self.queries)[INDEX_LITERAL_EXEMPT_PANEL]
+        self.assertIn("sourcetype=%s" % sourcetype, query)
 
 
 class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
@@ -530,12 +690,53 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         self.assertEqual(VIEW_PARTS[-1], "%s.xml" % VIEW_NAME)
         self.assertTrue(os.path.exists(view_path()))
 
+    #: `default/authorize.conf` in full, key by key. Anything else is a defect.
+    #:
+    #: The audit of 2026-08-09 (A-7) passed a mutation adding `admin_all_objects =
+    #: enabled` to the read role through 658 tests: every control checked that the
+    #: EXPECTED keys carried the expected value, none checked that the stanza carried
+    #: NOTHING ELSE. On a role whose contractual statement is closed - section 15.4:
+    #: `search`, and three refusals - the exhaustive form is the natural one.
+    EXPECTED_AUTHORIZE = {
+        "capability::edit_acl_bulk": {},
+        "role_admin": {"edit_acl_bulk": "enabled"},
+        "role_editacl_auditor": {
+            "search": "enabled",
+            "run_collect": "disabled",
+            "run_mcollect": "disabled",
+            "schedule_rtsearch": "disabled",
+        },
+    }
+
     def test_the_role_is_declared_with_the_capabilities_of_the_decision(self):
         stanza = self.authorize["role_%s" % ROLE_NAME]
         self.assertEqual(stanza.get("search"), "enabled")
         for capability in ("run_collect", "run_mcollect", "schedule_rtsearch"):
             with self.subTest(capability=capability):
                 self.assertEqual(stanza.get(capability), "disabled")
+
+    def test_authorize_conf_declares_exactly_this_and_nothing_more(self):
+        self.assertEqual(
+            {name: dict(stanza) for name, stanza in self.authorize.items()},
+            self.EXPECTED_AUTHORIZE,
+        )
+
+    def test_no_stanza_of_authorize_conf_grants_an_administrative_capability(self):
+        # Second line, and independent of the enumeration above: it names the class
+        # rather than the list, so a role stanza added in a future increment is caught
+        # by this one even before anybody thinks to extend `EXPECTED_AUTHORIZE`.
+        forbidden = (
+            "admin_all_objects", "edit_roles", "edit_roles_grantable", "edit_user",
+            "edit_indexer_cluster", "edit_search_server", "edit_server", "edit_tcp",
+            "edit_udp", "edit_scripted", "edit_deployment_server", "rest_apps_management",
+            "run_debug_commands", "dispatch_rest_to_indexers", "edit_forwarders",
+        )
+        for name, stanza in self.authorize.items():
+            if not name.startswith("role_"):
+                continue
+            for capability in forbidden:
+                with self.subTest(stanza=name, capability=capability):
+                    self.assertNotIn(capability, stanza)
 
     def test_the_role_declares_no_index_entitlement(self):
         # D-44: the absence is normative, so it is tested. Index entitlement belongs to
@@ -657,6 +858,179 @@ class NoShippedSearchWritesItsSourceOutTest(unittest.TestCase):
             text = handle.read()
         self.assertIn("macros.conf", text)
         self.assertNotIn("That is the only configuration point", text)
+
+
+class TheGuardRailSeesMoreThanAnEmptyWindowTest(unittest.TestCase):
+    """A-2 of the audit of 2026-08-09.
+
+    The guard of section 15.5 only fired on `journal_events = 0`. MEASURED on a lab:
+    redirect the journal in `local/inputs.conf` without overriding `local/macros.conf`,
+    and the panel answered `OK - the journal is readable and carries events in this
+    window` - because lines older than the redirection were still in reach - while the
+    run list below stopped at the date of the redirection without a word. A view that
+    lists runs reassures where an empty one at least asks a question.
+
+    What is frozen here is that the panel now carries **two signals besides the empty
+    window**, and that each is worded for what it proves. The tests cannot exercise
+    Splunk; what they can do is prevent the two signals from being quietly removed, and
+    prevent the wording from hardening into a diagnosis the construction does not
+    support.
+    """
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+        self.query = dict(queries(self.root))[INDEX_LITERAL_EXEMPT_PANEL]
+
+    def test_the_panel_reports_the_date_of_the_most_recent_journal_line(self):
+        self.assertIn("max(_time) AS last_journal_event", self.query)
+        self.assertIn("last_journal_event", self.query.split("| table", 1)[1])
+
+    def test_the_panel_locates_the_journal_across_the_searchable_indexes(self):
+        self.assertIn("tstats", self.query)
+        self.assertIn("values(index) AS journal_found_in", self.query)
+        self.assertIn("values(index) AS journal_read_from", self.query)
+
+    def test_both_index_sets_are_shown_side_by_side(self):
+        columns = self.query.split("| table", 1)[1]
+        self.assertIn("journal_read_from", columns)
+        self.assertIn("journal_found_in", columns)
+
+    def test_a_line_outside_what_the_view_reads_changes_the_state(self):
+        self.assertRegex(
+            self.query,
+            r"unread_events\s*>\s*0\s*OR\s*found_index_count\s*>\s*read_index_count",
+        )
+
+    def test_a_silent_end_of_window_changes_the_state(self):
+        self.assertIn("silent_tail_pct", self.query)
+        self.assertRegex(self.query, r"silent_tail_pct\s*>\s*\d+")
+
+    def test_the_window_bounds_come_from_the_search_and_not_from_a_constant(self):
+        # `addinfo` is what makes the silence relative to the window the operator asked
+        # for. A hard-coded duration would be right for one time range and wrong for the
+        # rest, silently.
+        self.assertIn("| addinfo", self.query)
+        self.assertIn("info_max_time", self.query)
+        self.assertIn("info_min_time", self.query)
+
+    def test_the_silence_is_reported_and_not_diagnosed(self):
+        # The wording is normative. This panel exists because a confident and wrong
+        # message is worse than an empty page; replacing the disclaimer by a verdict
+        # would recreate the defect one level up.
+        self.assertIn("CANNOT TELL THOSE TWO APART", self.query)
+
+    def test_the_ok_state_no_longer_rests_on_a_non_empty_count_alone(self):
+        # The defect in one line: `journal_events > 0` was the FIRST branch of the case,
+        # so it won over everything else. Whatever the ordering becomes, the count alone
+        # must no longer be able to produce the OK state.
+        branches = re.findall(r'([^,()]*),\s*"OK[^"]*"', self.query)
+        self.assertTrue(branches, "no OK branch found: the extractor is broken")
+        for branch in branches:
+            with self.subTest(branch=branch.strip()):
+                self.assertNotRegex(branch, r"journal_events\s*>\s*0")
+
+
+class TheViewLoadsNoCodeAndNoExternalResourceTest(unittest.TestCase):
+    """A-7 of the audit of 2026-08-09, second half.
+
+    A mutation adding `script="evil.js"` to the `<form>` passed the 658 tests of the
+    increment: the structural controls checked the root element, the version, the label
+    and the ASCII, none checked what the root element was allowed to CARRY.
+
+    Simple XML loads client-side code through `script` and `stylesheet` on the root, and
+    a `<html>` panel can carry markup. The controls below are exhaustive by
+    construction - a closed list of attributes per element - rather than a list of known
+    vectors, because the point of A-7 is precisely that a list of known vectors is only
+    as good as the imagination of whoever wrote it.
+    """
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+
+    def test_no_element_carries_an_attribute_that_is_not_declared(self):
+        for element in self.root.iter():
+            allowed = VIEW_ALLOWED_ATTRIBUTES.get(element.tag, frozenset())
+            for attribute in element.keys():
+                with self.subTest(element=element.tag, attribute=attribute):
+                    self.assertIn(attribute, allowed)
+
+    def test_the_view_carries_no_element_that_can_load_anything(self):
+        for tag in ("script", "style", "link", "iframe", "object", "embed", "applet"):
+            with self.subTest(tag=tag):
+                self.assertEqual(self.root.findall(".//%s" % tag), [])
+
+    def test_the_view_references_no_external_resource(self):
+        source = view_source()
+        for pattern in ("http://", "https://", "ftp://", "data:", "javascript:", "//cdn"):
+            with self.subTest(pattern=pattern):
+                self.assertNotIn(pattern, source)
+
+    def test_the_view_carries_no_event_handler(self):
+        # `on*` attributes are the third way into client-side code, and they are not
+        # caught by naming `script` and `stylesheet`.
+        for element in self.root.iter():
+            for attribute in element.keys():
+                with self.subTest(element=element.tag, attribute=attribute):
+                    self.assertFalse(attribute.lower().startswith("on"))
+
+
+class NoShippedSearchHasASideEffectTest(unittest.TestCase):
+    """A-7 of the audit of 2026-08-09, third half - the one nobody asked for.
+
+    The increment detected the mutation that added `| collect index=summary` to a panel.
+    It detected that command, and only that command. A read-only role that runs a view
+    carrying a writing command is an elevation, whichever command it is.
+
+    Two forms of control, because the two bodies of SPL do not admit the same one:
+
+      - the **view** is checked against a closed list of allowed commands. Its eleven
+        queries are read-only by design and their vocabulary is small;
+      - the **macros and saved searches** cannot be: `acl_inventory_base` legitimately
+        drives `| map` over `| rest`, and `editacl_rollback_apply` legitimately ends on
+        `| editacl dryrun=f`, which is the one shipped artifact whose job is to write.
+        Those are checked against the class of side-effecting commands instead, and the
+        `| rest` invocation is checked to be a read.
+    """
+
+    def all_shipped_spl(self):
+        found = []
+        for title, query in queries(view_tree().getroot()):
+            found.append(("view panel %s" % title, query))
+        for name, stanza in read_splunk_conf("default", "macros.conf").items():
+            found.append(("macro %s" % name, stanza.get("definition", "")))
+        for name, stanza in read_splunk_conf("default", "savedsearches.conf").items():
+            found.append(("saved search %s" % name, stanza.get("search", "")))
+        return found
+
+    def test_the_view_uses_no_command_outside_the_declared_set(self):
+        for title, query in queries(view_tree().getroot()):
+            for command in spl_commands(query):
+                with self.subTest(panel=title, command=command):
+                    self.assertIn(command, VIEW_ALLOWED_COMMANDS)
+
+    def test_no_shipped_search_invokes_a_side_effecting_command(self):
+        for label, spl in self.all_shipped_spl():
+            for command in spl_commands(spl):
+                with self.subTest(spl=label, command=command):
+                    self.assertNotIn(command, SIDE_EFFECTING_COMMANDS)
+
+    def test_no_shipped_search_drives_the_rest_endpoint_in_write(self):
+        # `| rest` is a read by default and stays one. A `method=POST` there would turn
+        # a search into a mutation of the platform, from a role that may only search.
+        for label, spl in self.all_shipped_spl():
+            if "rest " not in spl:
+                continue
+            with self.subTest(spl=label):
+                self.assertNotRegex(spl, r"method\s*=\s*(?i:post|put|delete)")
+
+    def test_the_one_writing_macro_is_the_one_that_says_so(self):
+        macros = read_splunk_conf("default", "macros.conf")
+        writers = [
+            name
+            for name, stanza in macros.items()
+            if re.search(r"\|\s*editacl\b", stanza.get("definition", ""))
+        ]
+        self.assertEqual(writers, ["editacl_rollback_apply(1)"])
 
 
 if __name__ == "__main__":                                           # pragma: no cover
