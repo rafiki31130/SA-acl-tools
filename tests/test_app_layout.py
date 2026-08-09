@@ -22,6 +22,20 @@ def read_conf(*parts):
     return parser
 
 
+def read_conf_exact(*parts):
+    """Same reader, keys **as written**.
+
+    `configparser` lowercases option names, which is harmless when a value is looked up
+    by name and unusable when a whole stanza is compared key by key: `KV_MODE` and
+    `TIME_PREFIX` would come back as `kv_mode` and `time_prefix`, and the expected
+    mapping would stop looking like the file it freezes.
+    """
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str
+    parser.read(os.path.join(REPO_ROOT, *parts), encoding="utf-8")
+    return {s: dict(parser.items(s)) for s in parser.sections()}
+
+
 class LayoutTest(unittest.TestCase):
     """The directory tree of section 2."""
 
@@ -67,6 +81,95 @@ class LayoutTest(unittest.TestCase):
             if f.endswith(".py")
         }
         self.assertEqual(expected - present, set())
+
+
+class AppConfTest(unittest.TestCase):
+    """`default/app.conf` in full.
+
+    Found by the mutation campaign of the second remediation, hunting for the
+    nineteenth: `state = disabled` passed the whole suite. One word, and **the app is
+    not loaded at all** - no command, no macro, no view, no ingestion - with every test
+    green. It is the same failure as `disabled = true` on the journal monitor (R-4,
+    N12), one level up, and no control named this file.
+
+    `is_visible = 0` is normative too, and for a reason worth keeping: the metadata
+    exports the view to the system precisely so that a hidden app does not make it
+    unreachable. Flipping the visibility here would not break anything - it would
+    silently contradict the reasoning the metadata comment rests on.
+    """
+
+    EXPECTED = {
+        "install": {"is_configured": "0", "state": "enabled"},
+        "ui": {"is_visible": "0", "label": "SA-acl-tools"},
+        "launcher": {
+            "author": "SA-acl-tools contributors",
+            "description": (
+                "editacl search command: bulk rewrite of knowledge object ACLs "
+                "through the REST API, with a write-ahead journal and rollback."
+            ),
+            "version": "1.0.0",
+        },
+        "package": {"id": "SA-acl-tools", "check_for_updates": "false"},
+    }
+
+    def test_the_app_is_enabled(self):
+        self.assertEqual(read_conf("default", "app.conf").get("install", "state"),
+                         "enabled")
+
+    def test_app_conf_declares_exactly_this_and_nothing_more(self):
+        self.assertEqual(read_conf_exact("default", "app.conf"), self.EXPECTED)
+
+
+class TransformsConfTest(unittest.TestCase):
+    """`default/transforms.conf` in full.
+
+    Same campaign, same class of hole: pointing `acl_object_families` at the other
+    shipped CSV passed the suite. The inventory would then walk the wrong table and
+    return an empty or wrong set of endpoints - `HTTP 200`, no message. The lookup
+    definitions are two stanzas of two keys; freezing them whole costs nothing.
+    """
+
+    EXPECTED = {
+        "acl_object_families": {
+            "filename": "acl_object_families.csv",
+            "case_sensitive_match": "false",
+        },
+        "acl_decommissioned_roles": {
+            "filename": "acl_decommissioned_roles.csv",
+            "case_sensitive_match": "false",
+        },
+    }
+
+    def test_transforms_conf_declares_exactly_this_and_nothing_more(self):
+        self.assertEqual(read_conf_exact("default", "transforms.conf"), self.EXPECTED)
+
+
+class DeployableArchiveTest(unittest.TestCase):
+    """`.gitattributes` decides what `git archive` puts inside the installed app.
+
+    Same campaign: removing `tests/ export-ignore` passed the suite. D-37 makes the
+    deployment start from the commit, so this file is what keeps the test suite, the
+    maintenance tools and the design notes OUT of a search head. Nothing else states
+    that scope, and nothing else would notice it changing.
+    """
+
+    EXPORT_IGNORED = ("tests/", "tools/", "docs/", ".gitattributes", ".gitignore")
+
+    def setUp(self):
+        with open(os.path.join(REPO_ROOT, ".gitattributes"), encoding="utf-8") as f:
+            self.lines = [l.strip() for l in f if l.strip()
+                          and not l.strip().startswith("#")]
+
+    def test_the_repository_only_directories_stay_out_of_the_archive(self):
+        ignored = {
+            line.split()[0] for line in self.lines if "export-ignore" in line
+        }
+        self.assertEqual(ignored, set(self.EXPORT_IGNORED))
+
+    def test_the_vendored_dependencies_are_stored_verbatim(self):
+        # A line-ending conversion would invalidate bin/lib/MANIFEST.sha256 at clone
+        # time, on a machine nobody is watching.
+        self.assertIn("bin/lib/** -text", self.lines)
 
 
 class CommandsConfTest(unittest.TestCase):
@@ -278,10 +381,44 @@ class AuthorizeConfTest(unittest.TestCase):
 
 
 class InputsConfTest(unittest.TestCase):
-    """D-3: one file per `sid`, therefore a monitor stanza written as a **glob**."""
+    """D-3: one file per `sid`, therefore a monitor stanza written as a **glob**.
+
+    R-4 of the re-audit of 2026-08-09. Everything below used to check that the EXPECTED
+    keys carried the expected value, and nothing checked what else the file said. The
+    mutation that put `disabled = true` on the journal monitor passed 689 tests: the
+    write-ahead journal would never be ingested again, the restore macro would return
+    nothing, the monitoring view would be empty, and **the safety net of an irreversible
+    operation would no longer exist** - with the whole suite green.
+
+    The stanza set and every key of it are therefore frozen exhaustively, the same way
+    `authorize.conf` is. `disabled` also gets a control of its own, because that one is
+    not an inconsistency between two files: it is the deliverable ceasing to work.
+    """
+
+    #: `default/inputs.conf` in full, stanza by stanza and key by key.
+    EXPECTED = {
+        "monitor://$SPLUNK_HOME/var/log/splunk/editacl_journal*.log": {
+            "disabled": "false",
+            "index": "_internal",
+            "sourcetype": "editacl:journal",
+        },
+        "monitor://$SPLUNK_HOME/var/log/splunk/editacl.log": {
+            "disabled": "false",
+            "index": "_internal",
+            "sourcetype": "editacl:diag",
+        },
+    }
 
     def setUp(self):
         self.conf = read_conf("default", "inputs.conf")
+
+    def test_neither_monitor_is_disabled(self):
+        for stanza in self.EXPECTED:
+            with self.subTest(stanza=stanza):
+                self.assertEqual(self.conf.get(stanza, "disabled"), "false")
+
+    def test_inputs_conf_declares_exactly_this_and_nothing_more(self):
+        self.assertEqual(read_conf_exact("default", "inputs.conf"), self.EXPECTED)
 
     def test_journal_stanza_is_a_glob(self):
         expected = "monitor://$SPLUNK_HOME/var/log/splunk/editacl_journal*.log"
@@ -306,9 +443,65 @@ class InputsConfTest(unittest.TestCase):
 
 
 class PropsConfTest(unittest.TestCase):
+    """R-4 of the re-audit of 2026-08-09: the journal stanza was guarded by halves.
+
+    `TRUNCATE` and `KV_MODE` were checked; `TIME_PREFIX` and `MAX_TIMESTAMP_LOOKAHEAD`
+    were not, and a mutation of either passed 689 tests. Both decide **when** an event
+    happened: broken, the platform falls back to the ingestion time, and every
+    time-bounded search over the journal - the restore macro first among them, which the
+    README already warns "will not see yesterday's run and will restore nothing, without
+    an error" - drifts silently. Freezing the two stanzas whole is cheaper than arguing
+    about which key deserves a test.
+    """
+
+    #: `default/props.conf` in full, stanza by stanza and key by key.
+    EXPECTED = {
+        "editacl:journal": {
+            "KV_MODE": "json",
+            "SHOULD_LINEMERGE": "false",
+            "LINE_BREAKER": "([\\r\\n]+)",
+            "TIME_PREFIX": '\\"ts\\":\\"',
+            "TIME_FORMAT": "%Y-%m-%dT%H:%M:%S.%3N%:z",
+            "MAX_TIMESTAMP_LOOKAHEAD": "40",
+            "TRUNCATE": "0",
+        },
+        "editacl:diag": {
+            "SHOULD_LINEMERGE": "false",
+            "LINE_BREAKER": "([\\r\\n]+)",
+            "KV_MODE": "none",
+            "EXTRACT-editacl_diag_run":
+                "^\\S+\\s+(?<level>[A-Z]+)\\s+sid=(?<sid>\\S+)",
+            "EXTRACT-editacl_diag_startup":
+                "\\bversion=(?<version>\\S+)\\s+user=(?<user>\\S+)\\s",
+            "EXTRACT-editacl_diag_target":
+                "\\bsplunkd=(?<splunkd>\\S+)\\s+verify_ssl=(?<verify_ssl>\\S+)",
+            "EXTRACT-editacl_diag_params":
+                "\\bdryrun=(?<dryrun>\\S+)\\s+validate_roles=(?<validate_roles>\\S+)"
+                "\\s+journal=(?<journal>\\S+)\\s+max_objects=(?<max_objects>\\S+)",
+            "EXTRACT-editacl_diag_journal":
+                "(?<journal_file>editacl_journal\\S*\\.log)",
+        },
+    }
 
     def setUp(self):
         self.conf = read_conf("default", "props.conf")
+
+    def test_props_conf_declares_exactly_this_and_nothing_more(self):
+        self.assertEqual(read_conf_exact("default", "props.conf"), self.EXPECTED)
+
+    def test_the_timestamp_of_the_journal_is_read_from_the_journal(self):
+        # Without `TIME_PREFIX`, the platform timestamps the event with something else -
+        # often the ingestion time - and says nothing about it.
+        self.assertEqual(self.conf.get("editacl:journal", "TIME_PREFIX"), '\\"ts\\":\\"')
+
+    def test_the_lookahead_covers_the_timestamp_it_has_to_read(self):
+        # The value has to be at least as long as the timestamp that follows the prefix.
+        # Shortened, the parse fails and falls back, silently.
+        lookahead = int(self.conf.get("editacl:journal", "MAX_TIMESTAMP_LOOKAHEAD"))
+        self.assertEqual(lookahead, 40)
+        self.assertGreaterEqual(
+            lookahead, len("2026-08-09T07:57:52.075+00:00")
+        )
 
     def test_json_extraction_of_the_journal(self):
         self.assertEqual(self.conf.get("editacl:journal", "KV_MODE"), "json")

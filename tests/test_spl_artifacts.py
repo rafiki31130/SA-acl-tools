@@ -201,8 +201,14 @@ class MacrosTest(unittest.TestCase):
         # The default is ten (D-30): a restore would hit it at the eleventh object. The
         # volume was already decided by the operator on the outbound leg, and the `sid`
         # delimits the set.
+        #
+        # The VALUE is frozen, not merely the presence of the key. Checking that
+        # `max_objects=` appears accepts `max_objects=10`, which puts the default back
+        # and stops a restore at the eleventh object - on the safety net of an
+        # irreversible operation, reported as a success. Found by the mutation campaign
+        # of the second remediation, in the family R-4 named.
         definition = self.conf["editacl_rollback_apply(1)"]["definition"]
-        self.assertIn("max_objects=", definition)
+        self.assertIn("max_objects=100000", definition)
 
     def test_the_rollback_materializes_the_permission_columns(self):
         # Section 8.6, D-32: restoring an EMPTY permission must clear the attribute.
@@ -543,6 +549,29 @@ class SavedsearchesTest(unittest.TestCase):
         # never the way it is reached (section 6.7 constraint 1).
         for name in self.NAMES + (self.AUDIT,):
             self.assertEqual(self.conf[name]["enableSched"], "0")
+
+    #: The keys a shipped saved search is allowed to carry, exhaustively.
+    #:
+    #: R-4 of the re-audit of 2026-08-09, extended by the campaign that followed it.
+    #: `enableSched` was checked; nothing checked what ELSE a stanza said, and an
+    #: `action.email` pair passed the whole suite. An alert action is a side effect that
+    #: no control over the SPL can see - it is not a command in the pipeline - and it
+    #: would fire from a role whose whole contract is to search. The list is closed for
+    #: the same reason the command list of the view is: a forbidden-key list only stops
+    #: what somebody already thought of.
+    ALLOWED_KEYS = frozenset((
+        "description", "search", "dispatch.earliest_time", "dispatch.latest_time",
+        "enableSched", "disabled", "alert.track", "request.ui_dispatch_view",
+    ))
+
+    def test_no_shipped_search_carries_a_key_outside_the_declared_set(self):
+        for name, stanza in self.conf.items():
+            for key in stanza:
+                with self.subTest(search=name, key=key):
+                    self.assertIn(key, self.ALLOWED_KEYS)
+
+    def test_the_shipped_searches_are_exactly_the_four_declared(self):
+        self.assertEqual(sorted(self.conf), sorted(self.NAMES + (self.AUDIT,)))
 
     # -- section 12.7, blocking deliverable ---------------------------------- #
 
