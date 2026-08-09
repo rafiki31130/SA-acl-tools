@@ -52,7 +52,11 @@
 
          Signal 1 goes silent for the reader who is not entitled to the index the lines
          went to, and signal 2 is deaf for as long as the silence stays under a quarter
-         of the window - 42 hours on the default 7-day range. That combination leaves
+         of the window - between 42 and 48 hours on the shipped default range, which is
+         seven days snapped to midnight plus the hours already elapsed today. MEASURED
+         directly, by bracketing the boundary rather than deducing it: with the freshest
+         readable line 9 h 54 old, a window of 41.2 h reads 24.0 % and stays OK, a window
+         of 38.0 h reads 26.0 % and trips. That combination leaves
          the reader most concerned by this view - a role holder entitled to the ORIGIN
          index only - reading a clean state while the run list has stopped at the date
          of the redirection. MEASURED, and it is why the third element below exists.
@@ -106,7 +110,7 @@
       unread_events &gt; 0 OR found_index_count &gt; read_index_count, "JOURNAL LINES SIT OUTSIDE WHAT THIS VIEW READS - compare the two index columns opposite. Redirecting local/inputs.conf without overriding local/macros.conf produces exactly this, and the panels below then stop at the date of the redirection without saying so. During a deliberate migration the same reading is expected until the old index ages out.",
       journal_events == 0, "NO EVENT IN THIS WINDOW - either no run was recorded, or the journal does not land in an index you may search. Check that the index listed opposite is the one inputs.conf sends the journal to.",
       silent_tail_pct &gt; 25, "READABLE, BUT THE END OF THIS WINDOW IS SILENT - the last " . silent_tail_pct . "% of it carries no journal line, past a threshold of 25% that is A CHOSEN VALUE AND NOT A MEASURED ONE. Either no run took place since then, or the journal stopped reaching this index. THIS PANEL CANNOT TELL THOSE TWO APART - it reports the silence, it does not diagnose it.",
-      1==1, "OK on both signals above - the journal is readable here, and its most recent line falls inside the last 25% of the window. THAT 25% IS A CHOSEN VALUE, NOT A MEASURED ONE: on the default 7-day range it takes 42 hours of silence to leave this state, and a reader entitled only to the index the journal used to land in gets no other warning in the meantime. Judge the date at the start of this line against how often runs are expected here - this word cannot do it for you.")
+      1==1, "OK on both signals above - the journal is readable here, and its most recent line falls inside the last 25% of the window. THAT 25% IS A CHOSEN VALUE, NOT A MEASURED ONE: on the shipped default range, which is seven days plus the hours already elapsed today, it takes between 42 and 48 hours of silence to leave this state, and a reader entitled only to the index the journal used to land in gets no other warning in the meantime. Judge the date at the start of this line against how often runs are expected here - this word cannot do it for you.")
 | eval last_journal_event = if(isnull(last_journal_event), "(none in this window)",
                                strftime(last_journal_event, "%Y-%m-%d %H:%M:%S"))
 | eval journal_age = if(isnull(silent_tail_s), "(no journal line in this window)",

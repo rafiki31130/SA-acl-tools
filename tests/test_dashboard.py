@@ -1153,7 +1153,10 @@ class TheGuardRailSeesMoreThanAnEmptyWindowTest(unittest.TestCase):
         for wording in (
             "%d%%" % self.SILENCE_THRESHOLD_PCT,
             "CHOSEN VALUE, NOT A MEASURED ONE",
-            "42 hours",
+            # What the threshold costs on the shipped range, stated as the band it is
+            # and not as the round figure it is not: `-7d@d .. now` is seven days plus
+            # the hours already elapsed today, so a quarter of it moves with the clock.
+            "between 42 and 48 hours",
         ):
             with self.subTest(wording=wording):
                 self.assertIn(wording, self.query)
