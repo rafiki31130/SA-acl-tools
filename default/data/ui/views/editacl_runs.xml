@@ -50,6 +50,27 @@
               does NOT diagnose: a quiet period with no run looks exactly the same, and
               the wording says so rather than accusing a configuration.
 
+         Signal 1 goes silent for the reader who is not entitled to the index the lines
+         went to, and signal 2 is deaf for as long as the silence stays under a quarter
+         of the window - 42 hours on the default 7-day range. That combination leaves
+         the reader most concerned by this view - a role holder entitled to the ORIGIN
+         index only - reading a clean state while the run list has stopped at the date
+         of the redirection. MEASURED, and it is why the third element below exists.
+
+         3. THE DATE ITSELF, UNCONDITIONALLY. The state string OPENS on the timestamp
+            of the most recent journal line the view could read, and on its age at the
+            end of the window. No threshold guards it, no branch can drop it, and it is
+            the first thing the sentence says. It diagnoses nothing either - it is a
+            fact, and the only one here that no entitlement and no threshold can take
+            away. An operator who knows that runs happen daily and reads "three days
+            ago" has the answer that no automatic signal in this panel can give: the
+            missing information is on the OPERATOR'S side, and the panel's job is to
+            put the date where it meets it.
+
+         Detecting the case automatically would require counting events in an index the
+         reader is not entitled to search. That is not a gap in the construction, it is
+         the entitlement doing its job, and the role is deliberately NOT widened for it.
+
          `sourcetype=editacl:journal` is written out here, and nowhere else in the view.
          Locating the journal REQUIRES naming it without naming an index - that is the
          whole question. `tests/test_dashboard.py` ties the literal to the definition of
@@ -84,11 +105,14 @@
       searchable_index_count == 0, "NO SEARCHABLE INDEX - your role has no index entitlement. Granting it is a deployment prerequisite, outside this app. An empty view does NOT mean that no run took place.",
       unread_events &gt; 0 OR found_index_count &gt; read_index_count, "JOURNAL LINES SIT OUTSIDE WHAT THIS VIEW READS - compare the two index columns opposite. Redirecting local/inputs.conf without overriding local/macros.conf produces exactly this, and the panels below then stop at the date of the redirection without saying so. During a deliberate migration the same reading is expected until the old index ages out.",
       journal_events == 0, "NO EVENT IN THIS WINDOW - either no run was recorded, or the journal does not land in an index you may search. Check that the index listed opposite is the one inputs.conf sends the journal to.",
-      silent_tail_pct &gt; 25, "READABLE, BUT THE END OF THIS WINDOW IS SILENT - the most recent journal line is opposite, and the last " . silent_tail_pct . "% of the window carries none. Either no run took place since then, or the journal stopped reaching this index. THIS PANEL CANNOT TELL THOSE TWO APART - it reports the silence, it does not diagnose it.",
-      1==1, "OK - the journal is readable, carries events in this window, and the most recent line is inside its last quarter")
+      silent_tail_pct &gt; 25, "READABLE, BUT THE END OF THIS WINDOW IS SILENT - the last " . silent_tail_pct . "% of it carries no journal line, past a threshold of 25% that is A CHOSEN VALUE AND NOT A MEASURED ONE. Either no run took place since then, or the journal stopped reaching this index. THIS PANEL CANNOT TELL THOSE TWO APART - it reports the silence, it does not diagnose it.",
+      1==1, "OK on both signals above - the journal is readable here, and its most recent line falls inside the last 25% of the window. THAT 25% IS A CHOSEN VALUE, NOT A MEASURED ONE: on the default 7-day range it takes 42 hours of silence to leave this state, and a reader entitled only to the index the journal used to land in gets no other warning in the meantime. Judge the date at the start of this line against how often runs are expected here - this word cannot do it for you.")
 | eval last_journal_event = if(isnull(last_journal_event), "(none in this window)",
                                strftime(last_journal_event, "%Y-%m-%d %H:%M:%S"))
-| table state, journal_events, last_journal_event, silent_tail_pct,
+| eval journal_age = if(isnull(silent_tail_s), "(no journal line in this window)",
+                        tostring(silent_tail_s, "duration"))
+| eval state = "LAST JOURNAL LINE READ: " . last_journal_event . ", age at the end of the window " . journal_age . ". -- " . state
+| table state, last_journal_event, journal_age, silent_tail_pct, journal_events,
         journal_read_from, journal_found_in, unread_events,
         searchable_index_count, searchable_indexes</query>
           <earliest>$tr.earliest$</earliest>
@@ -145,7 +169,35 @@
          tied together by `tests/test_dashboard.py`.
 
          Both anchor on the SEQUENCE OF KEYS and never on the prose of the message: a
-         reworded warning must not be able to take a field away. -->
+         reworded warning must not be able to take a field away.
+
+         THAT RULE COVERS THE CAUSE COUNTERS TOO, and the first version of this panel
+         broke it while the extractions respected it. `fatal_lines` was
+         `match(_raw, "fatal error:")` and `journal_open_failures` was
+         `match(_raw, "rollback journal not openable")` - two English sentences, in a
+         file whose messages were French until this repository moved to English, and
+         which stay in reach for the whole retention window. MEASURED on the lab, whole
+         retention: 19 runs ended on a fatal error, the English sentence found 1 of
+         them, and the other 18 were reported as "killed before their first write" -
+         the right line, the wrong cause, which is exactly the defect the `rex` above
+         closes one level down.
+
+         Both counters are therefore read from what `logging` writes and not from what
+         a message says:
+
+           - the SEVERITY token. `bin/acltools/diag.py` emits a fatal error at
+             `CRITICAL`, and emits nothing else at that level. The token is produced by
+             the logging library, so it does not change when a sentence is translated
+             or reworded;
+           - the JOURNAL FILE NAME, for the "could not open the journal" cause. Its
+             shape is a contract - D-3, and the monitor glob of `inputs.conf` - while
+             the sentence around it is not. A `WARNING` line naming a journal file is
+             that event; the `INFO` line naming one is the successful open.
+
+         What that leaves uncovered is stated rather than hidden: a future message
+         emitted at `CRITICAL` for something other than a fatal error would be counted
+         as one, and no line of the current corpus carries the journal-open failure -
+         222 lines name a journal file and all 222 are the `INFO` success. -->
 
     <panel>
       <title>Runs started with no journal line</title>
@@ -153,9 +205,10 @@
         <search>
           <query>search (`acl_journal_source`) OR (`acl_diag_source`)
 | eval diag_raw = if(sourcetype="editacl:diag", _raw, null())
-| rex field=diag_raw "^\S+\s+[A-Z]+\s+sid=(?&lt;diag_sid&gt;\S+)"
+| rex field=diag_raw "^\S+\s+(?&lt;diag_level&gt;[A-Z]+)\s+sid=(?&lt;diag_sid&gt;\S+)"
 | rex field=diag_raw "\bversion=\S+\s+user=(?&lt;diag_user&gt;\S+)\s"
 | rex field=diag_raw "\bdryrun=\S+\s+validate_roles=\S+\s+journal=(?&lt;diag_journal&gt;\S+)\s+max_objects=(?&lt;diag_max_objects&gt;\S+)"
+| rex field=diag_raw "(?&lt;diag_journal_file&gt;editacl_journal\S*\.log)"
 | eval sid = coalesce(diag_sid, sid)
 | stats count(eval(sourcetype="editacl:journal")) AS journal_lines,
         count(eval(sourcetype="editacl:diag"))    AS diag_lines,
@@ -163,18 +216,18 @@
         values(diag_user)        AS run_user,
         values(diag_journal)     AS journal_param,
         values(diag_max_objects) AS max_objects,
-        count(eval(sourcetype="editacl:diag" AND match(_raw, "fatal error:"))) AS fatal_lines,
-        count(eval(sourcetype="editacl:diag" AND match(_raw, "rollback journal not openable"))) AS journal_open_failures
+        count(eval(diag_level="CRITICAL")) AS fatal_lines,
+        count(eval(diag_level="WARNING" AND isnotnull(diag_journal_file))) AS journal_open_failures
   BY sid
 | where journal_lines = 0 AND diag_lines &gt; 0
 | eval reason = case(
       journal_param="false", "journal=false - no journal file is produced, by design. Nothing about the objects of this run is recoverable.",
-      journal_open_failures &gt; 0, "the rollback journal could not be opened",
-      fatal_lines &gt; 0, "fatal error before the first journal line",
-      1==1, "no journal line - the run may have been killed before its first write")
+      journal_open_failures &gt; 0, "the rollback journal could not be opened - a WARNING line of this run names a journal file",
+      fatal_lines &gt; 0, "fatal error before the first journal line - this run carries a CRITICAL diagnostic line",
+      1==1, "no journal line, and no CRITICAL line either - the run may have been killed before its first write")
 | sort - started
 | convert ctime(started)
-| table started, sid, run_user, journal_param, max_objects, reason, diag_lines</query>
+| table started, sid, run_user, journal_param, max_objects, reason, fatal_lines, journal_open_failures, diag_lines</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>

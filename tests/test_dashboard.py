@@ -578,7 +578,7 @@ class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
     """
 
     #: Fields the panel reads from the diagnostic, and the name it rebuilds them under.
-    DIAGNOSTIC_FIELDS = ("sid", "user", "journal", "max_objects")
+    DIAGNOSTIC_FIELDS = ("sid", "level", "user", "journal", "max_objects", "journal_file")
 
     def setUp(self):
         self.root = view_tree().getroot()
@@ -644,9 +644,17 @@ class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
 
     def test_the_panel_and_the_declared_extraction_use_the_same_expression(self):
         # Two expressions that drift apart would make the panel and every other consumer
-        # disagree on what a sid is, without a message.
-        declared = self.props["editacl:diag"]["EXTRACT-editacl_diag_run"]
-        self.assertIn(declared.replace("(?<sid>", "(?<diag_sid>"), self.query)
+        # disagree on what a sid is, without a message. The panel prefixes every capture
+        # name with `diag_`; nothing else may differ.
+        for stanza, names in (
+            ("EXTRACT-editacl_diag_run", ("level", "sid")),
+            ("EXTRACT-editacl_diag_journal", ("journal_file",)),
+        ):
+            declared = self.props["editacl:diag"][stanza]
+            for name in names:
+                declared = declared.replace("(?<%s>" % name, "(?<diag_%s>" % name)
+            with self.subTest(extraction=stanza):
+                self.assertIn(declared, self.query)
 
     def test_no_diagnostic_field_is_read_from_an_extracted_field(self):
         for field in self.DIAGNOSTIC_FIELDS:
@@ -662,6 +670,148 @@ class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
         for field in ("user", "journal", "max_objects"):
             with self.subTest(field=field):
                 self.assertIn("values(diag_%s)" % field, self.query)
+
+
+class NoCauseIsAttributedFromTheProseOfAMessageTest(unittest.TestCase):
+    """R-1 of the re-audit of 2026-08-09.
+
+    The previous increment forbade anchoring on the prose of a message - and enforced
+    the rule on the `EXTRACT-` stanzas only. The panel that names the cause of a run
+    kept two counters built on `match(_raw, "<an English sentence>")`, and the rule was
+    not stated anywhere for the searches.
+
+    MEASURED on the lab, whole retention window: 19 runs ended on a fatal error. The
+    English sentence `fatal error:` found **1**. The other 18 predate the move of this
+    repository to English and read `erreur fatale :`; the panel reported all 18 as
+    "killed before their first write" - the right line, the wrong cause, which is
+    verbatim the defect A-1 was about.
+
+    Recognising two languages was rejected: the second one will not exist on a fresh
+    deployment, and a third reworded sentence would reopen the hole. Excluding the older
+    lines the way the journal excludes its legacy format was rejected too - the journal
+    has a structural marker for it (`member`), the diagnostic has none, and detecting
+    the language is exactly what we are trying not to do.
+
+    What the counters read instead is what the LOGGING LIBRARY writes, not what the
+    message says:
+
+      - the severity token, `CRITICAL`, which `bin/acltools/diag.py` emits for a fatal
+        error and for nothing else;
+      - the journal FILE NAME, whose shape is a contract (D-3), for the cause "the
+        journal could not be opened".
+
+    Both are checked below against the lines the code actually produces, not against a
+    fixture written by hand.
+    """
+
+    #: Fields whose values the cause counters test. Both come out of the two `rex`
+    #: expressions of the panel, never out of a `match()` on the message.
+    CAUSE_FIELDS = ("diag_level", "diag_journal_file")
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+        self.queries = queries(self.root)
+        self.query = dict(self.queries)[DIAGNOSTIC_PANEL]
+
+    def emitted_lines(self, action):
+        """The diagnostic lines `action` produces, formatted as they land on disk."""
+        import logging
+
+        from acltools.diag import Diagnostics
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(self.format(record))
+
+        handler = Capture()
+        diag = Diagnostics("(never opened)", sid="1786259904.10", handler=handler)
+        action(diag)
+        diag.close()
+        return records
+
+    def test_no_query_attributes_a_cause_by_matching_the_prose_of_a_message(self):
+        # The rule of the previous increment, extended from the `EXTRACT-` stanzas to
+        # the searches - which is where it was broken.
+        for title, query in self.queries:
+            with self.subTest(panel=title):
+                self.assertNotRegex(query, r"match\(\s*(?:_raw|diag_raw)\b")
+
+    def test_the_two_cause_counters_read_a_field_and_not_a_sentence(self):
+        self.assertIn('count(eval(diag_level="CRITICAL")) AS fatal_lines', self.query)
+        self.assertIn(
+            'count(eval(diag_level="WARNING" AND isnotnull(diag_journal_file)))'
+            " AS journal_open_failures",
+            self.query,
+        )
+        for field in self.CAUSE_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn("(?<%s>" % field, self.query)
+
+    def test_the_severity_the_panel_calls_fatal_is_the_one_the_code_emits(self):
+        # The tie that makes the anchor a contract rather than a guess: the line the
+        # code produces for a fatal error is run through the panel's own expression,
+        # and the level it yields must be the one the panel counts.
+        lines = self.emitted_lines(lambda diag: diag.fatal("whatever the wording is"))
+        self.assertEqual(len(lines), 1)
+        expression = re.search(r'rex field=diag_raw "([^"]+)"', self.query).group(1)
+        match = re.search(expression.replace("(?<", "(?P<"), lines[0])
+        self.assertIsNotNone(match, lines[0])
+        self.assertEqual(match.group("diag_level"), "CRITICAL")
+
+    def test_no_other_diagnostic_event_is_emitted_at_that_severity(self):
+        # Counting a severity is only sound while that severity means one thing. Every
+        # other event of section 8.1 is exercised and must come out below CRITICAL.
+        from acltools.model import FieldNames, Params
+
+        quiet = Params(names=FieldNames(), dryrun=True, validate_roles=True,
+                       journal=True, max_objects=10, warnings=("something",))
+
+        def everything_but_a_fatal(diag):
+            diag.startup(version="1.0.0", user="operator")
+            diag.params(quiet)
+            diag.capability(True)
+            diag.capability(False, detail="denied")
+            diag.realtime("refused")
+            diag.mapping({"total": 1, "from_json": 1, "from_override": 0})
+            diag.journal("/var/log/splunk/editacl_journal_1.log", True)
+            diag.journal("/var/log/splunk/editacl_journal_1.log", False)
+            diag.info("plain")
+            diag.warning("plain")
+
+        for line in self.emitted_lines(everything_but_a_fatal):
+            with self.subTest(line=line[:60]):
+                self.assertNotIn(" CRITICAL ", line)
+
+    def test_the_journal_open_failure_is_recognised_by_the_file_name(self):
+        # The only part of that message which does not change with the language. Its
+        # shape is the contract of D-3, and it is the same one `inputs.conf` monitors.
+        from acltools.journal import journal_filename
+
+        name = journal_filename("1786259904.10")
+        expression = re.search(
+            r'rex field=diag_raw "(\(\?<diag_journal_file>[^"]+)"', self.query
+        ).group(1)
+        self.assertRegex(name, expression.replace("(?<", "(?P<"))
+
+        opened, failed = self.emitted_lines(
+            lambda diag: [diag.journal("/var/log/splunk/" + name, True),
+                          diag.journal("/var/log/splunk/" + name, False)]
+        )
+        self.assertRegex(failed, expression.replace("(?<", "(?P<"))
+        self.assertIn(" WARNING ", failed)
+        # And the successful open, which carries the same file name, is NOT a failure:
+        # it is the severity that separates the two.
+        self.assertRegex(opened, expression.replace("(?<", "(?P<"))
+        self.assertIn(" INFO ", opened)
+
+    def test_the_fatal_count_is_displayed_and_not_only_used(self):
+        # A cause the reader cannot check is a verdict. The count that decides it is a
+        # column of the panel.
+        columns = self.query.split("| table", 1)[1]
+        self.assertIn("fatal_lines", columns)
+        self.assertIn("journal_open_failures", columns)
 
 
 class TheSearchesAvoidTheMeasuredTrapsAgainTest(unittest.TestCase):
@@ -706,6 +856,39 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         # A `[views]` stanza would export every future view of this app without anyone
         # deciding it.
         self.assertNotIn("views", self.meta)
+
+    #: Every stanza of `metadata/default.meta` and what it exports, exhaustively.
+    #:
+    #: R-4 of the re-audit of 2026-08-09: an extra export stanza passed 689 tests. Each
+    #: control here named the stanza it cared about, so a stanza nobody had named was
+    #: invisible. What this file decides is **which objects of the app are visible
+    #: outside it**; widening that set is a decision, and a decision belongs in a diff
+    #: somebody has to argue for. The class-wide `[views]` control above says the same
+    #: thing about one stanza; this one says it about all of them.
+    #: `access` is frozen with `export` and not separately: the two answer the same
+    #: question. Widening the default stanza to `write : [ * ]` passed the suite while
+    #: only `export` was compared.
+    EXPECTED_META = {
+        "": ("none", "read : [ * ], write : [ admin ]"),
+        "commands": ("system", None),
+        "commands/editacl": ("system", "read : [ * ], write : [ admin ]"),
+        "searchbnf": ("system", "read : [ * ], write : [ admin ]"),
+        "macros": ("system", "read : [ * ], write : [ admin ]"),
+        "transforms": ("system", "read : [ * ], write : [ admin ]"),
+        "props": ("system", "read : [ * ], write : [ admin ]"),
+        "lookups": ("system", "read : [ * ], write : [ admin ]"),
+        "savedsearches": ("none", "read : [ * ], write : [ admin ]"),
+        "views/%s" % VIEW_NAME: ("system", "read : [ %s ], write : [ admin ]" % ROLE_NAME),
+    }
+
+    def test_the_metadata_declares_exactly_this_and_nothing_more(self):
+        self.assertEqual(
+            {
+                name: (stanza.get("export"), stanza.get("access"))
+                for name, stanza in self.meta.items()
+            },
+            self.EXPECTED_META,
+        )
 
     def test_the_metadata_stanza_names_the_file_that_exists(self):
         # A stanza pointing at a view that does not exist loads without the slightest
@@ -810,16 +993,22 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         defaults = [n.get("name") for n in nav.findall(".//view") if n.get("default")]
         self.assertEqual(defaults, ["search"])
 
+    #: The two source macros, definition included. D-51 makes them the single place
+    #: where the journal index is written; the mutation campaign of the second
+    #: remediation changed `index=_internal` to another index there and passed the whole
+    #: suite. Every shipped search would then read an index that carries nothing, and
+    #: report an empty result as a success - the failure D-51 exists to prevent, entered
+    #: through the one file the rule points everybody at.
+    EXPECTED_SOURCE_MACROS = {
+        "acl_journal_source": "index=_internal sourcetype=editacl:journal",
+        "acl_diag_source": "index=_internal sourcetype=editacl:diag",
+    }
+
     def test_both_source_macros_are_declared_and_name_their_sourcetype(self):
-        expected = {
-            "acl_journal_source": "sourcetype=editacl:journal",
-            "acl_diag_source": "sourcetype=editacl:diag",
-        }
-        for name, sourcetype in expected.items():
+        for name, definition in self.EXPECTED_SOURCE_MACROS.items():
             with self.subTest(macro=name):
                 self.assertIn(name, self.macros)
-                definition = self.macros[name]["definition"]
-                self.assertIn(sourcetype, definition)
+                self.assertEqual(self.macros[name]["definition"], definition)
                 self.assertNotIn("*", definition)
                 self.assertEqual(self.macros[name].get("iseval"), "0")
                 self.assertTrue(self.macros[name].get("description", "").strip())
@@ -913,6 +1102,20 @@ class TheGuardRailSeesMoreThanAnEmptyWindowTest(unittest.TestCase):
         self.assertIn("values(index) AS journal_found_in", self.query)
         self.assertIn("values(index) AS journal_read_from", self.query)
 
+    def test_the_tstats_scope_is_every_index_the_role_may_search(self):
+        # R-4 of the re-audit: narrowing this `WHERE` to `index=_internal` passed the
+        # whole suite, and it is the exact regression of the fix. The signal then finds
+        # the journal only where the view already reads, `journal_found_in` falls back
+        # to one index, `unread_events` to zero, and the panel returns to the confident
+        # OK state A-2 was about. The scope IS the substance of the signal - naming
+        # `tstats` and two field names proves nothing.
+        self.assertIn(
+            "WHERE (index=* OR index=_*) sourcetype=editacl:journal BY index",
+            self.query,
+        )
+        self.assertIn("| eventcount summarize=false index=* index=_*", self.query)
+        self.assertNotRegex(self.query, r"tstats[\s\S]{0,200}index=_internal")
+
     def test_both_index_sets_are_shown_side_by_side(self):
         columns = self.query.split("| table", 1)[1]
         self.assertIn("journal_read_from", columns)
@@ -924,9 +1127,67 @@ class TheGuardRailSeesMoreThanAnEmptyWindowTest(unittest.TestCase):
             r"unread_events\s*>\s*0\s*OR\s*found_index_count\s*>\s*read_index_count",
         )
 
+    #: The one threshold of this panel. It is a chosen value, and the point of freezing
+    #: it here is that changing it must be a decision, not a diff nobody reads.
+    SILENCE_THRESHOLD_PCT = 25
+
     def test_a_silent_end_of_window_changes_the_state(self):
         self.assertIn("silent_tail_pct", self.query)
         self.assertRegex(self.query, r"silent_tail_pct\s*>\s*\d+")
+
+    def test_the_silence_threshold_is_the_value_that_was_decided(self):
+        # R-6 of the re-audit. The previous control was `silent_tail_pct\s*>\s*\d+`,
+        # which accepts 99 exactly as it accepts 25 - a threshold of 99 % empties the
+        # signal of any meaning and passed 689 tests (mutation N10). `\d+` checked that
+        # a threshold was PRESENT, never that it was the one that had been argued for.
+        thresholds = [
+            int(value)
+            for value in re.findall(r"silent_tail_pct\s*>\s*(\d+)", self.query)
+        ]
+        self.assertEqual(thresholds, [self.SILENCE_THRESHOLD_PCT])
+
+    def test_the_threshold_is_read_as_a_choice_and_not_as_a_measurement(self):
+        # A threshold nobody can discuss is a threshold everybody suffers. It is stated
+        # for what it is, at the place where it is read - the state itself - together
+        # with what it costs on the default window.
+        for wording in (
+            "%d%%" % self.SILENCE_THRESHOLD_PCT,
+            "CHOSEN VALUE, NOT A MEASURED ONE",
+            "42 hours",
+        ):
+            with self.subTest(wording=wording):
+                self.assertIn(wording, self.query)
+
+    def test_the_date_of_the_last_line_opens_the_state_on_every_state(self):
+        # R-2 of the re-audit. The two signals of this panel are both defeatable by an
+        # entitlement or by a threshold, and their combination leaves a role holder
+        # entitled to the ORIGIN index only reading `OK` while the run list has stopped
+        # at the date of the redirection. MEASURED, on the default window of the view.
+        #
+        # No automatic detection can close that without reading an index the reader is
+        # not entitled to read. What CAN be made unconditional is the fact itself: the
+        # state string opens on the date of the most recent journal line and on its age,
+        # before any branch, so that the one piece of knowledge the panel does not have
+        # - how often runs are expected here - meets the one fact it does.
+        self.assertRegex(
+            self.query,
+            r'eval state = "LAST JOURNAL LINE READ: " \. last_journal_event'
+            r' \. ", age at the end of the window " \. journal_age',
+        )
+        # After every branch of the case, so no branch can drop it.
+        self.assertLess(self.query.index("eval state = case("),
+                        self.query.index('eval state = "LAST JOURNAL LINE READ'))
+        # And rendered as columns of their own, next to the state and not at the end.
+        columns = [c.strip() for c in
+                   self.query.split("| table", 1)[1].replace("\n", " ").split(",")]
+        self.assertEqual(columns[:3], ["state", "last_journal_event", "journal_age"])
+
+    def test_the_age_of_the_last_line_is_computed_and_not_only_its_ratio(self):
+        self.assertIn(
+            'eval journal_age = if(isnull(silent_tail_s), "(no journal line in this window)",',
+            self.query,
+        )
+        self.assertIn('tostring(silent_tail_s, "duration")', self.query)
 
     def test_the_window_bounds_come_from_the_search_and_not_from_a_constant(self):
         # `addinfo` is what makes the silence relative to the window the operator asked

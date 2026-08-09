@@ -1020,15 +1020,35 @@ signals, and it is worth knowing what each one is worth.
 |---|---|---|
 | No searchable index | Your role has no index entitlement at all. Granting it is outside this app | - |
 | **Journal lines outside what this view reads** | Lines of the journal sourcetype sit, in this window, in an index the view does not read. The two index columns show which. This is what a redirection of `local/inputs.conf` alone produces | Nothing, if the index they went to is one **you are not entitled to search**: what you cannot search, you cannot count either. The signal is then silent, and only the next one is left. It also fires, legitimately, during a deliberate migration, until the old index ages out |
-| **The end of the window is silent** | The most recent journal line is older than the last quarter of the window you asked for. The date is displayed on every state, not only on this one | **Why** it is silent. A period with no run looks exactly the same as a journal that stopped arriving. The panel says so in as many words rather than guessing |
+| **The end of the window is silent** | The most recent journal line is older than the last 25 % of the window you asked for | **Why** it is silent. A period with no run looks exactly the same as a journal that stopped arriving. The panel says so in as many words rather than guessing. It also proves nothing at all *below* the threshold - see the blind band below |
+| **The date of the most recent journal line** - always, on every state | Exactly what it says: when the freshest line this view can read was written, and how old it is at the end of the window. **No threshold and no entitlement can suppress it**: it is the first thing the state says | Anything about *why*. It is a fact handed to the reader, and the reader is the one who knows how often runs are expected here |
 
-Two consequences to keep in mind:
+**The blind band of the silence signal, measured.** The threshold is **25 % of the
+window asked for**, which is a **chosen value and not a measured one** - no threshold
+separates a quiet platform from a broken one, and this one is written in the state text
+so that it can be argued with rather than suffered. On the **default 7-day window that
+is 42 hours** of silence before anything changes. Measured on a lab, same journal, four
+windows: **5.2 % over 7 d** and **19.3 % over 48 h** do *not* trip it, **38.5 % over
+24 h** does. Narrow the time range to see a recent redirection sooner - or read the
+date, which needs no threshold.
 
-- a redirection **more recent** than a quarter of the window does not yet trip the
-  silence signal. Narrow the time range to see it sooner;
+**What this costs the reader the view is written for.** A holder of `editacl_auditor`
+entitled to the index the journal *used to* land in, and not to the one it was
+redirected to, gets **no automatic signal at all under those 42 hours**: the first
+signal is blind - counting lines in an index you may not search is exactly what an
+entitlement forbids - and the second has not tripped yet. That case **cannot** be
+detected without reading what the reader is not allowed to read, and the role is
+deliberately not widened for it. What that reader always has is the date at the start
+of the state line, and the run list stopping on the same day.
+
+Two more consequences to keep in mind:
+
 - the check covers the **journal** sourcetype. A redirection of the **diagnostic**
   input alone is not detected, and the *Runs started with no journal line* panel would
-  then lose runs silently.
+  then lose runs silently;
+- `unread_events` compares two counts taken on the same pinned window but not at the
+  same instant. It can flicker while a run is writing; the index comparison beside it
+  cannot.
 
 ### What the view cannot show
 
@@ -1343,6 +1363,8 @@ modification of a vendored file, an addition or a disappearance are still detect
 | **Dashboard requires an index entitlement** | Without read access to the journal index the view shows nothing | The *Entitlement check* panel distinguishes "no run" from "no access". Granting the access is outside this app |
 | **The monitoring view has never been opened in a browser** | Its **client-side** behaviour is unmeasured: the panels that appear once a run is selected, the input that clears the selection, and **the click on a row of the run list**. The detail panels may fail to appear | Structure, token wiring and searches are frozen by the test suite and were replayed through the REST API; **nothing after the page loads is measured**. Fallback: type the `sid` into the *Run (sid)* input, which drives the same token. See [Run monitoring view](#run-monitoring-view) |
 | **The entitlement check reports a silent window, it does not diagnose it** | A journal that stopped arriving and a period with no run produce the same reading | The panel states the ambiguity instead of guessing, and shows the date of the most recent line on every state. The index comparison beside it resolves the case **only** when the reader may search the index the lines went to |
+| **No automatic signal under 42 h for a reader entitled to the origin index only** | After a redirection, a holder of the read role who may search the old index and not the new one reads a clean state while the run list has already stopped. Measured on the default 7-day window | **None, and it is not fixable inside the app**: detecting it means counting events in an index that reader may not search. The mitigation is a fact, not a signal - the date of the most recent journal line **opens the state on every state**, at every threshold, and the run list stops on the same day. Narrow the time range, or compare that date with how often runs are expected |
+| **The cause of a run with no journal line is read from a severity, not from a sentence** | A run is called fatal because it carries a `CRITICAL` diagnostic line, and "journal could not be opened" because a `WARNING` line names a journal file | That the message said so. It is the deliberate choice: the wording of a message is translated and reworded, its severity is not. Measured: of 19 fatal runs in a lab retention window, matching the English sentence found **1**. What it costs: a future message emitted at `CRITICAL` for something that is not a fatal error would be counted as one |
 | **`app_disabled` costs one REST call per distinct app** | Marginal latency on a multi-app batch | Memoised per app |
 | **Taking ownership: two platform conditions** | `admin_all_objects` is required - an account carrying only the right over its own objects is refused **even on its own object** - and the target owner must exist, failing which the platform refuses without mutating | Check both before a campaign carrying `new_owner`. The refusal is visible: `acl_status = "error"` with the platform code |
 | **Moving between applications and renaming are out of scope** | The first exists but a badly chosen parameter makes the object **unreachable for writing**, deletion included; the second does not exist at all | Out of scope, knowingly. Moving deserves its own tool, with its own safety net |
