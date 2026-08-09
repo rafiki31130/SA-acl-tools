@@ -145,7 +145,7 @@ class _Work(object):
     """Mutable state of the processing of one event, frozen into an `EventResult`."""
 
     __slots__ = (
-        "title", "app", "eai_type", "endpoint", "http_code", "status",
+        "title", "app", "eai_type", "handler", "endpoint", "http_code", "status",
         "error", "warnings", "before", "after", "journaled", "post_attempted",
         "counted", "source", "platform_name",
     )
@@ -154,6 +154,7 @@ class _Work(object):
         self.title = str(event.title or "")
         self.app = str(event.app or "")
         self.eai_type = str(event.eai_type or "")
+        self.handler = ""
         self.endpoint = ""
         self.http_code = 0
         self.status = "error"
@@ -180,6 +181,7 @@ class _Work(object):
             title=self.title,
             app=self.app,
             eai_type=self.eai_type,
+            handler=self.handler,
             endpoint=self.endpoint,
             http_code=int(self.http_code or 0),
             error=self.error,
@@ -327,6 +329,13 @@ class EventProcessor(object):
             event.id_value, event.eai_type, self._mapping
         )
         work.source = source
+        # The handler is kept, and no longer discarded once the URI is built
+        # (section 8.2). It is what the command knows about the nature of the object at
+        # this exact point, whichever of the two routes answered, whereas `eai_type` is
+        # only what the input event happened to carry. On a batch built on native
+        # endpoints, `eai_type` is empty and this is the only type-like datum the
+        # journal can carry.
+        work.handler = handler_path
         work.endpoint = build_object_path(event.app, handler_path, event.title)
 
         # Rank -1 (section 3.5, D-26, D-34) - private objects, skipped **with no GET

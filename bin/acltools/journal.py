@@ -105,12 +105,32 @@ def _object_fields(result):
     which section 8.5 and the job-listing views already have to reason about - a
     summary line would then be counted as one more object by any `dc()` over those
     fields.
+
+    **`handler` carries what `eai_type` was assumed to carry and does not.** `eai_type`
+    is copied from the input event: a batch built on the native endpoints has none -
+    measured, twenty-four of the twenty-seven native handlers emit no `eai:type` - and
+    the objects are nevertheless resolved, written, and journaled with an empty type.
+    Every consumer that groups by type then piles those lines into a single bucket. The
+    handler path the command **actually resolved** is the same fact, it is filled in
+    whenever resolution succeeded whichever route answered, and it is what an operator
+    reads on the URI anyway.
+
+    It is **not** a type: the mapping table of section 6 is not injective, and the `id`
+    route resolves paths that no key of that table names. The journal therefore carries
+    both, and neither stands in for the other.
+
+    `handler` is kept on a `skipped_private` line, where `endpoint` is deliberately
+    erased. The two are not the same kind of datum: `endpoint` is an **address**, and
+    the one computed there designates the shared object of the same name rather than
+    the private object the input row designated - publishing it would mislead. The
+    handler is the **family**, which is the same for both.
     """
     return {
         "endpoint": str(result.endpoint or ""),
         "app": str(result.app or ""),
         "title": str(result.title or ""),
         "eai_type": str(result.eai_type or ""),
+        "handler": str(result.handler or ""),
     }
 
 

@@ -705,6 +705,32 @@ object that could not be found carries one. And the reverse trap: `eai_type` may
 empty on the line of an object that was written and resolved, so any breakdown by object
 type undercounts unless it labels those lines.
 
+That contract is also what closes the rollback hole. The shape
+`/servicesNS/nobody/<app>/<handler path>/<encoded title>` is exactly what route 1 of
+endpoint resolution parses, so the rollback macro re-emits `endpoint` as `id` and no
+longer depends on `eai:type` being present. The identifier costs no journaled field -
+the string was already there, on both phases, and it is the group key of the macro's own
+aggregation, so it cannot disagree with the pairing.
+
+### 5.6 Two fields for the nature of an object, and no inversion between them
+
+`eai_type` is what the **input event** carried; `handler` is what the command
+**resolved**. They coincide on a batch built on the inventory macro and diverge on every
+other: twenty-four of the twenty-seven native handlers emit no `eai:type`, so an event
+read natively is resolved, written and journaled with an empty type.
+
+Going from a handler back to a type is **not available**, and this was checked on the
+shipped artefacts rather than assumed. `bin/acl_endpoint_map.json` holds 28 keys for 27
+distinct handler paths - `times` and `conf-times` both map to `data/ui/times` - so the
+inversion is not a function. `lookups/acl_object_families.csv`, the same information in
+the shape the inventory macro needs, holds 27 rows and *is* injective, because it drops
+the `times` key; it is an inventory of families, not a reverse map, and reading it as
+one would silently rename an object type. On top of that, resolution through `id`
+accepts any well-formed handler path, including paths no key of either artefact names.
+
+The journal therefore carries both fields and derives neither. Consumers that want to
+group by the nature of an object read `handler` first: it is the one that is filled in.
+
 ---
 
 ## 6. The shipped SPL artefacts

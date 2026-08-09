@@ -30,10 +30,10 @@ INPUT_CONTRACT = (
     "id",
 )
 
-#: Fields produced by `editacl_rollback` (section 8.6). `id` is not among them: it is
-#: not journaled, and that is precisely why the inventory macro has to synthesize
-#: `eai:type` (section 6.7 constraint 4).
-#: The order is the one of section 8.6, taken literally.
+#: Fields **aggregated** by `editacl_rollback` (section 8.6), in the order of that
+#: section taken literally. `id` is not among them because it is not aggregated: it is
+#: derived from the `endpoint` group key by an `eval`, and `IdIsReEmittedFromTheJournalledEndpointTest`
+#: covers it. The macro therefore emits eight fields, of which seven are aggregated.
 ROLLBACK_CONTRACT = (
     "eai:acl.perms.read",
     "eai:acl.perms.write",
@@ -333,9 +333,12 @@ def run_rollback_macro(lines, sid):
                     break
         row["eai:acl.perms.read"] = row.get("eai:acl.perms.read", "")
         row["eai:acl.perms.write"] = row.get("eai:acl.perms.write", "")
+        # `| eval id = endpoint`: the group key IS the journaled endpoint, so the
+        # identifier costs no aggregation and cannot disagree with the pairing.
+        row["id"] = key
         emitted[key] = {
             name: value for name, value in row.items()
-            if name == "title" or name.startswith("eai:acl.") or name == "eai:type"
+            if name in ("title", "eai:type", "id") or name.startswith("eai:acl.")
         }
     return emitted
 
@@ -489,6 +492,203 @@ class RollbackMacroIsUnaffectedByTheEndOfRunLineTest(unittest.TestCase):
         self.assertIn('search phase="intent"', definition)
         self.assertNotIn("phase!=", definition)
         self.assertNotIn("summary", definition)
+
+
+class IdIsReEmittedFromTheJournalledEndpointTest(unittest.TestCase):
+    """The hole in the safety net, and the shape of its closing (section 8.6.bis).
+
+    The macro used to re-emit `eai:type` and **no object identifier**, so the
+    resolution of section 5.2 rested on that single field at replay time. An object
+    whose input row carried no type - which every batch built on the native endpoints
+    produces - was journaled with an empty type and rejected at rollback, its prior
+    state intact in the journal and unusable.
+
+    `endpoint` was already journaled and section 8.5 makes its shape a **contract**:
+    `/servicesNS/nobody/<app>/<handler path>/<encoded title>`, identical on both
+    phases. That is exactly the shape route 1 of section 5.2 parses. The macro
+    therefore emits it as `id`, and the fix costs no new journaled field.
+
+    These tests do not read the macro and conclude: they run an untyped batch through
+    the real state machine, model the macro over the journal it produced, and feed the
+    result back into a **second** state machine, which is where the rejection used to
+    happen.
+    """
+
+    UNTYPED_ID = (
+        "https://localhost:8089/servicesNS/nobody/my_app/saved/searches/untyped_one"
+    )
+
+    def setUp(self):
+        from acltools.pipeline import EventProcessor
+        from acltools.rest import RestResponse
+
+        from .helpers import (
+            FIXTURE_MAPPING,
+            FakeClock,
+            FakeJournal,
+            FakeRest,
+            acl_body,
+            make_ctx,
+            make_event,
+            make_params,
+        )
+
+        self._EventProcessor = EventProcessor
+        self._make_event = make_event
+        self._mapping = FIXTURE_MAPPING
+
+        endpoint = "/servicesNS/nobody/my_app/saved/searches/untyped_one"
+        self.journal = FakeJournal()
+        rest = FakeRest(
+            get_responses={endpoint: RestResponse(200, acl_body(write=("legacy_role",)))},
+            default_post=RestResponse(200, b"{}"),
+        )
+        self.processor = EventProcessor(
+            params=make_params(max_objects=10),
+            ctx=make_ctx(sid="1700000001.1"),
+            rest=rest,
+            journal=self.journal,
+            mapping=FIXTURE_MAPPING,
+            clock=FakeClock(),
+        )
+        # The untyped batch: no `eai:type` at all, resolution through `id` alone. That
+        # is what the saved-search endpoint of the platform hands out.
+        self.outbound = self.processor.process(
+            make_event(
+                title="untyped_one",
+                eai_type=None,
+                id_value=self.UNTYPED_ID,
+                write="new_role_admin",
+            )
+        )
+        lines = self.journal.intents + self.journal.outcomes
+        self.lines = [dict(line) for line in sorted(lines, key=lambda l: l["ts"])]
+        self.restored = run_rollback_macro(self.lines, "1700000001.1")
+        self.row = self.restored[endpoint]
+
+    # -- the defect, stated as a fact rather than as a story ---------------- #
+
+    def test_the_outbound_pass_writes_the_object_with_no_type_journalled(self):
+        """Guard rail. If this batch were typed, the rest would prove nothing."""
+        self.assertEqual(self.outbound.status, "updated")
+        for line in self.lines:
+            with self.subTest(phase=line["phase"]):
+                self.assertEqual(line["eai_type"], "")
+
+    def test_the_rollback_row_carries_no_type_either(self):
+        self.assertEqual(self.row["eai:type"], "")
+
+    # -- the fix ------------------------------------------------------------ #
+
+    def test_the_macro_emits_id_from_the_endpoint(self):
+        definition = read_splunk_conf("default", "macros.conf")[
+            "editacl_rollback(1)"
+        ]["definition"]
+        self.assertIn("| eval id = endpoint", definition)
+        self.assertRegex(definition, r"\|\s*fields\b[^\n]*\bid\b")
+
+    def test_the_emitted_id_is_the_journalled_endpoint_verbatim(self):
+        """Not a rebuilt string: the group key itself, so it cannot disagree with the
+        pairing the macro just did."""
+        self.assertEqual(
+            self.row["id"], "/servicesNS/nobody/my_app/saved/searches/untyped_one"
+        )
+
+    def test_the_untyped_rollback_row_resolves_and_is_written_back(self):
+        """The end of the hole: replay the row and reach `updated`, not `rejected`."""
+        from acltools.rest import RestResponse
+
+        from .helpers import FakeClock, FakeJournal, FakeRest, acl_body, make_ctx, \
+            make_params
+
+        endpoint = "/servicesNS/nobody/my_app/saved/searches/untyped_one"
+        rest = FakeRest(
+            get_responses={
+                endpoint: RestResponse(200, acl_body(write=("new_role_admin",)))
+            },
+            default_post=RestResponse(200, b"{}"),
+        )
+        back = self._EventProcessor(
+            params=make_params(max_objects=10),
+            ctx=make_ctx(sid="1700000001.2"),
+            rest=rest,
+            journal=FakeJournal(),
+            mapping=self._mapping,
+            clock=FakeClock(),
+        ).process(
+            self._make_event(
+                title=self.row["title"],
+                app=self.row["eai:acl.app"],
+                eai_type=self.row["eai:type"] or None,
+                id_value=self.row["id"],
+                sharing=self.row["eai:acl.sharing"],
+                owner=self.row["eai:acl.owner"],
+                read=self.row["eai:acl.perms.read"],
+                write=self.row["eai:acl.perms.write"],
+            )
+        )
+        self.assertEqual(back.status, "updated")
+        self.assertEqual(back.endpoint, endpoint)
+        self.assertEqual(back.after.perms_write, ("legacy_role",))
+
+    def test_without_the_id_the_same_row_is_rejected(self):
+        """The counter-proof, so that the test above is not green for another reason.
+
+        Same row, `id` dropped: the row goes back to being what the macro emitted
+        before this change, and the rejection is the one measured on the lab.
+        """
+        from .helpers import FakeClock, FakeJournal, FakeRest, make_ctx, make_params
+
+        back = self._EventProcessor(
+            params=make_params(max_objects=10),
+            ctx=make_ctx(sid="1700000001.3"),
+            rest=FakeRest(),
+            journal=FakeJournal(),
+            mapping=self._mapping,
+            clock=FakeClock(),
+        ).process(
+            self._make_event(
+                title=self.row["title"],
+                app=self.row["eai:acl.app"],
+                eai_type=self.row["eai:type"] or None,
+                id_value=None,
+                write=self.row["eai:acl.perms.write"],
+            )
+        )
+        self.assertEqual(back.status, "rejected")
+        self.assertEqual(back.error, "unresolved_endpoint:")
+
+    # -- the nominal path must not pay for it ------------------------------- #
+
+    def test_a_typed_row_resolves_to_the_very_same_endpoint_through_either_route(self):
+        """Non-regression. `id` takes precedence over `eai:type` (section 5.2), so a
+        typed rollback row now resolves through the endpoint too. It must land on the
+        same URI, otherwise the fix would move the nominal path.
+        """
+        from acltools.endpoint import resolve_handler_path
+
+        typed_endpoint = "/servicesNS/nobody/my_app/saved/searches/typed_one"
+        by_id, source_id = resolve_handler_path(typed_endpoint, "savedsearch",
+                                                self._mapping)
+        by_type, source_type = resolve_handler_path(None, "savedsearch", self._mapping)
+        self.assertEqual((by_id, source_id), ("saved/searches", "id"))
+        self.assertEqual((by_type, source_type), ("saved/searches", "eai:type"))
+
+    def test_the_emitted_id_carries_the_fixed_context_so_it_reads_as_shared(self):
+        """Section 3.5 reads the namespace of `id` to skip private objects. The
+        endpoint is built in the fixed context, so a rollback row always reads as
+        shared - which is right: a private object is skipped on the outbound pass and
+        is never in a rollback set."""
+        from acltools.endpoint import is_fixed_context, namespace_owner_from_id
+
+        self.assertTrue(is_fixed_context(namespace_owner_from_id(self.row["id"])))
+
+    def test_the_emitted_id_can_never_carry_the_aggregation_handler(self):
+        """Route 1 discards `admin/directory`; the endpoint is built from an already
+        resolved handler, so the string can never hold it."""
+        for row in self.restored.values():
+            with self.subTest(row=row["title"]):
+                self.assertNotIn("admin/directory", row["id"])
 
 
 class TableAndLookupConsistencyTest(unittest.TestCase):

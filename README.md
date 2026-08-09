@@ -799,6 +799,28 @@ An `intent` line with no `outcome` signals an interruption between the disk
 synchronisation and the POST response - **the POST may have succeeded**. Settle it
 against `splunkd_access.log`.
 
+### Two fields say what an object is, and they are not the same fact
+
+- `eai_type` is **what the input event carried**. It is empty whenever the pipeline did
+  not supply one, which a batch read from the native endpoints never does: twenty-four
+  of the twenty-seven native handlers emit no `eai:type` at all.
+- `handler` is **the handler path the command resolved** - `saved/searches`,
+  `data/ui/views` - whichever of the two routes of *Endpoint resolution* answered. It
+  is filled in on every object whose endpoint was resolved, and it is the field to
+  group on when you want to know what kind of objects a run touched.
+
+`handler` is **not an inverted type, and it cannot be turned back into one.** The
+shipped mapping table holds 28 keys for 27 distinct handler paths: `times` and
+`conf-times` both resolve to `data/ui/times`. And resolution through `id` accepts any
+well-formed handler path, including paths that no key of the table names. The journal
+therefore carries both fields and derives neither from the other.
+
+A `skipped_private` line carries its handler although its `endpoint` is deliberately
+empty. The two are not the same kind of datum: the endpoint is an **address**, and the
+one that could be computed there designates the shared object of the same name rather
+than the private object the input row designated. The handler is the **family**, which
+is the same for both.
+
 ### Which member ran it: the metadata, not a field
 
 **No line of the journal names the search head member.** It is not an omission: the
@@ -900,11 +922,15 @@ is preferable:
 the default being ten, a rollback typed by hand would stop writing at the eleventh
 object.
 
-`editacl_rollback(<sid>)` emits seven fields - `title`, `eai:acl.app`, `eai:acl.owner`,
-`eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` - exactly the
-native field names that the command's defaults pick up. **No parameter therefore has to
-be written**, `new_owner` included: `eai:acl.owner` carries the **previous** owner, and
-the default of `new_owner` applies it.
+`editacl_rollback(<sid>)` emits eight fields - `title`, `eai:acl.app`, `eai:acl.owner`,
+`eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing`, `eai:type` and `id` -
+exactly the native field names that the command's defaults pick up. **No parameter
+therefore has to be written**, `new_owner` included: `eai:acl.owner` carries the
+**previous** owner, and the default of `new_owner` applies it.
+
+`id` is the journaled `endpoint` re-emitted as is. It is what makes the rollback work
+on an object whose input row carried **no type** - see *Limits of the rollback* below
+for what it does and does not fix.
 
 It only restores objects for which an `outcome` line attests that the write **did**
 succeed: an object whose POST failed was not modified and must not be "restored" to a
@@ -932,8 +958,22 @@ the journal file of the run (`editacl_journal_<sid>.log`).
 - It is only usable **after the journal has been indexed** - a latency of a few seconds
   to a few tens of seconds depending on the load of the ingestion chain. The file on
   disk remains the immediate fallback.
-- It relies on resolution through `eai:type`, since `id` is not journalled: **the
-  coverage of the mapping table directly conditions the ability to roll back.**
+- It resolves through the journaled **endpoint**, re-emitted as `id`, and falls back on
+  `eai:type` only if that endpoint were missing. The coverage of the mapping table
+  therefore no longer conditions the ability to roll back an object the command wrote:
+  the endpoint of a written object is always journaled, on both phases, and section 8.5
+  makes its shape a contract. **What it does not fix**: an object that never reached
+  the endpoint resolution has no journaled endpoint either. Such an object was never
+  written, so there is nothing to roll back - but it also means the rollback covers
+  exactly the objects the outbound pass resolved, no more.
+
+  > **This used to be a hole in the safety net.** The macro re-emitted `eai:type` and no
+  > object identifier, so an object whose row carried no type - which every batch built
+  > on the native endpoints produces - was journaled with an empty type and **rejected
+  > at rollback**, its prior state intact in the journal and unreachable. Measured on a
+  > mixed batch: the 3 views restored, the 4 saved searches rejected. The rejection was
+  > visible, which is what made it survivable; it was not visible *before* the rollback,
+  > which is what made it a hole.
 - It does **not cover** an object refused with an `HTTP 500` on persistence, whose
   observable state may nevertheless have changed - see below.
 - It is **not reversible for a derived object that was diverging** and that the cascade
@@ -1068,7 +1108,7 @@ met, and **nothing for an attribute that did not move**.
 | `objects_changed` | The number of **result lines** carrying that transition. An object handed to the command twice counts twice, as everywhere else in this view |
 | `applied` | Of those, how many the platform accepted (`updated`) |
 | `simulated` | Of those, how many a `dryrun` run would have written |
-| one per object type | How the count splits by `eai:type`, including a `(type not journaled)` column |
+| one per object type | How the count splits by **the handler path the command resolved** - `saved/searches`, `data/ui/views` - with `(type not journaled)` left for the lines that carry neither a handler nor a type |
 
 Three things to know before reading a figure off it.
 
@@ -1077,11 +1117,16 @@ Three things to know before reading a figure off it.
   state exactly like one that succeeded. `objects_changed - applied - simulated` is what
   was attempted and refused; the *Errors* panel says why. **In simulation nothing was
   written at all** and the `after` value is the one that *would* be applied.
-- **The `(type not journaled)` column is not a defect.** `eai:type` is empty on a large
-  share of journal lines, including lines of objects that were resolved and written -
-  the saved-search endpoint of the platform emits none at all. Those lines get a column
-  of their own rather than being dropped, which is the difference between a breakdown
-  that is incomplete and one that undercounts in silence.
+- **The columns are handler paths, not `eai:type` values.** `eai:type` is what the input
+  event happened to carry, and it is empty on a large share of journal lines - the
+  saved-search endpoint of the platform emits none at all, so a batch read from the
+  native endpoints used to land *in full* in the single `(type not journaled)` column.
+  The handler is the path the command actually resolved: it is filled in on every
+  object whose endpoint was resolved, whichever of the two resolution routes answered,
+  and it is what you read on the object's URI anyway. A line that carries a type and no
+  handler - written before the handler was journaled - is grouped under its type.
+  `(type not journaled)` now means what it says: **neither** designation is present,
+  which is the case of an event refused before its endpoint could be resolved.
 - **The value columns are whole values, and that was a measurement, not a preference.**
   Showing the role added or removed instead would be closer to what a decommissioning
   looks for, and further from the question asked. The whole-value form was kept because

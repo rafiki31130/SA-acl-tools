@@ -40,6 +40,12 @@ ROLLBACK_FIELDS_FROM_INTENT = (
     "ts",
 )
 
+#: Fields designating the object, carried by `intent` and by `outcome` alike, and by
+#: the `summary` line never. `handler` joined them so that a consumer grouping by the
+#: nature of an object has a field that is filled in on every resolved object -
+#: `eai_type` is not.
+OBJECT_FIELDS = ("endpoint", "app", "title", "eai_type", "handler")
+
 CTX = make_ctx(sid="1754483000.1", user="operator", dryrun=False)
 
 
@@ -48,6 +54,7 @@ def result(status="updated", **kwargs):
         title="My search",
         app="my_app",
         eai_type="savedsearch",
+        handler="saved/searches",
         endpoint="/servicesNS/nobody/my_app/saved/searches/My%20search",
         http_code=200,
         before=state(sharing="global", read=("role_a",), write=("legacy_role",)),
@@ -335,6 +342,85 @@ class MemberKeyTest(unittest.TestCase):
             with self.subTest(phase=record["phase"]):
                 self.assertNotIn("host", record)
                 self.assertNotIn("member", record)
+
+
+class TheResolvedHandlerIsJournalledTest(unittest.TestCase):
+    """`handler` carries the nature of the object where `eai_type` does not.
+
+    `eai_type` is copied from the input event. A batch read from the native endpoints
+    carries none - twenty-four of the twenty-seven native handlers emit no `eai:type` -
+    and the objects are resolved, written and journaled with an empty type all the
+    same. Every consumer that groups by type then heaps those lines into one bucket.
+
+    The handler is the path the command **actually resolved**, whichever of the two
+    routes of section 5.2 answered. These tests freeze that it is written, on both
+    phases, on neither the `summary` line, and that it is not confused with a type.
+    """
+
+    TS = "2026-01-01T00:00:00.000+01:00"
+
+    def test_both_object_phases_carry_the_handler(self):
+        for record in (
+            build_intent_record(CTX, result(), self.TS),
+            build_outcome_record(CTX, result(journaled=True), self.TS),
+        ):
+            with self.subTest(phase=record["phase"]):
+                self.assertEqual(record["handler"], "saved/searches")
+
+    def test_the_two_phases_carry_the_same_handler(self):
+        res = result(journaled=True)
+        intent = build_intent_record(CTX, res, self.TS)
+        outcome = build_outcome_record(CTX, res, "2026-01-01T00:00:00.001+01:00")
+        self.assertEqual(intent["handler"], outcome["handler"])
+
+    def test_the_summary_line_carries_no_handler(self):
+        """It designates no object, exactly as it carries no `endpoint` (8.5)."""
+        record = build_summary_record(CTX, {"updated": 1}, self.TS)
+        self.assertNotIn("handler", record)
+
+    def test_the_handler_is_written_even_when_the_type_is_empty(self):
+        """The whole point: the line an untyped batch produces.
+
+        Both designations used to be missing at once on such a line, and a breakdown by
+        object type had nothing left to group on.
+        """
+        record = build_intent_record(CTX, result(eai_type=""), self.TS)
+        self.assertEqual(record["eai_type"], "")
+        self.assertEqual(record["handler"], "saved/searches")
+
+    def test_an_unresolved_object_carries_an_empty_handler_not_a_guess(self):
+        """No resolution, no handler - serialized as the empty string like every other
+        empty value of section 8.2, and never as `null`."""
+        record = build_outcome_record(
+            CTX,
+            EventResult(status="rejected", title="x", app="a", error="unresolved"),
+            self.TS,
+        )
+        self.assertEqual(record["handler"], "")
+        self.assertIsNot(record["handler"], None)
+
+    def test_the_handler_is_not_a_type_and_the_inversion_is_not_available(self):
+        """Measured on the shipped table: 28 keys for 27 distinct handler paths.
+
+        `times` and `conf-times` both resolve to `data/ui/times`, so going from a
+        handler back to a type is **not** a function on the shipped table. The `id`
+        route of section 5.2 makes it worse: it resolves any pattern-valid handler
+        path, including paths no key of the table names. That is why the journal
+        carries the handler as itself and never re-derives a type from it - and why
+        this test exists rather than an inverted lookup.
+        """
+        import json
+        from tests import BIN_DIR
+
+        with open(os.path.join(BIN_DIR, "acl_endpoint_map.json"), encoding="utf-8") as h:
+            table = json.load(h)
+        inverted = {}
+        for key, handler in table.items():
+            inverted.setdefault(handler, []).append(key)
+        ambiguous = {h: sorted(k) for h, k in inverted.items() if len(k) > 1}
+        self.assertEqual(ambiguous, {"data/ui/times": ["conf-times", "times"]})
+        self.assertEqual(len(table), 28)
+        self.assertEqual(len(inverted), 27)
 
 
 class RollbackContractTest(unittest.TestCase):

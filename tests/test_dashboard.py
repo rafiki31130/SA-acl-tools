@@ -633,6 +633,26 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
                     "no declared status starts with %r" % prefix,
                 )
 
+    def test_no_panel_ventilates_on_the_type_alone(self):
+        # Section 8.6.bis, seen from the view. `eai_type` is what the input event
+        # carried, and a batch read from the native endpoints carries none: measured on
+        # the lab, 515 objects written with no type journaled, all of them in one
+        # bucket. Every panel that builds an object-type label therefore reads the
+        # RESOLVED HANDLER first and falls back on the type, which only lines written
+        # before the handler was journaled still need.
+        #
+        # The test is written on the ABSENCE of the old form rather than on the presence
+        # of the new one: a sixth panel added later with the old form fails here, which
+        # a per-panel assertion would not have caught.
+        for title, query in self.queries:
+            if "object_type" not in query:
+                continue
+            with self.subTest(panel=title):
+                self.assertNotRegex(
+                    query, r'eval object_type = if\(coalesce\(eai_type,""\)'
+                )
+                self.assertIn("handler", query)
+
     def test_the_empty_object_type_is_labelled_wherever_it_is_grouped_on(self):
         # Measured, and named nowhere in the specification before this view: `eai_type`
         # can be empty on a line whose endpoint is resolved and whose status is
@@ -1170,14 +1190,33 @@ class TheChangeBreakdownIsBuiltFromTheJournalAndNotFromAGuessTest(unittest.TestC
         written = [name for name in names if name and ('"%s"' % name) in self.query]
         self.assertEqual(written, [], "a family name is written into the panel")
 
-    def test_the_untyped_lines_get_their_own_column_rather_than_disappearing(self):
-        # Section 15.6: `eai_type` can be empty on a line whose object was resolved AND
-        # written. Measured again on the lab for this panel: the saved-search endpoint
-        # of the platform emits no `eai:type` at all.
-        self.assertIn('"(type not journaled)"', self.query)
-        self.assertIn(
-            'eval object_type = if(coalesce(object_type,"")="", "(type not journaled)"',
+    def test_the_breakdown_ventilates_on_the_resolved_handler_first(self):
+        # The correction of section 8.6.bis, seen from the view. `eai_type` is what the
+        # input event happened to carry; the saved-search endpoint of the platform emits
+        # none at all, so a batch read natively used to land IN FULL in the single
+        # "(type not journaled)" column - measured on the lab, 515 objects written with
+        # no type journaled. `handler` is the path the command RESOLVED: it is filled in
+        # on every resolved object, whichever route of section 5.2 answered.
+        self.assertIn("values(handler)              AS object_handler", self.query)
+        self.assertRegex(
             self.query,
+            r'eval object_type = case\(coalesce\(object_handler,""\)!="",\s*'
+            r"object_handler",
+        )
+        # The handler comes FIRST and the type second - the regex above pins that
+        # order. A run never mixes the two, since one run writes one journal format, so
+        # the column vocabulary of a given run stays homogeneous.
+
+    def test_the_untyped_lines_get_their_own_column_rather_than_disappearing(self):
+        # The last-resort label survives, and now means what it says: NEITHER
+        # designation is present, which is an event refused before its endpoint could be
+        # resolved. It is still a column HEADER, where a bare "(not journaled)" would
+        # not say what it is that was not journaled.
+        self.assertIn('"(type not journaled)"', self.query)
+        self.assertRegex(
+            self.query,
+            r'coalesce\(object_type,""\)!="",\s*object_type,\s*'
+            r'1==1,\s*"\(type not journaled\)"\)',
         )
 
     def test_the_panel_says_what_it_shows_in_simulation(self):

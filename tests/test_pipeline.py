@@ -197,6 +197,69 @@ class StatusTest(unittest.TestCase):
         self.assertIn("stale_role_preserved:dead_role", result.warnings)
 
 
+class TheResolvedHandlerIsCarriedOutTest(unittest.TestCase):
+    """The command knew the handler and dropped it; it now carries it (section 8.2).
+
+    `eai_type` on an `EventResult` is what the **input event** carried. `handler` is
+    what the command **resolved**, whichever route answered. The two are different
+    facts, and on a batch read from the native endpoints only the second one exists.
+    """
+
+    def test_the_handler_is_carried_when_the_type_answered(self):
+        result = processor().process(make_event())
+        self.assertEqual(result.handler, "saved/searches")
+        self.assertEqual(result.source, "eai:type")
+
+    def test_the_handler_is_carried_when_the_id_answered_and_no_type_exists(self):
+        """The case the whole change is about: nothing to derive a type from, and a
+        handler all the same."""
+        rest = FakeRest(
+            get_responses={
+                "/servicesNS/nobody/my_app/data/ui/views/My%20search": RestResponse(
+                    200, acl_body()
+                )
+            },
+            default_post=RestResponse(200, b"{}"),
+        )
+        result = processor(rest).process(
+            make_event(
+                eai_type=None,
+                id_value="https://localhost:8089/servicesNS/nobody/my_app/"
+                         "data/ui/views/My%20search",
+                write="new_role_admin",
+            )
+        )
+        self.assertEqual(result.eai_type, "")
+        self.assertEqual(result.handler, "data/ui/views")
+        self.assertEqual(result.source, "id")
+
+    def test_the_handler_is_the_one_the_endpoint_was_built_on(self):
+        """Not a second derivation: the same value, so the two cannot disagree."""
+        result = processor().process(make_event())
+        self.assertIn("/" + result.handler + "/", result.endpoint)
+
+    def test_no_resolution_no_handler_and_no_guess(self):
+        result = processor().process(make_event(eai_type="nonexistent_type"))
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.handler, "")
+
+    def test_a_private_object_keeps_its_handler_though_its_endpoint_is_erased(self):
+        """`endpoint` is an ADDRESS and the one computed designates the shared object
+        of the same name, so publishing it would mislead (section 3.5). The handler is
+        a FAMILY, identical for both, and erasing it would only cost the operator the
+        ability to see what kind of objects a batch skipped."""
+        result = processor().process(make_event(current_sharing="user"))
+        self.assertEqual(result.status, "skipped_private")
+        self.assertEqual(result.endpoint, "")
+        self.assertEqual(result.handler, "saved/searches")
+
+    def test_the_handler_reaches_both_journal_phases(self):
+        journal = FakeJournal()
+        processor(journal=journal).process(make_event(write="new_role_admin"))
+        self.assertEqual(journal.intents[0]["handler"], "saved/searches")
+        self.assertEqual(journal.outcomes[0]["handler"], "saved/searches")
+
+
 class SkippedPrivateTest(unittest.TestCase):
     """Section 3.5, D-26 - private objects fall out of scope.
 
