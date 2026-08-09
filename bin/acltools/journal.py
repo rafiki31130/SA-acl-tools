@@ -74,9 +74,15 @@ def _run_fields(ctx, phase, ts):
     `MAX_TIMESTAMP_LOOKAHEAD = 40` (section 8.3). A `ts` pushed further into the line
     would fall outside that window.
 
-    `member` and not `host` (D-46): the `host` key collided with the `host` metadata
-    Splunk stamps on every event, and the field came out **multivalued** at search
-    time. Nothing was visible in the file, which was correct.
+    **There is no key for the search head member, and that is deliberate.** D-46 had
+    renamed the `host` key `member`, because `host` collided with the `host` metadata
+    Splunk stamps on every event and the field came out **multivalued** at search time.
+    Renaming was the wrong answer to the right observation: the platform already carries
+    the datum. The `host` metadata of a journal event is stamped at collection and holds
+    the same value the key did - measured in the lab, identical on the whole current
+    corpus. A key that duplicates a metadata field costs a field on every line and
+    offers a second, drifting version of the same fact. The member also stays in the
+    **diagnostic** file, which logs it on its own line at startup.
 
     Format constraints applied without exception: no colon in a field name, and an
     empty value serialized as the empty string - **never** as `null`, including for
@@ -87,7 +93,6 @@ def _run_fields(ctx, phase, ts):
         "phase": phase,
         "sid": str(ctx.sid or ""),
         "user": str(ctx.user or ""),
-        "member": str(ctx.member or ""),
         "dryrun": bool(ctx.dryrun),
     }
 

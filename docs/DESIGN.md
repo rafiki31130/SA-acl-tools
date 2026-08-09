@@ -379,8 +379,22 @@ reading the journal where it is meant to be read.
   where there were two. A wrong figure, with no signal. `error` is now serialised as the
   empty string, like every other empty field.
 - **The `host` key collided with the Splunk `host` metadata field** and came back
-  **multivalued** at search time. It is now `member`, the term the diagnostic file
-  already used for the same thing.
+  **multivalued** at search time. It was renamed `member`, the term the diagnostic file
+  already used for the same thing - and then **removed altogether**. The rename fixed
+  the collision and kept the duplication: the `host` metadata is stamped on every event
+  at collection and carries the same value, measured identical on the whole current
+  corpus of the lab. A key that duplicates a metadata field costs a field on every line
+  and offers a second version of the same fact, free to drift. The member is read from
+  the metadata, and the diagnostic file still logs it on its own line at startup.
+
+  **What went with the key.** Its presence dated a line - it appeared with D-46 - so
+  `isnotnull(member)` had become the monitoring view's discriminator between journal
+  format generations, in sixteen places, and the view carried a panel counting the lines
+  it excluded. Both are gone. Introducing a version field instead was ruled out: lines
+  of an older format are an artefact of a lab that ran campaigns for a week, not a
+  deployment problem, and a fresh install has none. **The view now assumes a homogeneous
+  journal format and says so on the page.** Should section 8.2 ever change again, the
+  transition is a deployment question - see the README.
 
 ### 4.14 The chunk regime is not predictable
 

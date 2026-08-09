@@ -770,7 +770,7 @@ class JournalInvariantTest(unittest.TestCase):
                 self.assertEqual(nulls, [])
                 self.assertNotIn(":null", dumps(line))
                 self.assertNotIn("host", line)
-                self.assertIn("member", line)
+                self.assertNotIn("member", line)
 
         # The tally is fed at the same single exit point as the `outcome` line: what
         # is counted is exactly what came out.
@@ -912,14 +912,14 @@ class SummaryCountersTest(unittest.TestCase):
         self.assertEqual(total, 5)
         self.assertEqual(record[SUMMARY_COUNT_PREFIX + "skipped_ceiling"], 3)
 
-    def test_the_summary_line_holds_no_null_and_no_host_key(self):
+    def test_the_summary_line_holds_no_null_and_names_no_member(self):
         proc = processor(FakeRest(), journal=FakeJournal())
         proc.process(make_event(write="new_role_admin"))
         record = proc.build_summary()
         self.assertEqual([f for f, v in record.items() if v is None], [])
         self.assertNotIn(":null", dumps(record))
         self.assertNotIn("host", record)
-        self.assertEqual(record["member"], "sh01")
+        self.assertNotIn("member", record)
 
     def test_building_the_summary_writes_nothing(self):
         """Building is pure and separate from writing, like the other two records: the

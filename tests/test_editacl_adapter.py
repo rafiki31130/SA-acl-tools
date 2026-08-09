@@ -919,9 +919,8 @@ class EndOfRunLineTest(_AdapterRunHarness, unittest.TestCase):
         summary = self._summaries()[0]
         self.assertEqual(summary["sid"], "1700000000.1")
         self.assertEqual(summary["user"], "an_operator")
-        self.assertEqual(summary["member"], "sh01")
         self.assertIs(summary["dryrun"], False)
-        for field in ("endpoint", "app", "title", "eai_type", "host"):
+        for field in ("endpoint", "app", "title", "eai_type", "host", "member"):
             self.assertNotIn(field, summary)
 
     def test_no_line_of_the_run_holds_a_null(self):

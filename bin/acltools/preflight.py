@@ -313,8 +313,13 @@ def load_roles_catalog(rest):
 
 
 def resolve_server_name(rest):
-    """`serverName` of the member, for the journal `member` field (D-46). `""` if
-    unavailable."""
+    """`serverName` of the member, for the **diagnostic** startup line. `""` if
+    unavailable.
+
+    It no longer feeds the journal: that key was removed as a duplicate of the `host`
+    metadata Splunk stamps on every event. The diagnostic file is free text and carries
+    no such metadata of its own, so this is where the datum still has to be written.
+    """
     response = rest.get_json("/services/server/info", None)
     document = _decode(response)
     if document is None:

@@ -130,27 +130,6 @@
   </row>
 
   <row>
-    <panel>
-      <title>Legacy-format lines excluded</title>
-      <table>
-        <search>
-          <query>`acl_journal_source`
-| stats count AS journal_lines,
-        count(eval(isnull(member)))               AS legacy_lines,
-        dc(eval(if(isnull(member), sid, null()))) AS legacy_runs,
-        dc(sid)                                   AS runs
-| eval note = if(legacy_lines = 0,
-      "No legacy-format line in this window.",
-      "These lines were written before the current journal format. They are EXCLUDED from every other panel of this view: they carry no end-of-run line, so they would all be reported as interrupted, and their error field holds the literal string null, so they would all be reported as failed. Counting them alongside current lines would produce wrong figures.")
-| table legacy_lines, legacy_runs, journal_lines, runs, note</query>
-          <earliest>$tr.earliest$</earliest>
-          <latest>$tr.latest$</latest>
-        </search>
-        <option name="drilldown">none</option>
-        <option name="wrap">true</option>
-        <option name="count">5</option>
-      </table>
-    </panel>
     <!-- This panel aggregates BY sid over the DIAGNOSTIC sourcetype, whose file is free
          text (section 8.1). Its fields must therefore be read from `_raw` by an anchored
          `rex`, and never from an extracted field.
@@ -208,17 +187,50 @@
          What that leaves uncovered is stated rather than hidden: a future message
          emitted at `CRITICAL` for something other than a fatal error would be counted
          as one, and no line of the current corpus carries the journal-open failure -
-         222 lines name a journal file and all 222 are the `INFO` success. -->
+         222 lines name a journal file and all 222 are the `INFO` success.
+
+         THE CAUSE IS A CODE, AND THE SENTENCE THAT EXPLAINS IT SITS ABOVE THE TABLE.
+         The first version wrote a whole sentence into the cause CELL - up to 106
+         characters. Seen on screen by the sponsor, the first sight anyone in this
+         project ever had of the rendered view: in a narrow column the sentence wraps to
+         one word per line, three runs fill the whole page, and the columns to its right
+         are pushed out of sight. A table cell is not where a sentence belongs. The four
+         codes are stable identifiers, short enough to stay on one line, and the prose
+         they stand for is read once in the panel description instead of once per row.
+         Same rule for the column list: what a reader of THIS panel needs is when, which
+         run, whose, and why - plus the two counters the cause is derived from, which are
+         numbers and stay narrow. `max_objects` had nothing to do with the question this
+         panel asks, and `journal=false` is now the `journal_disabled` code itself. -->
 
     <panel>
       <title>Runs started with no journal line</title>
+      <html>
+        <p>A run appears here when the diagnostic file carries lines for it and the
+          journal carries none. What the four causes mean:</p>
+        <ul>
+          <li><b>journal_disabled</b> - the run was launched with
+            <tt>journal=false</tt>, so no journal file was produced, by design. Nothing
+            about the objects of this run is recoverable.</li>
+          <li><b>journal_not_openable</b> - the rollback journal could not be opened. A
+            <tt>WARNING</tt> line of this run names a journal file.</li>
+          <li><b>fatal_error</b> - the run stopped before its first journal line and
+            carries a <tt>CRITICAL</tt> diagnostic line.</li>
+          <li><b>no_write_recorded</b> - no journal line and no <tt>CRITICAL</tt> line
+            either. The run may have been killed before its first write. This is the
+            code that says <i>nothing was established</i>, not the one that names a
+            cause.</li>
+        </ul>
+        <p>The last two columns are the evidence the code is derived from: the number of
+          <tt>CRITICAL</tt> lines, and the number of <tt>WARNING</tt> lines naming a
+          journal file. A cause the reader cannot check is a verdict.</p>
+      </html>
       <table>
         <search>
           <query>search (`acl_journal_source`) OR (`acl_diag_source`)
 | eval diag_raw = if(sourcetype="editacl:diag", _raw, null())
 | rex field=diag_raw "^\S+\s+(?&lt;diag_level&gt;[A-Z]+)\s+sid=(?&lt;diag_sid&gt;\S+)"
 | rex field=diag_raw "\bversion=\S+\s+user=(?&lt;diag_user&gt;\S+)\s"
-| rex field=diag_raw "\bdryrun=\S+\s+validate_roles=\S+\s+journal=(?&lt;diag_journal&gt;\S+)\s+max_objects=(?&lt;diag_max_objects&gt;\S+)"
+| rex field=diag_raw "\bdryrun=\S+\s+validate_roles=\S+\s+journal=(?&lt;diag_journal&gt;\S+)\s"
 | rex field=diag_raw "(?&lt;diag_journal_file&gt;editacl_journal\S*\.log)"
 | eval sid = coalesce(diag_sid, sid)
 | stats count(eval(sourcetype="editacl:journal")) AS journal_lines,
@@ -226,24 +238,23 @@
         min(eval(if(sourcetype="editacl:diag", _time, null())))       AS started,
         values(diag_user)        AS run_user,
         values(diag_journal)     AS journal_param,
-        values(diag_max_objects) AS max_objects,
         count(eval(diag_level="CRITICAL")) AS fatal_lines,
         count(eval(diag_level="WARNING" AND isnotnull(diag_journal_file))) AS journal_open_failures
   BY sid
 | where journal_lines = 0 AND diag_lines &gt; 0
-| eval reason = case(
-      journal_param="false", "journal=false - no journal file is produced, by design. Nothing about the objects of this run is recoverable.",
-      journal_open_failures &gt; 0, "the rollback journal could not be opened - a WARNING line of this run names a journal file",
-      fatal_lines &gt; 0, "fatal error before the first journal line - this run carries a CRITICAL diagnostic line",
-      1==1, "no journal line, and no CRITICAL line either - the run may have been killed before its first write")
+| eval cause = case(
+      journal_param="false",     "journal_disabled",
+      journal_open_failures &gt; 0, "journal_not_openable",
+      fatal_lines &gt; 0,           "fatal_error",
+      1==1,                      "no_write_recorded")
 | sort - started
 | convert ctime(started)
-| table started, sid, run_user, journal_param, max_objects, reason, fatal_lines, journal_open_failures, diag_lines</query>
+| table started, sid, run_user, cause, fatal_lines, journal_open_failures</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>
-        <option name="wrap">true</option>
+        <option name="wrap">false</option>
         <option name="count">10</option>
       </table>
     </panel>
@@ -255,9 +266,8 @@
       <table>
         <search>
           <query>`acl_journal_source`
-| where isnotnull(member)
 | stats min(_time) AS first_line, max(_time) AS last_line,
-        values(user) AS run_user, values(member) AS member,
+        values(user) AS run_user, values(host) AS member,
         values(dryrun) AS dryrun_values,
         count AS journal_lines,
         count(eval(phase="outcome")) AS output_events,
@@ -333,25 +343,22 @@
         <search>
           <query>`acl_journal_source` sid="$sid$"
 | stats count AS journal_lines,
-        count(eval(isnull(member))) AS legacy_lines,
         min(_time) AS first_line, max(_time) AS last_line,
-        values(eval(if(isnotnull(member), user, null())))   AS run_user,
-        values(member) AS member,
-        values(eval(if(isnotnull(member), dryrun, null()))) AS dryrun_values,
-        count(eval(phase="outcome" AND isnotnull(member)))  AS output_events,
-        count(eval(phase="intent"  AND isnotnull(member)))  AS writes_attempted,
-        count(eval(phase="summary"))                        AS end_of_run_lines,
-        dc(eval(if(phase="outcome" AND isnotnull(member), app, null()))) AS apps
+        values(user) AS run_user,
+        values(host) AS member,
+        values(dryrun) AS dryrun_values,
+        count(eval(phase="outcome")) AS output_events,
+        count(eval(phase="intent"))  AS writes_attempted,
+        count(eval(phase="summary")) AS end_of_run_lines,
+        dc(eval(if(phase="outcome", app, null()))) AS apps
   BY sid
 | eval mode = case(mvcount(dryrun_values) &gt; 1, "MIXED - inconsistent run",
                    dryrun_values="true",  "simulation",
                    dryrun_values="false", "real",
                    1==1, "unknown")
-| eval run_state = case(
-      journal_lines &gt; 0 AND legacy_lines = journal_lines, "LEGACY FORMAT - this run predates the current journal format. Its lines are excluded from every other panel: no end-of-run line, and an error field holding the literal string null.",
-      end_of_run_lines &gt; 1, "ANOMALY - several end-of-run lines",
-      end_of_run_lines = 1, "completed",
-      1==1, "INTERRUPTED - no end-of-run line")
+| eval run_state = case(end_of_run_lines &gt; 1, "ANOMALY - several end-of-run lines",
+                        end_of_run_lines = 1, "completed",
+                        1==1, "INTERRUPTED - no end-of-run line")
 | eval run_start = if(mvcount(split(sid,".")) = 2,
                       tonumber(mvindex(split(sid,"."),0)), null())
 | eval inventory_wait_s = if(isnull(run_start), null(), round(first_line - run_start, 3))
@@ -359,8 +366,7 @@
 | eval started = coalesce(run_start, first_line)
 | convert ctime(started)
 | table sid, started, run_user, member, mode, run_state, output_events,
-        writes_attempted, apps, inventory_wait_s, write_span_s,
-        journal_lines, legacy_lines</query>
+        writes_attempted, apps, inventory_wait_s, write_span_s, journal_lines</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>
@@ -377,11 +383,9 @@
       <table>
         <search>
           <query>`acl_journal_source` sid="$sid$" phase=outcome
-| where isnotnull(member)
 | stats count AS observed BY status
 | append
     [search `acl_journal_source` sid="$sid$" phase=summary
-     | where isnotnull(member)
      | fields count_*
      | transpose 0 column_name="counter"
      | rename "row 1" AS declared
@@ -410,7 +414,6 @@
       <table>
         <search>
           <query>`acl_journal_source` sid="$sid$" phase=outcome
-| where isnotnull(member)
 | eval http_result = if(http_code="0", "0 - no HTTP exchange took place", http_code)
 | stats count AS events, values(status) AS statuses BY http_result
 | sort http_result</query>
@@ -430,7 +433,6 @@
       <table>
         <search>
           <query>`acl_journal_source` sid="$sid$" phase=outcome
-| where isnotnull(member)
 | eval application = if(coalesce(app,"")="", "(not journaled)", app)
 | eval object_type = if(coalesce(eai_type,"")="", "(not journaled)", eai_type)
 | stats count AS events, values(status) AS statuses BY application, object_type
@@ -440,6 +442,128 @@
         </search>
         <option name="drilldown">none</option>
         <option name="wrap">true</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <!-- WHICH ACL CHANGES TOOK PLACE, AND ON HOW MANY OBJECTS OF EACH TYPE.
+         One row per transition actually observed, one column per object type met.
+
+         Six construction points, each of them a trap this project has already paid for
+         or a decision that had to be measured rather than assumed.
+
+         1. THE TWO PHASES ARE MERGED, BY `endpoint`. On an object really written, the
+            prior state is on the `intent` line and the status on the `outcome` line -
+            section 8.2, and neither line carries both. `earliest()` picks the value of
+            the first line that carries it, exactly as the rollback macro of section 8.6
+            pairs, so the view and the safety net agree on what "before" means. In
+            SIMULATION only one line is written and it carries everything: the panel
+            therefore never assumes an `intent` line exists.
+
+         2. EVERY COMPARISON IS GUARDED. `null == null` is FALSE in SPL: an unguarded
+            comparison already reported "=" on an object that had changed, and the
+            symmetric mistake here would invent a transition on every object whose prior
+            state was never read. `isnull(before) OR isnull(after)` short-circuits it,
+            and only a pair where both sides are present and DIFFERENT produces a row.
+            That is also what makes "only real transitions appear" true rather than
+            claimed: an attribute that did not move contributes nothing.
+
+         3. THE COUNT IS A COUNT OF RESULT LINES, never of a reconstructed object
+            identity (section 15.6). `result_lines` counts `outcome` lines inside each
+            endpoint group, so an object presented twice in the same batch - which
+            section 8.5 says produces two `outcome` lines - counts twice, like everywhere
+            else in this view.
+
+         4. THE OBJECT TYPE COLUMNS ARE BUILT FROM THE DATA, and lines with no type get
+            their OWN column rather than being dropped. `eai_type` is empty on more than
+            three quarters of the lines of a heterogeneous batch, and section 15.6 states
+            it can be empty on a line whose object was resolved AND written - measured
+            again here: the saved-search endpoint of the platform emits no `eai:type` at
+            all. A breakdown that said nothing about those lines would undercount in
+            silence, which is the one thing this view exists not to do.
+
+         5. THE GRANULARITY IS THE WHOLE VALUE OF THE ATTRIBUTE, before and after, and
+            not the individual role added or removed. That is the form the sponsor asked
+            for, and it was kept because it was MEASURED not to explode: over the 1 499
+            knowledge objects of the reference platform there are 4 distinct read
+            combinations, 5 write, 3 sharing scopes and 1 owner. A run drives every
+            object it touches to the SAME target value, so the number of rows an
+            attribute can produce is bounded by the number of distinct prior values in
+            the batch - at most 13 rows here for all four attributes together. Had that
+            count run to dozens, the per-role form would have been the answer.
+
+         6. `applied` AND `simulated` ARE NOT DECORATION. A transition recorded in the
+            journal is what the command COMPUTED, not proof that the platform accepted
+            it: an object whose POST failed carries a prior and an intended state just
+            like one that succeeded. `applied` counts the result lines whose status is
+            `updated`, `simulated` those whose status is `dryrun`; whatever is left in
+            `objects_changed` was attempted and did not take. Without those two columns
+            the panel would report a failed run and a successful one identically. -->
+    <panel depends="$sid$">
+      <title>ACL change breakdown</title>
+      <html>
+        <p>One row per transition that actually happened, one column per object type.
+          An attribute that did not move produces no row, and an object whose type was
+          not journaled is counted in the <tt>(type not journaled)</tt> column rather
+          than dropped.</p>
+        <p><b>objects_changed</b> counts result lines, not objects reconstructed from
+          their fields: an object handed to the command twice counts twice.
+          <b>applied</b> is the part the platform accepted, <b>simulated</b> the part a
+          <tt>dryrun</tt> run would have written. <b>In simulation nothing was written:
+          the "after" value is the one that <i>would</i> be applied.</b> Anything left
+          over - <tt>objects_changed - applied - simulated</tt> - was attempted and
+          refused; the <i>Errors</i> panel below says why.</p>
+      </html>
+      <table>
+        <search>
+          <query>`acl_journal_source` sid="$sid$"
+| where coalesce(endpoint,"") != ""
+| stats count(eval(phase="outcome"))                          AS result_lines,
+        count(eval(phase="outcome" AND status="updated"))     AS applied,
+        count(eval(phase="outcome" AND status="dryrun"))       AS simulated,
+        values(eai_type)             AS object_type,
+        earliest(before_owner)       AS before_owner,
+        earliest(after_owner)        AS after_owner,
+        earliest(before_perms_read)  AS before_read,
+        earliest(after_perms_read)   AS after_read,
+        earliest(before_perms_write) AS before_write,
+        earliest(after_perms_write)  AS after_write,
+        earliest(before_sharing)     AS before_sharing,
+        earliest(after_sharing)      AS after_sharing
+  BY endpoint
+| eval object_type = if(coalesce(object_type,"")="", "(type not journaled)", object_type)
+| eval change_type = mvappend(
+      if(isnull(before_read)    OR isnull(after_read)    OR before_read    = after_read,    null(), "Read"),
+      if(isnull(before_write)   OR isnull(after_write)   OR before_write   = after_write,   null(), "Write"),
+      if(isnull(before_sharing) OR isnull(after_sharing) OR before_sharing = after_sharing, null(), "Sharing"),
+      if(isnull(before_owner)   OR isnull(after_owner)   OR before_owner   = after_owner,   null(), "Owner"))
+| where isnotnull(change_type)
+| mvexpand change_type
+| eval before = case(change_type="Read",    before_read,
+                     change_type="Write",   before_write,
+                     change_type="Sharing", before_sharing,
+                     change_type="Owner",   before_owner)
+| eval after  = case(change_type="Read",    after_read,
+                     change_type="Write",   after_write,
+                     change_type="Sharing", after_sharing,
+                     change_type="Owner",   after_owner)
+| eval before = if(before="", "(empty)", before)
+| eval after  = if(after="",  "(empty)", after)
+| stats sum(result_lines) AS objects_changed, sum(applied) AS applied,
+        sum(simulated) AS simulated
+  BY change_type, before, after, object_type
+| eval {object_type} = objects_changed
+| fields - object_type
+| stats sum(*) AS * BY change_type, before, after
+| sort - objects_changed, change_type, before, after
+| table change_type, before, after, objects_changed, applied, simulated, *</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="wrap">false</option>
         <option name="count">20</option>
       </table>
     </panel>
@@ -458,7 +582,7 @@
       <table>
         <search>
           <query>`acl_journal_source` sid="$sid$"
-| where isnotnull(member) AND coalesce(endpoint,"") != ""
+| where coalesce(endpoint,"") != ""
 | stats values(eval(if(phase="outcome", status, null())))    AS status,
         values(eval(if(phase="outcome", http_code, null()))) AS http_code,
         values(eval(if(phase="outcome" AND error!="", error, null()))) AS error,
@@ -507,7 +631,7 @@
       <table>
         <search>
           <query>`acl_journal_source` sid="$sid$" phase=outcome
-| where isnotnull(member) AND coalesce(endpoint,"") = ""
+| where coalesce(endpoint,"") = ""
 | eval application = if(coalesce(app,"")="", "(not journaled)", app)
 | eval object_type = if(coalesce(eai_type,"")="", "(not journaled)", eai_type)
 | eval error = if(error="", "(none)", error)
@@ -529,7 +653,6 @@
       <table>
         <search>
           <query>`acl_journal_source` sid="$sid$" phase=outcome
-| where isnotnull(member)
 | search NOT status IN (updated, noop, dryrun)
 | rex field=error "^(?&lt;error_class&gt;[a-z_]+(?::\d+)?)"
 | eval error_class = coalesce(error_class, "(no message)")
@@ -558,6 +681,8 @@
           <li>The calling search is not in the journal. It is in the platform audit index, out of reach of the read role of this view.</li>
           <li>The <b>direction</b> of a batch - outbound change or rollback - is not journaled: both look like writes.</li>
           <li>An empty view does not prove that no run took place. Read the entitlement check panel first.</li>
+          <li>The journal format is <b>not versioned</b>, and this view assumes it is <b>homogeneous</b>: every line in the window is read as the format the shipped command writes. Lines written by an older format are read as if they were current, and no panel can tell you so. Should the format ever change, the transition is a deployment question - see the README.</li>
+          <li>A transition listed in the <i>ACL change breakdown</i> is what the command <b>computed</b>. In simulation nothing was written at all, and on a failed write the "after" value is the one that was refused. The <b>applied</b> and <b>simulated</b> columns of that panel are what separate the three cases.</li>
         </ul>
       </html>
     </panel>

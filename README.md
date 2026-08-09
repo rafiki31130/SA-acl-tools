@@ -799,6 +799,21 @@ An `intent` line with no `outcome` signals an interruption between the disk
 synchronisation and the POST response - **the POST may have succeeded**. Settle it
 against `splunkd_access.log`.
 
+### Which member ran it: the metadata, not a field
+
+**No line of the journal names the search head member.** It is not an omission: the
+`host` metadata Splunk stamps on every event at collection carries exactly that, and a
+key duplicating it would only offer a second version to drift. Group by `host` to split a
+consolidated journal by member; the monitoring view does precisely that for its *member*
+column. The diagnostic file, which carries no such metadata of its own, still logs the
+member on its own line at startup.
+
+The key existed, twice. It was `host`, which collided with the metadata of the same name
+and came back **multivalued** at search time; renaming it `member` fixed the collision
+and kept the duplication. Removing it also removed the only thing the view had to sort
+journal lines into format generations - see *The journal format is assumed homogeneous*
+above.
+
 ### Retention and routing
 
 - **Retention.** `_internal` is frozen at 28 days by default. If the operational window
@@ -1002,38 +1017,92 @@ name. That is held by a test, so renaming the input cannot silently break the li
 
 > ### Read this before you use the view
 >
-> **The view has never been opened in a browser**, and the one thing no test can reach
-> is what the page does after it loads: the `depends` / `rejects` panels appearing and
-> disappearing, the box clearing the selection, and the click filling the box. The
-> structure, the token wiring and the searches are frozen by the test suite and were
-> replayed against a real instance through the REST API - **nothing past the render
-> is measured**.
+> **The click is confirmed.** The view has been opened in a browser and a click on a row
+> of the *Runs* list was observed to do what this table says: the run is selected and the
+> detail panels open on it. That is a direct observation on the shipped construction, not
+> a deduction.
 >
-> What has been established, and how far it goes. The click writes `form.sid_in`,
-> which is where the dashboard framework of the platform keeps the **state of the
-> box** - the bare `sid_in` is what the box *produces*, not what it reads, which is
-> why an earlier version of this view left the box empty on click. That reading comes
-> from the shipped framework code of the target version and from a view Splunk ships
-> itself, not from a guess. **What it does not establish** is the chain that follows
-> in the page: that the box redisplays on a token write, and that its `<change>`
-> handler then fires. Those two links are read from code, never observed.
+> **The other two ways in are not confirmed the same way.** Clearing the box to drop the
+> selection, and the deep link `?form.sid_in=<sid>`, are held by the test suite -
+> structure, token wiring and searches - and were replayed against a real instance
+> through the REST API. Nobody has watched either of them happen in a page. They travel
+> the same wire as the click, which is what makes them likely to work, and *likely* is
+> exactly the word.
 >
-> The click is therefore built to degrade well: it sets the panel token **itself**,
-> and does not delegate it to the box. If the box failed to redisplay, the detail
-> panels would still open - you would see a selection with an empty box, which is
-> worth reporting, not a dead view.
+> Why the click was the one at risk. It writes `form.sid_in`, which is where the
+> dashboard framework of the platform keeps the **state of the box**; the bare `sid_in`
+> is what the box *produces*, not what it reads, and an earlier version of this view
+> wrote to the wrong end of that wire and left the box empty. The click also sets the
+> panel token **itself** rather than delegating it to the box, so a box that failed to
+> redisplay would still open the panels.
 >
-> If nothing at all happens on click, use the box or the link above; both reach the
-> same token by a shorter path. Report it either way.
+> If a way in does nothing, use another one - all three reach the same token. Report it
+> either way.
 >
-> The same limit applies to the **rendering**: a panel can be syntactically correct and
-> unreadable, or hidden by a condition.
+> **Rendering has now been looked at once, and it is worth knowing what that changed.**
+> The first sight of the rendered page showed a defect no test reaches: a panel whose
+> cause column held a whole sentence, wrapping to one word per line in a narrow column
+> and pushing the columns to its right off the screen. That panel now writes a short
+> code and puts the explanation beside the table, and the suite carries a crude control -
+> no string a search writes into a cell exceeds 60 characters, the entitlement guard
+> excepted. **The exception is real**: the guard's states are sentences, their wording is
+> normative, and they are displayed in a table. The *Runs* list is wide too, at eighteen
+> columns. Both are known, neither is measured on a screen.
 
-Panels, in order: entitlement check, legacy-format lines excluded, runs started with no
-journal line, the run list, then - for the run selected by any of the three ways above -
-its summary, the status breakdown observed against declared, the HTTP code breakdown,
-the breakdown by application and object type, the resolved objects with their
-before/after state, the events refused before endpoint resolution, and the errors.
+Panels, in order: entitlement check, runs started with no journal line, the run list,
+then - for the run selected by any of the three ways above - its summary, the status
+breakdown observed against declared, the HTTP code breakdown, the breakdown by
+application and object type, **the ACL change breakdown**, the resolved objects with
+their before/after state, the events refused before endpoint resolution, and the errors.
+
+### The ACL change breakdown
+
+*Which changes took place, and on how many objects of each type.* One row per transition
+observed - an attribute, the value before, the value after - one column per object type
+met, and **nothing for an attribute that did not move**.
+
+| Column | What it holds |
+|---|---|
+| `change_type` | `Read`, `Write`, `Sharing` or `Owner`. All four, not only the two a substitution usually touches |
+| `before` / `after` | The **whole value** of the attribute on each side. A permission is a list of roles, and the list is shown as one value, not split per role |
+| `objects_changed` | The number of **result lines** carrying that transition. An object handed to the command twice counts twice, as everywhere else in this view |
+| `applied` | Of those, how many the platform accepted (`updated`) |
+| `simulated` | Of those, how many a `dryrun` run would have written |
+| one per object type | How the count splits by `eai:type`, including a `(type not journaled)` column |
+
+Three things to know before reading a figure off it.
+
+- **`objects_changed` is not a promise that the change took.** A transition is what the
+  command *computed*: an object whose write was refused carries a prior and an intended
+  state exactly like one that succeeded. `objects_changed - applied - simulated` is what
+  was attempted and refused; the *Errors* panel says why. **In simulation nothing was
+  written at all** and the `after` value is the one that *would* be applied.
+- **The `(type not journaled)` column is not a defect.** `eai:type` is empty on a large
+  share of journal lines, including lines of objects that were resolved and written -
+  the saved-search endpoint of the platform emits none at all. Those lines get a column
+  of their own rather than being dropped, which is the difference between a breakdown
+  that is incomplete and one that undercounts in silence.
+- **The value columns are whole values, and that was a measurement, not a preference.**
+  Showing the role added or removed instead would be closer to what a decommissioning
+  looks for, and further from the question asked. The whole-value form was kept because
+  the reference platform carries **4 distinct read combinations, 5 write, 3 sharing
+  scopes and 1 owner over 1 499 objects**, and a run drives everything it touches to the
+  same target: the table is bounded by roughly a dozen rows for all four attributes.
+  On a platform carrying far more combinations, expect more rows.
+
+### The journal format is assumed homogeneous
+
+The view reads every line in the window as the format the shipped command writes. It
+carries **no version marker and no format discriminator** - it used to have one by
+accident, a key whose presence dated a line, and that key has been removed as a duplicate
+of the `host` metadata.
+
+The consequence, stated rather than left to be discovered: **if section 8.2 of the
+specification ever changes again, lines written before and after the change will coexist
+in the retention window and the view will read them all as current.** No panel can tell
+you. A fresh deployment never meets the case; an installation whose journal spans an
+upgrade of this app does, and the way through it is the retention window - wait it out,
+or narrow the time range to after the upgrade.
 
 ### What the entitlement check does, and what it does not
 
@@ -1389,7 +1458,9 @@ modification of a vendored file, an addition or a disappearance are still detect
 | **Restore only after indexing** | The journal is only queryable after ingestion | The file of the run is self-contained and usable immediately |
 | **Redirecting the journal index takes two overrides** | Overriding only `inputs.conf` leaves every shipped search returning an empty result **without saying so** | Override `local/inputs.conf` **and** `local/macros.conf` |
 | **Dashboard requires an index entitlement** | Without read access to the journal index the view shows nothing | The *Entitlement check* panel distinguishes "no run" from "no access". Granting the access is outside this app |
-| **The monitoring view has never been opened in a browser** | Its **client-side** behaviour is unmeasured. The token the click writes is the one the framework reads for the state of the *Run (sid)* box - established on the shipped framework code of the platform, not guessed. What stays unproven is what the page does next: that the box redisplays on that write, and that its `<change>` handler fires afterwards | Structure, token wiring and searches are frozen by the test suite and were replayed through the REST API; **nothing past the render is measured**. The click sets the panel token itself, so a box that failed to redisplay would still open the panels. Ways round: the box, or the link `?form.sid_in=<sid>`. See [Run monitoring view](#run-monitoring-view) |
+| **Of the monitoring view, only the click has been observed in a browser** | Selecting a run by clicking a row is **confirmed**. Clearing the *Run (sid)* box to drop the selection, and the deep link `?form.sid_in=<sid>`, are not: they travel the same wire, which makes them likely, not established | Structure, token wiring and searches are frozen by the test suite and were replayed through the REST API. The click sets the panel token itself, so a box that failed to redisplay would still open the panels. If one way in does nothing, use another; all three reach the same token. See [Run monitoring view](#run-monitoring-view) |
+| **Column widths are not measured, and one panel was found unreadable that way** | A search can be correct and its table unusable. The cause column of *Runs started with no journal line* held a sentence: in a narrow column it wrapped to one word per line and pushed the columns to its right off screen | The cause is now a short code with its explanation beside the table, and a test caps at 60 characters any string a search writes into a cell. **Two known exceptions**: the entitlement guard, whose sentences section 15.5 makes normative, and the eighteen-column *Runs* list. Both are open points, neither is measured on a screen |
+| **The journal format is assumed homogeneous** | Lines written by an older format are read as current, and no panel says so. The discriminator the view used to have was a side effect of a journal key that has since been removed | A fresh deployment never meets the case. On an installation whose journal spans an upgrade of this app, wait out the retention window or narrow the time range to after the upgrade. See [Run monitoring view](#run-monitoring-view) |
 | **The entitlement check reports a silent window, it does not diagnose it** | A journal that stopped arriving and a period with no run produce the same reading | The panel states the ambiguity instead of guessing, and shows the date of the most recent line on every state. The index comparison beside it resolves the case **only** when the reader may search the index the lines went to |
 | **No automatic signal for 42 to 48 h for a reader entitled to the origin index only** | After a redirection, a holder of the read role who may search the old index and not the new one reads a clean state while the run list has already stopped. Measured on the shipped default range, whose length is seven days plus the hours elapsed today | **None, and it is not fixable inside the app**: detecting it means counting events in an index that reader may not search. The mitigation is a fact, not a signal - the date of the most recent journal line **opens the state on every state**, at every threshold, and the run list stops on the same day. Narrow the time range, or compare that date with how often runs are expected |
 | **The cause of a run with no journal line is read from a severity, not from a sentence** | A run is called fatal because it carries a `CRITICAL` diagnostic line, and "journal could not be opened" because a `WARNING` line names a journal file | That the message said so. It is the deliberate choice: the wording of a message is translated and reworded, its severity is not. Measured: of 19 fatal runs in a lab retention window, matching the English sentence found **1**. What it costs: a future message emitted at `CRITICAL` for something that is not a fatal error would be counted as one |

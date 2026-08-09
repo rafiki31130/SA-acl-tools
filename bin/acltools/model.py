@@ -216,18 +216,17 @@ class Params:
 class RunContext:
     """Run constants, identical for every journal line.
 
-    `member` is the `serverName` of the search head member the run executes on. It is
-    deliberately **not** called `host` (D-46): the journal key derived from it used to
-    be `host`, which collides with the `host` metadata field Splunk stamps on every
-    event - measured in the lab, the field comes out **multivalued** at search time.
-    The journal key is now `member`, the term the diagnostic file already used for the
-    same thing, and the attribute carries the same name so that the datum and the key
-    cannot drift apart.
+    **The search head member is not among them.** It used to be, under the key `host`
+    and then, after D-46, under the key `member`. Both were a duplicate: the `host`
+    **metadata** Splunk stamps on every event at collection carries the same value, and
+    the diagnostic file logs the member on its own line at startup. The rename fixed the
+    multivalued field the collision produced; removing the key removes the duplication
+    the rename had preserved. Whoever needs the member reads the metadata, which no
+    version of this command has to keep in step.
     """
 
     sid: str
     user: str
-    member: str
     dryrun: bool
 
 

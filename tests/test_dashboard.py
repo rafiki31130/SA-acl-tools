@@ -46,18 +46,40 @@ SOURCE_MACROS = ("acl_journal_source", "acl_diag_source")
 #: show` is a static panel. The prompt panel carries no title and is checked separately.
 EXPECTED_PANEL_TITLES = (
     "Entitlement check",
-    "Legacy-format lines excluded",
     "Runs started with no journal line",
     "Runs",
     "Selected run",
     "Status breakdown - observed vs declared",
     "HTTP code breakdown",
     "Breakdown by application and object type",
+    "ACL change breakdown",
     "Objects whose endpoint was resolved",
     "Events refused before endpoint resolution",
     "Errors",
     "What this view cannot show",
 )
+
+#: Panels that carry a prose block ALONGSIDE their table, rather than in their cells.
+#:
+#: Seen on screen by the sponsor, the first rendering feedback this project ever got: a
+#: sentence written into a table cell wraps to one word per line in a narrow column, one
+#: row then fills a screen, and the columns to its right are pushed out of sight. These
+#: two panels need an explanation; it is read once, above the table, instead of once per
+#: row.
+PANELS_WITH_A_PROSE_BLOCK = (
+    "Runs started with no journal line",
+    "ACL change breakdown",
+)
+
+#: Ceiling on the length of a value a table CELL may carry, in characters.
+#:
+#: Not a measurement of the rendered width - no test can reach that - but the crude
+#: control that separates a label from a paragraph. Everything the searches write into a
+#: cell is a code, a name, a number or a date; the one place a long sentence is
+#: legitimate is the entitlement guard, whose state string section 15.5 makes normative,
+#: and it is named as an exemption rather than left to judgement.
+MAX_CELL_LITERAL = 60
+CELL_LITERAL_EXEMPT_PANELS = ("Entitlement check",)
 
 #: The one panel allowed to write `index=` in its query, named by its title.
 #:
@@ -84,8 +106,8 @@ DIAGNOSTIC_PANEL = "Runs started with no journal line"
 VIEW_ALLOWED_COMMANDS = frozenset(
     (
         "addinfo", "append", "appendcols", "convert", "eval", "eventcount",
-        "eventstats", "fields", "rename", "rex", "search", "sort", "stats",
-        "table", "transpose", "tstats", "where",
+        "eventstats", "fields", "mvexpand", "rename", "rex", "search", "sort",
+        "stats", "table", "transpose", "tstats", "where",
     )
 )
 
@@ -217,6 +239,16 @@ class ThePanelsAreAllThereTest(unittest.TestCase):
         self.assertEqual(len(with_query), 11)
         self.assertNotIn("What this view cannot show", with_query)
 
+    def test_the_panels_that_need_an_explanation_carry_it_beside_their_table(self):
+        # The rule the sponsor's first look at the rendered page established: prose goes
+        # next to the table, never inside it.
+        found = {
+            panel_title(panel)
+            for panel in panels(self.root)
+            if panel.find("html") is not None and panel.findall(".//query")
+        }
+        self.assertEqual(sorted(found), sorted(PANELS_WITH_A_PROSE_BLOCK))
+
     def test_the_static_panel_carries_html_and_no_search(self):
         for panel in panels(self.root):
             if panel_title(panel) == "What this view cannot show":
@@ -235,6 +267,7 @@ class TheTokenWiringTest(unittest.TestCase):
         "Status breakdown - observed vs declared",
         "HTTP code breakdown",
         "Breakdown by application and object type",
+        "ACL change breakdown",
         "Objects whose endpoint was resolved",
         "Events refused before endpoint resolution",
         "Errors",
@@ -516,14 +549,42 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
                 self.assertNotIn("dc(eai_type)", query)
 
     def test_no_query_carries_a_field_of_the_previous_journal_format(self):
-        # D-46 renamed `host` to `member` and replaced the JSON `null` of `error` by
-        # the empty string. A search copied from the measurement report without being
-        # adapted would silently read a field that no longer exists.
+        # Two removed spellings of the same datum, and one live one.
+        #
+        # D-46 renamed the journal key `host` `member`, because it collided with the
+        # `host` METADATA Splunk stamps on every event and came out multivalued at search
+        # time. The key is now gone altogether: the metadata carries the same value -
+        # measured on the lab, identical on the whole current corpus - and a key that
+        # duplicates a metadata field only offers a second version to drift.
+        #
+        # So `member` must appear nowhere as a field READ, and `host` may appear ONLY as
+        # the metadata read into the member column. That distinction is the whole point:
+        # forbidding the string `host` outright would forbid the field that replaced the
+        # key, and forbidding nothing would let the dead key back in.
         for title, query in self.queries:
             with self.subTest(panel=title):
-                self.assertNotRegex(query, r"(?<![\w.])host(?![\w.])")
+                self.assertNotIn("values(member)", query)
+                self.assertNotIn("isnotnull(member)", query)
+                self.assertNotIn("isnull(member)", query)
+                self.assertNotRegex(query, r"(?<![\w.])member\s*=")
+                if re.search(r"(?<![\w.])host(?![\w.])", query):
+                    self.assertIn("values(host) AS member", query)
                 self.assertNotIn('error=="null"', query)
                 self.assertNotIn('error="null"', query)
+
+    def test_the_member_column_is_read_from_the_metadata_and_from_nowhere_else(self):
+        # The positive form of the rule above: wherever the view still shows a member,
+        # the value comes from the platform metadata, which is what made removing the
+        # journal key possible in the first place. Exactly the two panels that used to
+        # read the removed key still show it, and both display it.
+        showing = [
+            title for title, query in self.queries if "values(host) AS member" in query
+        ]
+        self.assertEqual(sorted(showing), ["Runs", "Selected run"])
+        for title in showing:
+            with self.subTest(panel=title):
+                columns = dict(self.queries)[title].split("| table", 1)[1]
+                self.assertIn("member", columns)
 
     def test_no_query_builds_an_object_key_by_concatenation(self):
         # Measured collisions (M4a): six on a single batch, two objects of different
@@ -575,15 +636,21 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
     def test_the_empty_object_type_is_labelled_wherever_it_is_grouped_on(self):
         # Measured, and named nowhere in the specification before this view: `eai_type`
         # can be empty on a line whose endpoint is resolved and whose status is
-        # `updated`. A breakdown by object type that does not label those lines
-        # undercounts without a word.
+        # `updated`. Measured again for the breakdown panel: the saved-search endpoint of
+        # the platform emits no `eai:type` at all, so a batch of saved searches read from
+        # the native endpoint is entirely untyped. A breakdown by object type that does
+        # not label those lines undercounts without a word.
+        #
+        # The wording is not frozen, the LABELLING is: the breakdown panel turns the
+        # value into a column HEADER, where a bare "(not journaled)" would not say what
+        # it is that was not journaled.
         for title, query in self.queries:
             if "BY" not in query:
                 continue
             if not re.search(r"BY[^|]*\beai_type\b|object_type", query):
                 continue
             with self.subTest(panel=title):
-                self.assertIn('"(not journaled)"', query)
+                self.assertRegex(query, r'"\([a-z ]*not journaled\)"')
 
     def test_the_comparison_columns_are_guarded_against_null_equals_null(self):
         # Measured: `null == null` is false in SPL, so an object with no prior state
@@ -621,20 +688,22 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
         query = dict(self.queries)["Status breakdown - observed vs declared"]
         self.assertIn('substr(counter, 1, 6) = "count_"', query)
 
-    def test_the_legacy_format_is_excluded_from_every_panel_but_the_two_that_report_it(
-        self,
-    ):
-        # Section 2.3 of the design: legacy lines are excluded, and what is excluded is
-        # counted and displayed. The two exceptions are the panel that counts them and
-        # the header of a selected run, which must be able to explain an old sid rather
-        # than render blank.
-        exceptions = {"Legacy-format lines excluded", "Selected run",
-                      "Entitlement check", "Runs started with no journal line"}
+    def test_no_panel_sorts_lines_into_journal_format_generations(self):
+        # The exclusion mechanism is GONE, with the key it hung on.
+        #
+        # `isnotnull(member)` was a format discriminator by accident: the key appeared
+        # with D-46, so its presence dated a line. Removing the key removes the marker,
+        # and the sponsor ruled out replacing it with a version field - lines of an older
+        # format are an artefact of a lab that has been running campaigns for a week, not
+        # a deployment problem. A fresh install has none.
+        #
+        # What the view assumes instead is a HOMOGENEOUS journal, and it says so on the
+        # page rather than in a comment nobody reads. Should the format ever change
+        # again, the transition is a deployment question, and the README carries it.
         for title, query in self.queries:
-            if title in exceptions:
-                continue
             with self.subTest(panel=title):
-                self.assertIn("isnotnull(member)", query)
+                self.assertNotIn("legacy", query.lower())
+        self.assertIn("homogeneous", view_source().lower())
 
 
 class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
@@ -749,9 +818,14 @@ class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
                 )
 
     def test_the_rebuilt_fields_are_the_ones_the_panel_aggregates(self):
-        for field in ("user", "journal", "max_objects"):
+        # `max_objects` left the panel with the column purge: the ceiling of a run says
+        # nothing about why that run wrote no journal line, and it was empty on most of
+        # the rows displayed. The DECLARED extraction keeps it - it belongs to the
+        # sourcetype, not to this panel - which is why the two lists differ.
+        for field in ("user", "journal"):
             with self.subTest(field=field):
                 self.assertIn("values(diag_%s)" % field, self.query)
+        self.assertNotIn("diag_max_objects", self.query)
 
 
 class NoCauseIsAttributedFromTheProseOfAMessageTest(unittest.TestCase):
@@ -775,9 +849,10 @@ class NoCauseIsAttributedFromTheProseOfAMessageTest(unittest.TestCase):
 
     Recognising two languages was rejected: the second one will not exist on a fresh
     deployment, and a third reworded sentence would reopen the hole. Excluding the older
-    lines the way the journal excludes its legacy format was rejected too - the journal
-    has a structural marker for it (`member`), the diagnostic has none, and detecting
-    the language is exactly what we are trying not to do.
+    lines by their format was rejected too. The journal had a structural marker for that
+    - the `member` key, whose presence dated a line - and it has since been removed as a
+    duplicate of the `host` metadata, so neither file has one now; detecting the language
+    is exactly what we are trying not to do.
 
     What the counters read instead is what the LOGGING LIBRARY writes, not what the
     message says:
@@ -894,11 +969,35 @@ class NoCauseIsAttributedFromTheProseOfAMessageTest(unittest.TestCase):
         self.assertIn(" INFO ", opened)
 
     def test_the_fatal_count_is_displayed_and_not_only_used(self):
-        # A cause the reader cannot check is a verdict. The count that decides it is a
-        # column of the panel.
+        # A cause the reader cannot check is a verdict. The two counts that decide it
+        # are columns of the panel - and they survived the column purge for exactly that
+        # reason, being numbers, which cost one narrow column each.
         columns = self.query.split("| table", 1)[1]
         self.assertIn("fatal_lines", columns)
         self.assertIn("journal_open_failures", columns)
+
+    def test_the_cause_is_a_code_and_the_sentence_is_beside_the_table(self):
+        # Seen on screen by the sponsor: the cause used to be a whole sentence, up to
+        # 106 characters, written into a table CELL. In a narrow column it wraps to one
+        # word per line, three runs fill the page, and the columns to its right leave the
+        # screen. The codes are short, stable identifiers; the prose that explains them
+        # is read once, in the panel description.
+        codes = re.findall(r'"([a-z_]+)",?\)?\s*$', self.query, re.MULTILINE)
+        expected = {
+            "journal_disabled", "journal_not_openable", "fatal_error",
+            "no_write_recorded",
+        }
+        self.assertTrue(expected.issubset(set(codes)), sorted(set(codes)))
+        for code in expected:
+            with self.subTest(code=code):
+                self.assertLessEqual(len(code), 24)
+        panel = [
+            p for p in panels(self.root) if panel_title(p) == DIAGNOSTIC_PANEL
+        ][0]
+        description = ElementTree.tostring(panel.find("html"), encoding="unicode")
+        for code in expected:
+            with self.subTest(code=code):
+                self.assertIn(code, description)
 
 
 class TheSearchesAvoidTheMeasuredTrapsAgainTest(unittest.TestCase):
@@ -917,6 +1016,218 @@ class TheSearchesAvoidTheMeasuredTrapsAgainTest(unittest.TestCase):
         sourcetype = re.search(r"sourcetype=(\S+)", definition).group(1)
         query = dict(self.queries)[INDEX_LITERAL_EXEMPT_PANEL]
         self.assertIn("sourcetype=%s" % sourcetype, query)
+
+
+class TheChangeBreakdownIsBuiltFromTheJournalAndNotFromAGuessTest(unittest.TestCase):
+    """The panel that answers *which ACL changes took place, on how many objects*.
+
+    It is the first panel of this view that has to hold a BEFORE and an AFTER side by
+    side, and every trap this project has paid for converges on it: the two phases that
+    never carry the whole truth on one line, the `null == null` comparison that is false
+    in SPL, the count that must be a count of result lines, and the object type that is
+    empty far more often than anyone expects.
+
+    The granularity of the two value columns is the WHOLE value of the attribute, and
+    that was decided by measurement rather than by taste - over the 1 499 knowledge
+    objects of the reference platform there are 4 distinct read combinations, 5 write, 3
+    sharing scopes and 1 owner, so the whole-value form is bounded by roughly a dozen
+    rows for all four attributes together. The per-role form, closer to what a
+    decommissioning looks for but further from the shape asked for, was not needed.
+    """
+
+    PANEL = "ACL change breakdown"
+
+    #: The four attributes of an ACL, and the journal fields that carry each side.
+    ATTRIBUTES = (
+        ("Read", "before_perms_read", "after_perms_read"),
+        ("Write", "before_perms_write", "after_perms_write"),
+        ("Sharing", "before_sharing", "after_sharing"),
+        ("Owner", "before_owner", "after_owner"),
+    )
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+        self.query = dict(queries(self.root))[self.PANEL]
+
+    def test_the_four_attributes_are_covered_and_not_only_the_two_of_the_example(self):
+        # The request named read and write. The logic holds for all four, and leaving
+        # two out would be an arbitrary silence on a change that did happen.
+        for label, before, after in self.ATTRIBUTES:
+            with self.subTest(attribute=label):
+                self.assertIn("earliest(%s)" % before, self.query)
+                self.assertIn("earliest(%s)" % after, self.query)
+                self.assertIn('"%s"' % label, self.query)
+
+    def test_the_two_phases_are_merged_by_endpoint(self):
+        # Section 8.2: on an object really written the prior state is on the `intent`
+        # line and the status on the `outcome` line. Pairing is `BY endpoint`, exactly
+        # as the rollback macro of section 8.6 pairs.
+        self.assertIn("BY endpoint", self.query)
+        self.assertNotIn("phase=outcome", self.query.split("| where", 1)[0])
+
+    def test_the_state_columns_are_aggregated_by_earliest_and_not_by_values(self):
+        # Same discipline as the resolved-objects panel: an object presented twice
+        # produces two `outcome` lines, and `values()` would merge the prior state of
+        # the first pass with the state read back on the second.
+        for _label, before, after in self.ATTRIBUTES:
+            for field in (before, after):
+                with self.subTest(field=field):
+                    self.assertNotIn("values(%s)" % field, self.query)
+
+    def test_every_comparison_is_guarded_against_null_equals_null(self):
+        # `null == null` is FALSE in SPL. Unguarded, this panel would invent a
+        # transition on every object whose prior state was never read - the symmetric
+        # form of the defect that once reported "=" on an object that had changed.
+        for label, before, after in self.ATTRIBUTES:
+            with self.subTest(attribute=label):
+                self.assertRegex(
+                    self.query,
+                    r"isnull\(%s\)\s+OR\s+isnull\(%s\)" % (
+                        before.replace("perms_", ""), after.replace("perms_", "")
+                    ),
+                )
+
+    def test_only_a_pair_that_differs_produces_a_row(self):
+        # The literal reading of "only real transitions are displayed": the branch that
+        # yields the label is the one where the two sides are present AND different.
+        # Equality yields null, and the null rows are dropped before the expansion.
+        self.assertEqual(self.query.count("null(), \"Read\""), 1)
+        self.assertIn("| where isnotnull(change_type)", self.query)
+        expansion = self.query.find("| mvexpand change_type")
+        guard = self.query.find("| where isnotnull(change_type)")
+        self.assertNotEqual(expansion, -1)
+        self.assertLess(guard, expansion, "the null rows reach the expansion")
+
+    def test_the_count_is_a_count_of_result_lines(self):
+        # Section 15.6, and the reserve it carried until D-50 was closed: counting is
+        # done by counting `outcome` lines, never over a reconstructed object identity.
+        self.assertIn('count(eval(phase="outcome")) ', self.query)
+        self.assertNotIn("dc(", self.query)
+
+    def test_the_two_status_columns_name_statuses_that_exist(self):
+        # A status literal renamed in the code and left here would count zero for ever,
+        # without a message. `applied` and `simulated` are what separate a transition
+        # the platform accepted from one that was only computed.
+        from acltools import model
+
+        for column, status in (("applied", "updated"), ("simulated", "dryrun")):
+            with self.subTest(column=column):
+                self.assertIn(
+                    'count(eval(phase="outcome" AND status="%s"))' % status, self.query
+                )
+                self.assertIn(status, model.ACL_STATUSES)
+        columns = self.query.split("| table", 1)[1]
+        self.assertIn("applied", columns)
+        self.assertIn("simulated", columns)
+
+    def test_no_status_filter_hides_a_transition_that_was_refused(self):
+        # An object whose POST failed carries a prior and an intended state just like
+        # one that succeeded. Filtering it out would under-report a run that went wrong,
+        # which is the one direction this view must never fail in. The distinction is
+        # carried by the two count columns instead.
+        self.assertNotRegex(self.query, r"\|\s*search\b[^|]*status\s*=")
+        self.assertNotRegex(self.query, r"\|\s*where\b[^|]*status\s*=")
+
+    def test_the_object_type_columns_come_from_the_data(self):
+        # One column per type MET, built by writing the value into a field name. A
+        # hard-coded list would be right on the day it was written and wrong afterwards:
+        # the shipped family table alone carries 27 of them.
+        self.assertIn("| eval {object_type} = objects_changed", self.query)
+        self.assertIn("| stats sum(*) AS * BY change_type, before, after", self.query)
+        families = os.path.join(REPO_ROOT, "lookups", "acl_object_families.csv")
+        with open(families, encoding="utf-8") as handle:
+            names = [line.split(",")[0].strip() for line in handle.readlines()[1:]]
+        written = [name for name in names if name and ('"%s"' % name) in self.query]
+        self.assertEqual(written, [], "a family name is written into the panel")
+
+    def test_the_untyped_lines_get_their_own_column_rather_than_disappearing(self):
+        # Section 15.6: `eai_type` can be empty on a line whose object was resolved AND
+        # written. Measured again on the lab for this panel: the saved-search endpoint
+        # of the platform emits no `eai:type` at all.
+        self.assertIn('"(type not journaled)"', self.query)
+        self.assertIn(
+            'eval object_type = if(coalesce(object_type,"")="", "(type not journaled)"',
+            self.query,
+        )
+
+    def test_the_panel_says_what_it_shows_in_simulation(self):
+        # In simulation nothing was written: the "after" value is the one that WOULD be
+        # applied. Said on the page, not only in a report.
+        panel = [p for p in panels(self.root) if panel_title(p) == self.PANEL][0]
+        description = ElementTree.tostring(panel.find("html"), encoding="unicode")
+        self.assertIn("simulation", description.lower())
+        self.assertIn("would", description.lower())
+
+
+class NoTableCellCarriesAParagraphTest(unittest.TestCase):
+    """The rule the first rendering feedback of this project established.
+
+    The sponsor opened the view. On the panel listing the runs with no journal line, the
+    cause was a whole sentence written into a CELL: in a narrow column it wrapped to one
+    word per line, three rows filled the screen, and the columns to the right of it were
+    pushed out of sight. Two other columns were empty on every row displayed.
+
+    No test can measure a rendered width. What it can do is separate a label from a
+    paragraph, which is enough to rule out what is obviously bad: a string literal a
+    search writes into a cell stays under `MAX_CELL_LITERAL` characters. The one
+    exemption is the entitlement guard, whose state string section 15.5 makes normative -
+    it is named here rather than left to a reader's judgement, and its width remains a
+    known open point.
+    """
+
+    def setUp(self):
+        self.root = view_tree().getroot()
+        self.queries = queries(self.root)
+
+    def cell_literals(self, query):
+        """Double-quoted literals a search can write into a cell.
+
+        Lines carrying a `rex` are skipped: their literal is a regular expression, it
+        never reaches a cell, and its length says nothing about a column.
+        """
+        found = []
+        for line in query.splitlines():
+            if "rex field=" in line:
+                continue
+            found.extend(re.findall(r'"([^"]*)"', line))
+        return found
+
+    def test_no_search_writes_a_paragraph_into_a_cell(self):
+        for title, query in self.queries:
+            if title in CELL_LITERAL_EXEMPT_PANELS:
+                continue
+            for literal in self.cell_literals(query):
+                with self.subTest(panel=title, literal=literal[:40]):
+                    self.assertLessEqual(len(literal), MAX_CELL_LITERAL)
+
+    def test_the_exemption_is_the_guard_rail_and_it_is_still_over_the_line(self):
+        # The exemption is real, and stating it is the point: the guard rail states are
+        # sentences, section 15.5 makes their wording normative, and they are displayed
+        # in a table. Should they ever be shortened, this test says so rather than
+        # letting the exemption outlive its reason.
+        query = dict(self.queries)[CELL_LITERAL_EXEMPT_PANELS[0]]
+        longest = max(len(literal) for literal in self.cell_literals(query))
+        self.assertGreater(longest, MAX_CELL_LITERAL)
+
+    def test_no_table_carries_more_columns_than_a_reader_can_take_in(self):
+        # A crude ceiling, and the same reasoning: the panel that was reported unreadable
+        # carried nine columns, three of them empty on every row. The resolved-objects
+        # table is the deliberate exception - it is the wide one, it is meant to be
+        # scrolled, and it is the only place the eight state columns can live.
+        # Two exemptions, both stated. `Objects whose endpoint was resolved` is the wide
+        # one by design - eight state columns plus their four verdicts have nowhere else
+        # to live. `Runs` is the overview list the drilldown hangs on, and eighteen
+        # columns is an OPEN POINT rather than a decision: fifteen of them are numbers or
+        # short words, its `wrap` is already false so it scrolls rather than stacking,
+        # and narrowing it would change the click path the sponsor has just confirmed
+        # works. It is reported, not silently trimmed here.
+        wide = {"Objects whose endpoint was resolved", "Entitlement check", "Runs"}
+        for title, query in self.queries:
+            if title in wide or "| table" not in query:
+                continue
+            columns = query.rsplit("| table", 1)[1].replace("\n", " ").split(",")
+            with self.subTest(panel=title, columns=len(columns)):
+                self.assertLessEqual(len(columns), 13)
 
 
 class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):

@@ -40,7 +40,7 @@ ROLLBACK_FIELDS_FROM_INTENT = (
     "ts",
 )
 
-CTX = make_ctx(sid="1754483000.1", user="operator", member="sh01", dryrun=False)
+CTX = make_ctx(sid="1754483000.1", user="operator", dryrun=False)
 
 
 def result(status="updated", **kwargs):
@@ -62,7 +62,7 @@ class IntentRecordTest(unittest.TestCase):
     def test_common_and_specific_fields(self):
         record = build_intent_record(CTX, result(), "2026-01-01T00:00:00.000+01:00")
         for field in (
-            "ts", "phase", "sid", "user", "member", "dryrun", "endpoint", "app",
+            "ts", "phase", "sid", "user", "dryrun", "endpoint", "app",
             "title", "eai_type",
         ):
             self.assertIn(field, record)
@@ -213,10 +213,9 @@ class SummaryRecordTest(unittest.TestCase):
     def test_phase_and_run_fields(self):
         record = build_summary_record(CTX, {"updated": 3}, self.TS)
         self.assertEqual(record["phase"], "summary")
-        for field in ("ts", "phase", "sid", "user", "member", "dryrun"):
+        for field in ("ts", "phase", "sid", "user", "dryrun"):
             self.assertIn(field, record)
         self.assertEqual(record["sid"], "1754483000.1")
-        self.assertEqual(record["member"], "sh01")
 
     def test_the_timestamp_is_the_first_key(self):
         """`props.conf` reads the time with `TIME_PREFIX` and a 40-character
@@ -318,7 +317,15 @@ class MemberKeyTest(unittest.TestCase):
 
     TS = "2026-01-01T00:00:00.000+01:00"
 
-    def test_no_phase_carries_a_host_key(self):
+    def test_no_phase_names_the_search_head_member(self):
+        """Neither `host` nor `member`, on any phase.
+
+        `host` collided with the metadata Splunk stamps on every event; `member`, the
+        rename that fixed the collision, duplicated it. The metadata is the source now,
+        and a run that wanted the datum without an index reads the startup line of the
+        diagnostic file. Both spellings are asserted absent, so that reinstating either
+        one has to come through this test.
+        """
         records = (
             build_intent_record(CTX, result(), self.TS),
             build_outcome_record(CTX, result(journaled=True), self.TS),
@@ -327,7 +334,7 @@ class MemberKeyTest(unittest.TestCase):
         for record in records:
             with self.subTest(phase=record["phase"]):
                 self.assertNotIn("host", record)
-                self.assertEqual(record["member"], "sh01")
+                self.assertNotIn("member", record)
 
 
 class RollbackContractTest(unittest.TestCase):

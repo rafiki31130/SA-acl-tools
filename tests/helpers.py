@@ -197,8 +197,8 @@ def make_params(
     )
 
 
-def make_ctx(sid="test_sid", user="an_operator", member="sh01", dryrun=False):
-    return RunContext(sid=sid, user=user, member=member, dryrun=dryrun)
+def make_ctx(sid="test_sid", user="an_operator", dryrun=False):
+    return RunContext(sid=sid, user=user, dryrun=dryrun)
 
 
 def make_event(

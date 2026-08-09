@@ -463,7 +463,6 @@ class EditAclCommand(StreamingCommand):
         ctx = RunContext(
             sid=sid,
             user=str(getattr(info, "username", "") or ""),
-            member=member,
             dryrun=params.dryrun,
         )
 
