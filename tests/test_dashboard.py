@@ -680,11 +680,16 @@ class NoCauseIsAttributedFromTheProseOfAMessageTest(unittest.TestCase):
     kept two counters built on `match(_raw, "<an English sentence>")`, and the rule was
     not stated anywhere for the searches.
 
-    MEASURED on the lab, whole retention window: 19 runs ended on a fatal error. The
-    English sentence `fatal error:` found **1**. The other 18 predate the move of this
-    repository to English and read `erreur fatale :`; the panel reported all 18 as
-    "killed before their first write" - the right line, the wrong cause, which is
-    verbatim the defect A-1 was about.
+    MEASURED on the lab, whole retention window: 19 runs ended on a fatal error, 18 of
+    which predate the move of this repository to English and read `erreur fatale :`. The
+    panel lists the runs with no journal line, and 17 of the 19 have none; the English
+    sentence `fatal error:` found **1** of those 17, and the panel reported the other
+    **16** as "killed before their first write" - the right line, the wrong cause, which
+    is verbatim the defect A-1 was about.
+
+    16 and not 18: two of the eighteen did write a journal line, so the filter of the
+    panel (`journal_lines = 0`) never listed them. The severity of the defect is
+    unchanged; what changes is what may be claimed about it.
 
     Recognising two languages was rejected: the second one will not exist on a fresh
     deployment, and a third reworded sentence would reopen the hole. Excluding the older
@@ -1093,6 +1098,11 @@ class TheGuardRailSeesMoreThanAnEmptyWindowTest(unittest.TestCase):
         self.root = view_tree().getroot()
         self.query = dict(queries(self.root))[INDEX_LITERAL_EXEMPT_PANEL]
 
+    def collapsed_query(self):
+        """The query on one line, so an expression can be matched whatever the
+        indentation the XML happens to carry."""
+        return re.sub(r"\s+", " ", self.query)
+
     def test_the_panel_reports_the_date_of_the_most_recent_journal_line(self):
         self.assertIn("max(_time) AS last_journal_event", self.query)
         self.assertIn("last_journal_event", self.query.split("| table", 1)[1])
@@ -1199,6 +1209,47 @@ class TheGuardRailSeesMoreThanAnEmptyWindowTest(unittest.TestCase):
         self.assertIn("| addinfo", self.query)
         self.assertIn("info_max_time", self.query)
         self.assertIn("info_min_time", self.query)
+
+    def test_the_age_is_measured_against_the_end_of_the_window_and_not_the_present(self):
+        """S-3 of the second re-audit of 2026-08-09.
+
+        The test above proved that `addinfo` is invoked and its two fields named; it
+        never proved that `window_end` is the **operand of the subtraction**. Replacing
+        it with `now()` therefore passed the whole suite, and it is invisible on the
+        shipped default range, where `latest = now` makes the two equal. On any
+        historical window - an operator going back to last week to work an incident -
+        the age would be counted against the present, `silent_tail_pct` would run past
+        every threshold, and the panel would report SILENT over a period that is not.
+
+        A guard rail whose reading depends on the time range it is read through is
+        worse than none: it is the confident and wrong message this panel exists to
+        avoid, one level up.
+        """
+        self.assertIn(
+            "round(window_end - last_journal_event, 0)", self.collapsed_query()
+        )
+
+    def test_the_present_is_only_ever_the_fallback_of_the_window_end(self):
+        # `now()` has exactly one legitimate use in this panel: standing in for
+        # `info_max_time` when it is not a number, which is what an all-time range
+        # gives. Any second occurrence is an age or a width computed against the
+        # present rather than against the window.
+        collapsed = self.collapsed_query()
+        self.assertIn(
+            "eval window_end = if(isnum(info_max_time), info_max_time, now())", collapsed
+        )
+        self.assertEqual(
+            collapsed.count("now()"),
+            1,
+            "the present is used somewhere other than the fallback of the window end",
+        )
+
+    def test_the_width_of_the_window_is_measured_between_its_own_two_bounds(self):
+        # The denominator of the ratio has the same failure mode as its numerator.
+        self.assertIn(
+            "eval window_s = if(isnum(info_min_time), window_end - info_min_time, null())",
+            self.collapsed_query(),
+        )
 
     def test_the_silence_is_reported_and_not_diagnosed(self):
         # The wording is normative. This panel exists because a confident and wrong

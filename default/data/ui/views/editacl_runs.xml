@@ -181,10 +181,17 @@
          `match(_raw, "rollback journal not openable")` - two English sentences, in a
          file whose messages were French until this repository moved to English, and
          which stay in reach for the whole retention window. MEASURED on the lab, whole
-         retention: 19 runs ended on a fatal error, the English sentence found 1 of
-         them, and the other 18 were reported as "killed before their first write" -
-         the right line, the wrong cause, which is exactly the defect the `rex` above
-         closes one level down.
+         retention: 19 runs ended on a fatal error, 17 of them carry no journal line and
+         are therefore the ones this panel lists, the English sentence found 1 of those
+         17, and the other 16 were reported as "killed before their first write" - the
+         right line, the wrong cause, which is exactly the defect the `rex` above closes
+         one level down.
+
+         SIXTEEN, not eighteen. Eighteen is the count of fatal runs whose message is in
+         the other language, and two of those eighteen did write a journal line: the
+         filter of this panel is `journal_lines = 0`, so it never lists them and never
+         mislabelled them. The figure that belongs next to a panel is the one measured
+         ON that panel's population.
 
          Both counters are therefore read from what `logging` writes and not from what
          a message says:
