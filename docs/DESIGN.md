@@ -10,9 +10,9 @@ with their motive.
 
 **How to read it.** Sections 1 to 3 describe the shape of the code. Section 4 is the
 important one: a catalogue of **facts no documentation gives**, every one of them
-established by measurement on Splunk Enterprise 9.4.6. Sections 5 to 8 explain the
-mechanisms whose form is not obvious from reading them. Section 9 lists the guard rails
-of the test suite and what each one is worth. Section 10 records what was deliberately
+established by measurement on Splunk Enterprise 9.4.6. Sections 5 to 9 explain the
+mechanisms whose form is not obvious from reading them. Section 10 lists the guard rails
+of the test suite and what each one is worth. Section 11 records what was deliberately
 left out.
 
 ---
@@ -24,12 +24,13 @@ left out.
 3. [State machine](#3-state-machine)
 4. [Measured facts, none of them deducible](#4-measured-facts-none-of-them-deducible)
 5. [The journal](#5-the-journal)
-6. [The SDK adapter](#6-the-sdk-adapter)
-7. [Idempotence, and what it does not cover](#7-idempotence-and-what-it-does-not-cover)
-8. [Derived objects](#8-derived-objects)
-9. [Guard rails of the test suite](#9-guard-rails-of-the-test-suite)
-10. [What was deliberately left out](#10-what-was-deliberately-left-out)
-11. [Still open](#11-still-open)
+6. [The shipped SPL artefacts](#6-the-shipped-spl-artefacts)
+7. [The SDK adapter](#7-the-sdk-adapter)
+8. [Idempotence, and what it does not cover](#8-idempotence-and-what-it-does-not-cover)
+9. [Derived objects](#9-derived-objects)
+10. [Guard rails of the test suite](#10-guard-rails-of-the-test-suite)
+11. [What was deliberately left out](#11-what-was-deliberately-left-out)
+12. [Still open](#12-still-open)
 
 ---
 
@@ -156,6 +157,34 @@ That last point has a consequence for every consumer, and it had never been writ
 until late: **counting the `dryrun` rows of a simulation does not give the size of the
 batch**, it gives the number of objects that would change. A panel labelling that column
 "simulated objects" would be lying.
+
+### 3.1 Why the write ceiling is no longer fatal, and why it defaults to ten
+
+In its earlier form, reaching the ceiling raised a fatal error: the search stopped, the
+output was **entirely lost** (`resultCount = 0`), and the operator was left with a
+partial mutation **and** blindness about what had just happened. The guard rail
+therefore produced, at the exact moment it fired, the worst of both worlds.
+
+Its real value is elsewhere, narrow but legitimate: it bounds the blast radius of an
+operator who launches a real write **without having simulated**. On the disciplined path
+- simulate, examine, replay - it adds nothing, since the simulation already showed the
+volume. That function is entirely preserved by stopping the writes. What disappears is
+the blindness. **A guard rail must inform, not blind.**
+
+Batch atomicity stays out of scope for the same reason a global abort on a single
+failure stays out of scope: over several hundred objects it would produce an
+uncharacterised partial state, where the journal characterises it entirely.
+
+**Why ten and not five hundred.** A one-off correction - a few identified objects,
+checked in simulation - goes through without the operator having to think about the
+ceiling at all. Beyond that, they have to write it, therefore to **state the volume they
+are about to mutate**. A ceiling of five hundred let operations of several hundred
+objects through on a production platform without a word, which amounted to keeping none
+of the guard rail in most real cases.
+
+What makes a default that low workable is that **simulation never enters the counter**:
+a `dryrun` covers the whole batch whatever its size, so the friction sits on the real
+write and never on the examination.
 
 ---
 
@@ -465,6 +494,31 @@ the wrong reason" on top of it. That claim had never been measured. **A requirem
 founded on a supposition stays a supposition, however elegant the reasoning built on
 it.**
 
+### 4.20 Real-time detection is exposed, and it was measured
+
+The guard rail reads `isRealTimeSearch` on `GET /services/search/jobs/<sid>`, falling
+back on inspection of `earliest_time` / `latest_time`.
+
+**Measured on Splunk 9.4.6** - search submitted in `search_mode = realtime`, bounds
+`rt-60s` to `rt`: `isRealTimeSearch = True` is indeed exposed, and the run is refused by
+a fatal error. The refusal therefore stays a fatal error and not a warning.
+
+It is not re-validated on another platform. If the information were not exposed and the
+fallback did not conclude, the command would emit a **warning** saying the guard rail
+could not be applied, and would carry on - `run_in_preview = false` and idempotence
+remain the first two lines of defence. That degradation is specified rather than left to
+improvisation, and it is documented rather than removed silently.
+
+### 4.21 Aggregating the prior state of a run needs `earliest()`, not `values()`
+
+Measured on a batch carrying one deliberate duplicate. An object presented twice in the
+same batch produces two `outcome` lines, so `values()` merges the prior state of the
+first pass with the state read back on the second, turns the column multivalued, and
+reports "unchanged" on an object that did change.
+
+Every panel of the monitoring view that shows a before/after state therefore aggregates
+with `earliest(...) BY endpoint`, which is the same discipline as the rollback macro.
+
 ---
 
 ## 5. The journal
@@ -485,6 +539,25 @@ ceiling. The unit volume is marginal; the README documents a purge by age.
 The diagnostic file is the opposite choice on purpose: it carries no restorable state,
 so it stays single and rotating, and **no diagnostic failure is fatal**. A diagnostic
 that interrupted the operation it observes would add a failure to the one it reports.
+For the same reason, opening it never raises: a failure to open yields an inert
+diagnostic object, so no call site has to guard itself.
+
+It is nonetheless the **only** trace of a fatal error that survives the end of the
+search: the operator message is ephemeral and the job disappears when it expires. It
+therefore records the startup line (app version, user, member, `splunkd_uri`, TLS
+verification state), the validated parameters, **the nine naming parameters** - without
+them a run whose field names were redirected would be unreadable after the fact - the
+entitlement check, the real-time check, the resolution of the mapping table with its
+counts and its discarded entries, the opening of the rollback journal, and the fatal
+errors.
+
+**No secret enters it.** The guarantee is structural first: the diagnostic module never
+receives the session key - none of its methods has a parameter carrying it, and the REST
+client does not talk to it. A redaction covers, as a second line, the error messages
+copied back from the platform: the `Authorization` header, `session_key`, `token`,
+`password`, `api_key` and their kin are replaced by a placeholder and **never
+truncated** - a truncated secret is still a partially disclosed secret. That file is
+collected into an index: it is read by far more people than the disk of the search head.
 
 ### 5.2 `fsync` on the intent line, not on the outcome line
 
@@ -587,9 +660,71 @@ type undercounts unless it labels those lines.
 
 ---
 
-## 6. The SDK adapter
+## 6. The shipped SPL artefacts
 
-### 6.1 The output field set is declared, never inferred
+Four design points that a reader of the `.conf` files would otherwise have to
+reconstruct.
+
+### Every shipped search names its source through a macro
+
+No shipped search - panel, saved search or macro - writes `index=` literally. One macro
+names the journal source, one names the diagnostic source, and both carry the
+`sourcetype` as well.
+
+Two reasons, and the second one is the interesting one.
+
+- `inputs.conf` governs ingestion and the macros govern reading. An operator who
+  redirects the journal index without overriding both gets **an empty result with no
+  message** from every shipped search - including the rollback macro, on the only safety
+  net of an irreversible operation. No Simple XML construct brings that down to a single
+  configuration point, so the constraint is **stated** rather than promised away.
+- Carrying the `sourcetype` inside those macros makes a separate rule **structurally
+  unbreakable** instead of leaving it to discipline: no search may write
+  `sourcetype=editacl:*`. The diagnostic file produces seventeen extracted business
+  fields with no `props.conf`, among them `app`, `title`, `id`, `type` and `user` -
+  **homonyms of the journal ones, with inverted semantics**: they carry an *SPL field
+  name*, not the value of an object. The wildcard mixes the two sets without raising a
+  single error, and produces rows where `title` designates sometimes an object and
+  sometimes the name of a parameter.
+
+### Twenty-seven inventory macro stanzas, generated rather than one quoted argument
+
+Splunk indexes macros **by arity**: `acl_inventory(savedsearch,views)` is a two-argument
+call and looks for the two-argument stanza, not for a one-argument stanza holding a
+comma-separated string. The parameterised form therefore needs one stanza per argument
+count, up to the number of families in the shipped lookup.
+
+The alternative - a single-arity macro called with a quoted list - reintroduces a
+quoting requirement in the call form, which is exactly the class of error the removed
+`fields` parameter demonstrated to be silent and expensive. Twenty-seven mechanically
+generated stanzas are a visible maintenance cost; a forgotten quote is an invisible
+defect. The visible cost wins.
+
+### The applied rollback macro delegates instead of copying
+
+`editacl_rollback_apply` expands `editacl_rollback` rather than repeating its SPL. Two
+copies of the same pipeline diverge at the first amendment, and the forgotten copy would
+be the one that **writes**. It also carries the ceiling explicitly, since the default of
+ten would stop a rollback of a larger batch at the eleventh object.
+
+### The re-validation is a script, not an SPL search
+
+Building the URI of an object obeys a single, non-obvious encoding rule, implemented once
+in `acltools/endpoint.py`. Rewriting it in SPL would create a second implementation that
+would drift - the exact defect the single-injection-point rule forbids. The script
+**reuses** the mapping coverage function and the path builder; it reimplements nothing.
+
+It also produces a section nobody asked for and everybody needs: a consistency check
+between `bin/acl_endpoint_map.json`, read by the Python code, and
+`lookups/acl_object_families.csv`, read by the inventory macro. SPL cannot read JSON, so
+the same information exists in two forms, and a divergence would make the inventory and
+the resolution inconsistent.
+
+---
+
+## 7. The SDK adapter
+
+### 7.1 The output field set is declared, never inferred
 
 The SDK writer builds the stream header from the **keys of the first record emitted**,
 then projects every later record onto it: a field absent from that first record
@@ -618,7 +753,7 @@ output obeys a constraint of the same nature - frozen, but on the **first record
 instead of the complete set. The contract was built by measuring the input and assuming
 the output.
 
-### 6.2 `_journal_writer`, and above all not `_journal`
+### 7.2 `_journal_writer`, and above all not `_journal`
 
 The SDK stores the value of an `Option` in the attribute `"_" + <option name>`
 (`searchcommands/decorators.py`). The `journal` option therefore occupies `_journal`.
@@ -631,7 +766,7 @@ value of the option unreadable. The attribute is therefore named `_journal_write
 Anything the adapter stores on `self` has to be checked against the option names for the
 same reason.
 
-### 6.3 The fatal error message is emitted in a non-final chunk
+### 7.3 The fatal error message is emitted in a non-final chunk
 
 The SDK's `error_exit()` writes the message then raises `SystemExit`, which the SDK turns
 into a `finish()` - a final chunk with `finished: true` - followed by exit code 1. That
@@ -656,13 +791,13 @@ does - no return, no cleanup, no final chunk - and to make the failure path
 **exercisable**, since a hardcoded `os._exit` would kill the test process instead of
 failing it.
 
-### 6.4 `type` cannot be passed to `@Configuration`
+### 7.4 `type` cannot be passed to `@Configuration`
 
 `StreamingCommand` pins `type` to `streaming` and the SDK refuses any redeclaration. The
 decorator therefore reads `@Configuration(local=True)`; the effect is identical, the form
 is imposed by the SDK. `local = true` is carried by `commands.conf` as well.
 
-### 6.5 One warning per run, not per event
+### 7.5 One warning per run, not per event
 
 Three warnings are emitted once per run and never per event: the simulation warning, the
 ceiling warning and the runtime divergence warning. Over several hundred objects, a
@@ -673,7 +808,7 @@ number is known. The third one is guarded by a plain flag on the command instanc
 
 ---
 
-## 7. Idempotence, and what it does not cover
+## 8. Idempotence, and what it does not cover
 
 The merged state is compared with the read state after identical normalisation on both
 sides - split, `trim`, removal of empty elements, deduplication, sort. The comparison
@@ -705,9 +840,9 @@ Verifying a rollback means **replaying** it and comparing field by field, not ob
 
 ---
 
-## 8. Derived objects
+## 9. Derived objects
 
-### 8.1 Why abstain rather than handle
+### 9.1 Why abstain rather than handle
 
 Writing the derived object leads, depending on the order of the pipeline, either to a
 **wrong final state** - the cascade from the carrier overwrites the value just written -
@@ -725,7 +860,7 @@ The favourable side effect is that writing the carrier **aligns** the derived ob
 The tool therefore makes the estate converge towards a consistent state batch after
 batch, without ever writing the derived object itself.
 
-### 8.2 The relation is discovered, not computed
+### 9.2 The relation is discovered, not computed
 
 No name of a derived object is ever recomposed by concatenation from the name of a
 carrier. A guessed link would one day produce a homonym, with the same consequences as a
@@ -760,7 +895,7 @@ If the confirming GET can neither establish nor rule out the existence of the ca
 writing a derived object whose carrier might exist falsifies the rollback set **in
 silence**, whereas one abstention too many is visible and has no effect on the estate.
 
-### 8.3 Scope of the rule
+### 9.3 Scope of the rule
 
 The rule is bounded to objects derived from an `eventtype`. The pattern "writing the ACL
 of A modifies the ACL of B" was looked for on 11 of the 27 families and is found nowhere
@@ -772,7 +907,7 @@ on its first ACL write and stops being exposed to the cascade from then on: abst
 from it for good would remove it from decommissioning **with no cascade coming to align
 it in return**.
 
-### 8.4 The blind spot, and where it is treated
+### 9.4 The blind spot, and where it is treated
 
 A diverging derived object whose carrier does not enter the batch is reached by no
 cascade. If it carries a reference to a decommissioned role that its carrier does not
@@ -791,7 +926,7 @@ globally from another application than its derived object would not be paired.
 
 ---
 
-## 9. Guard rails of the test suite
+## 10. Guard rails of the test suite
 
 The suite runs outside Splunk, with no instance and no network, on the standard library
 alone:
@@ -804,7 +939,7 @@ Six of its modules are not tests of behaviour but **guard rails**: they exist to
 rule mechanically enforceable rather than a matter of goodwill. Each one is worth
 exactly what its stated scope is worth, and each states the limits of its own reach.
 
-### 9.1 `test_statuses.py` - the status enumeration is derived from the code
+### 10.1 `test_statuses.py` - the status enumeration is derived from the code
 
 Four successive writings of that list were wrong: three in the specification, then one
 in the test suite the specification had entrusted it to - a constant announcing twelve
@@ -851,7 +986,7 @@ One copy each, each one anchored to `ACL_STATUSES` by a dedicated test:
 Adding a status without updating the document that carries its copy fails the suite,
 naming which document and which value.
 
-### 9.2 `test_language.py` - the repository is in English
+### 10.2 `test_language.py` - the repository is in English
 
 This app is published, and its comments are not decoration: they carry measurements and
 reasoning. Half of that value is lost on a reader who does not speak French. The
@@ -877,19 +1012,19 @@ Its only remaining declared exclusions are the vendored SDK, whose integrity is 
 hash manifest, and the module itself, whose vocabulary **is** the detector. Both
 `README.md` and this file are inside its scope.
 
-### 9.3 `test_message_prefix.py` and `test_editacl_adapter.py` - the single emission point
+### 10.3 `test_message_prefix.py` and `test_editacl_adapter.py` - the single emission point
 
 They read the syntax tree of the adapter and fail if a message reaches the search
 interface anywhere other than `_emit_message`, or through a construct they cannot
 analyse. They also forbid the return of the `_journal` collision described in
-[6.2](#62-_journal_writer-and-above-all-not-_journal).
+[7.2](#72-_journal_writer-and-above-all-not-_journal).
 
-### 9.4 `test_layering.py` - the core does not know about the network or the SDK
+### 10.4 `test_layering.py` - the core does not know about the network or the SDK
 
 Without it, the layering rule is an intention in a comment and one hastily added import
 is enough for the merge matrix to stop being testable on a machine with no instance.
 
-### 9.5 `test_spl_artifacts.py` - the removed parameter stays removed
+### 10.5 `test_spl_artifacts.py` - the removed parameter stays removed
 
 The `fields` parameter of the v1 was the most serious defect this project ever had: an
 unquoted list was **truncated by SPL to its first value**, with no error and no warning,
@@ -902,7 +1037,7 @@ name, with no comma - and the module sweeps the deliverables to make sure the re
 form is not offered anywhere again. A comma inside a naming parameter is also refused
 explicitly, to catch the operator still thinking in v1 terms.
 
-### 9.6 `test_vendor_manifest.py` - the vendored SDK is what the script installs
+### 10.6 `test_vendor_manifest.py` - the vendored SDK is what the script installs
 
 The manifest describes **what the vendoring script installs**, not the raw content of the
 directory: compilation artefacts are excluded from the walk, on writing as on
@@ -911,7 +1046,7 @@ the command on a deployed app, and counting them as a divergence would make the 
 unusable exactly where it serves. A real modification, addition or disappearance of a
 vendored file is still detected.
 
-### 9.7 What the suite also covers
+### 10.7 What the suite also covers
 
 Worth naming because each one froze a measured behaviour rather than an intention:
 
@@ -935,7 +1070,7 @@ Worth naming because each one froze a measured behaviour rather than an intentio
 
 ---
 
-## 10. What was deliberately left out
+## 11. What was deliberately left out
 
 | Left out | Why |
 |---|---|
@@ -952,7 +1087,7 @@ Worth naming because each one froze a measured behaviour rather than an intentio
 
 ---
 
-## 11. Still open
+## 12. Still open
 
 - **Search head cluster replication of a mutated but unpersisted runtime state.** After
   an `HTTP 5xx` on persistence, does the mutated runtime state replicate to the other
@@ -960,7 +1095,7 @@ Worth naming because each one froze a measured behaviour rather than an intentio
 - **Version portability of the mapping table.** Established on 9.4.6 only. The
   re-validation script exists precisely because no claim is made beyond that version.
 - **The 16 families where the cascade pattern was not looked for.** They are inferred
-  exempt, not observed - see [8.3](#83-scope-of-the-rule).
+  exempt, not observed - see [9.3](#93-scope-of-the-rule).
 - **Pairing of the divergence search across applications.** Not observed on the reference
   platform, not ruled out either.
 
