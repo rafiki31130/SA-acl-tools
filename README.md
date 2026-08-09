@@ -736,6 +736,22 @@ Possible warnings: `sharing_change`, `owner_change`, `app_disabled`,
 The fourteen columns above are present whatever the order of the batch; the ones a given
 status does not carry are **empty**, never absent.
 
+Two things to know before reading a figure off that output.
+
+- **`acl_journaled` is narrower than its name.** It says the `phase=intent` line was
+  written and flushed to disk, nothing else. It is therefore `false` on **every** line of
+  a simulation, where an `outcome` line was nonetheless journaled - a simulation writes no
+  `intent` line at all, by construction.
+- **Do not `stats ... BY` an `acl_*` column that can be empty.** Measured: an empty value
+  emitted by a search command is indistinguishable from an absent field, and
+  `| stats count BY acl_type` silently **drops** the objects whose type could not be
+  established - two successfully written objects vanished from a count with no message.
+  The control is unambiguous: an empty value created by `| eval x=""` is kept as a group
+  of its own, one emitted by a command is not. Label first, group after -
+  `| eval acl_type = if(coalesce(acl_type,"")!="", acl_type, "(type not established)")` -
+  which is what every shipped search and panel does. The same applies to `acl_error` and
+  `acl_warning`.
+
 `runtime_divergence_possible` is emitted on **any** POST answering `5xx`, not on `500`
 alone - see [Known limits](#known-limits).
 
