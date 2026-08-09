@@ -368,6 +368,39 @@ panel telling "no run recorded" from "index not readable".
 Index entitlement is deliberately outside the app: the role declares no
 `srchIndexesAllowed`, no `srchIndexesDefault`, no `srchFilter`.
 
+### 4.12.bis Unioning two sources: `multisearch`, never `OR`
+
+The monitoring view has one panel that must read the journal **and** the diagnostic at
+once - the one that lists runs whose diagnostic exists and whose journal does not. The
+obvious construction is an `OR` of the two source macros. **It parses, it runs, it
+returns rows, and it loses most of both sources without a word.**
+
+Measured on a lab, one seven-day window, the same instance at the same moment:
+
+| Construction | Diagnostic events | Journal events |
+|---|---|---|
+| `search (`acl_journal_source`) OR (`acl_diag_source`)` | 9 | 1 403 |
+| `search `acl_journal_source` OR `acl_diag_source`` | 9 | **0** |
+| `index=_internal (sourcetype=a OR sourcetype=b)` | 2 268 | 17 770 |
+| `multisearch [search macro] [search macro]` | 2 268 | 17 770 |
+
+What the parenthesised form kept was the **newest** diagnostic line of each run and the
+**oldest** journal lines - the two clauses do not compose. The panel's filter is
+`journal_lines = 0`, so nine runs that had each written a complete journal came out as
+having written none, and the panel named a cause for each of them.
+
+**How it was found**: by replaying the shipped panel against the lab and reading its rows
+one by one, after the sponsor's first look at the rendered page sent that panel back for
+rework. No test reaches it - the SPL is valid, and the result set is non-empty and
+plausible. It is the same family as the search-time defects of the next section: the
+file was right, the search was wrong, and only reading the result where it is meant to be
+read showed it.
+
+`multisearch` unions two independent searches rather than asking one search to match two
+index-and-sourcetype pairs at once. Each branch still names its source by its macro, so
+the single-point-of-redirection rule (D-51) holds - better than before, since neither
+branch can be collapsed into the other.
+
 ### 4.13 Two journal defects that only show at search time
 
 Both had the same signature: **the JSON file was correct**, and nothing showed before
