@@ -527,6 +527,95 @@ class PropsConfTest(unittest.TestCase):
         self.assertTrue(keys, "KV_MODE=none with no declared extraction reads nothing")
 
 
+class NoShippedStanzaIsNeutralizedTest(unittest.TestCase):
+    """Every shipped stanza is one attribute away from doing nothing at all.
+
+    S-2 of the second re-audit of 2026-08-09. `disabled = 1` on the shipped search that
+    is the entry point of the restore (section 12.8) passed all 713 tests: the search
+    never runs again, and nothing anywhere says so. It is the very class the previous
+    remediation closed **one file further along** - `disabled = true` on the journal
+    monitor of `inputs.conf`, which got a control of its own and only of its own.
+
+    Naming the case a second time would leave the third one open. What is checked here
+    is the **family**: no stanza of any shipped `.conf` file may carry a truthy
+    `disabled`, whatever the file, whatever the spelling of the boolean. The signature
+    of the class is always the same - the artifact is still installed, still correct,
+    still exposed by the API, and it does not run.
+
+    The three other members of the family are already held, each by a control that
+    names the thing it protects, and the mutation campaign exercises them alongside
+    these ones:
+
+      - the **app** itself, by `AppConfTest.test_the_app_is_enabled` (`state = disabled`
+        loads nothing at all);
+      - a **panel of the view**, by
+        `tests/test_dashboard.py::test_every_token_used_in_depends_or_rejects_is_set_somewhere`
+        (a `depends` on a token nobody sets hides the panel for good);
+      - the **view in the navigation**, by
+        `tests/test_dashboard.py::test_the_nav_declares_the_view`.
+    """
+
+    #: How Splunk reads a boolean, `normalizeBoolean` style. `disabled = 0` and
+    #: `disabled = false` are the shipped values and stay legal; everything below is
+    #: the artifact switched off.
+    TRUTHY = ("1", "t", "true", "y", "yes", "on")
+
+    @staticmethod
+    def shipped_conf_files():
+        directory = os.path.join(REPO_ROOT, "default")
+        return sorted(n for n in os.listdir(directory) if n.endswith(".conf"))
+
+    def test_the_sweep_reaches_every_shipped_configuration_file(self):
+        # A sweep whose input set silently empties passes for ever after. The set is
+        # therefore frozen: a new shipped `.conf` file has to be added here, which is
+        # the moment somebody decides it is covered.
+        self.assertEqual(
+            self.shipped_conf_files(),
+            [
+                "app.conf",
+                "authorize.conf",
+                "commands.conf",
+                "inputs.conf",
+                "macros.conf",
+                "props.conf",
+                "savedsearches.conf",
+                "searchbnf.conf",
+                "transforms.conf",
+            ],
+        )
+
+    def test_no_shipped_stanza_is_switched_off(self):
+        from .test_spl_artifacts import read_splunk_conf
+
+        for name in self.shipped_conf_files():
+            for stanza, keys in read_splunk_conf("default", name).items():
+                for key, value in keys.items():
+                    if key.strip().lower() != "disabled":
+                        continue
+                    with self.subTest(file=name, stanza=stanza):
+                        self.assertNotIn(
+                            value.strip().lower(),
+                            self.TRUTHY,
+                            "default/%s [%s] is switched off" % (name, stanza),
+                        )
+
+    def test_every_shipped_search_declares_itself_enabled(self):
+        """Absence is not a defence here.
+
+        `savedsearches.conf` is the one file of the app where the operator is expected
+        to override stanza by stanza, and a missing `disabled` leaves the value to
+        whatever the layer beneath says. The shipped file states it, and stating it is
+        what makes the sweep above meaningful for these stanzas.
+        """
+        from .test_spl_artifacts import read_splunk_conf
+
+        searches = read_splunk_conf("default", "savedsearches.conf")
+        self.assertEqual(len(searches), 4, "the shipped search set changed")
+        for stanza, keys in searches.items():
+            with self.subTest(stanza=stanza):
+                self.assertEqual(keys.get("disabled"), "0")
+
+
 class SplArtifactsTest(unittest.TestCase):
     """SPL deliverables of phase 2b. Their content is exercised by
     `tests/test_spl_artifacts.py`; here only their presence is checked."""
