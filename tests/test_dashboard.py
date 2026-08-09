@@ -280,9 +280,30 @@ class TheTokenWiringTest(unittest.TestCase):
         self.assertEqual(used - set_tokens, set())
 
     def test_the_run_list_drilldown_sets_both_tokens(self):
-        # `sid` drives the panels, `sid_in` makes the text input reflect the selection.
-        # Setting `sid_in` alone would not do: nothing guarantees that setting a token
-        # programmatically fires the `<change>` handler of the input that owns it.
+        """A click sets the panel token and the **state** of the text box.
+
+        The two names are not symmetrical, and the asymmetry is the whole point.
+
+        `sid` is the token the seven detail panels hang on through `depends`. The
+        drilldown sets it directly rather than relying on the input to relay it: if
+        the box never reacted, the panels would still open, and the view would stay
+        usable by hand. That is the failure mode this ordering buys.
+
+        `form.sid_in` is the state of the box itself. An `<input token="X">` **does
+        not read** `X`. The dashboard framework binds the widget value to the token
+        `$form.X$` and writes `X` back once the widget changes - `X` is what the input
+        *produces*, not what it *reads*. The first version of this drilldown set `X`
+        (`sid_in`), that is the far end of the wire, and the box stayed empty on
+        click. The `form.` form is also what a deep link uses in the query string,
+        so click and link now travel the same path.
+
+        Verified on the shipped framework of the target platform rather than assumed:
+        the dashboard bundle builds the input binding as `"$form." + token + "$"`,
+        and a drilldown `<set>` writes the token name **verbatim** into the token
+        model, adding no prefix of its own. Splunk's own Monitoring Console ships a
+        view that drives another input the same way. What no parser can check is the
+        click itself - see the validation debt in the README.
+        """
         for panel in panels(self.root):
             if panel_title(panel) != "Runs":
                 continue
@@ -292,11 +313,42 @@ class TheTokenWiringTest(unittest.TestCase):
                 node.get("token"): (node.text or "").strip()
                 for node in drilldown.findall("set")
             }
-            self.assertEqual(sorted(tokens), ["sid", "sid_in"])
+            self.assertEqual(sorted(tokens), ["form.sid_in", "sid"])
             for value in tokens.values():
                 self.assertEqual(value, "$row.sid$")
             return
         self.fail("run list panel not found")
+
+    def test_no_drilldown_writes_the_bare_token_of_a_text_input(self):
+        """The mistake this view shipped with, named so that it cannot come back.
+
+        Writing the bare token of an input looks right and does nothing visible: the
+        panels react, because they read that token, and the box stays empty, because
+        it does not. A reviewer reading `<set token="sid_in">` has no reason to
+        suspect it. The check is therefore mechanical and covers every drilldown of
+        the view, not only the one that carried the defect.
+
+        Time inputs are exempt: their tokens are read as `$tr.earliest$` /
+        `$tr.latest$` in searches, which is a legitimate use of the bare name. No
+        drilldown of this view sets one, and the assertion below would say so.
+        """
+        input_tokens = {
+            node.get("token")
+            for node in self.root.findall(".//input")
+            if node.get("token") and node.get("type") != "time"
+        }
+        self.assertIn("sid_in", input_tokens)
+        offenders = [
+            node.get("token")
+            for node in self.root.findall(".//drilldown//set")
+            if node.get("token") in input_tokens
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "a drilldown sets %s, the token an input *produces*; the state of the "
+            "widget is the token prefixed with `form.`" % (offenders,),
+        )
 
     def test_the_text_input_carries_no_default(self):
         # A `<default>` - even empty - **defines** the token to the empty string, and a
@@ -342,6 +394,36 @@ class TheTokenWiringTest(unittest.TestCase):
                 self.assertEqual(
                     (search.find("latest").text or "").strip(), "$tr.latest$"
                 )
+
+    def test_the_readme_deep_link_matches_the_token_of_the_text_input(self):
+        """The way in that does not depend on the click, held to the view by a test.
+
+        A `sid` pasted into the query string of the view URL opens it straight on that
+        run. It is the documented way round when the click disappoints, and it is the
+        only selection path a reader can use without touching the page. Renaming the
+        input token would break it in complete silence: the link would carry a
+        parameter no input answers to, the box would stay empty, and the README would
+        still show the old name.
+
+        The check is deliberately mechanical - the README string is derived from the
+        view, not typed twice.
+        """
+        text_inputs = [
+            node.get("token")
+            for node in self.root.findall(".//input")
+            if node.get("type") == "text"
+        ]
+        self.assertEqual(text_inputs, ["sid_in"])
+        with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as handle:
+            readme = handle.read()
+        expected = "?form.%s=" % (text_inputs[0],)
+        self.assertIn(
+            expected,
+            readme,
+            "the README must document the deep link as `%s<sid>`; the parameter is "
+            "the token of the text input prefixed with `form.`, which is where the "
+            "framework keeps the state of the widget" % (expected,),
+        )
 
     def test_the_time_input_declares_the_default_window(self):
         for node in self.root.findall(".//input"):

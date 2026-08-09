@@ -294,9 +294,25 @@
         <option name="drilldown">row</option>
         <option name="wrap">false</option>
         <option name="count">20</option>
+        <!-- Two tokens, two distinct roles, and the second one is NOT the token the
+             input declares.
+
+             `sid` is what the detail panels below hang on through `depends`. It is set
+             here explicitly, and not left to the side effect of the next line: if the
+             input never reacted, the panels would still open. That is the degradation
+             that keeps the view usable.
+
+             `form.sid_in` is the **state of the text box**. An `<input token="X">`
+             does not read `X`: the framework binds the widget value to `$form.X$` and
+             writes `X` back when the widget changes. `X` is the output of the input,
+             not its input. Setting `sid_in` here - which is what this drilldown used to
+             do - therefore wrote to the wrong end of the wire, and the box stayed
+             empty. Setting `form.sid_in` puts the click on exactly the same code path
+             as the documented deep link `?form.sid_in=<sid>`, which is the fallback the
+             README sends the reader to. -->
         <drilldown>
           <set token="sid">$row.sid$</set>
-          <set token="sid_in">$row.sid$</set>
+          <set token="form.sid_in">$row.sid$</set>
         </drilldown>
       </table>
     </panel>

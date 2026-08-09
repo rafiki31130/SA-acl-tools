@@ -988,28 +988,52 @@ go**. A run is identified by its `sid`.
 3. A view exported to the system does **not** appear in the menu of another app: a `nav`
    entry is still needed there. That is a fact to know, not a defect to fix in the app.
 
+### Selecting a run: three ways in
+
+| Way in | What you do | What you should see |
+|---|---|---|
+| **Click** | Click any row of the *Runs* list | The `sid` of that row **appears in the *Run (sid)* box**, and the detail panels open on it |
+| **Type** | Type or paste a `sid` into the *Run (sid)* box | The detail panels open on it. Clearing the box closes them again |
+| **Link** | Open `.../app/<app>/editacl_runs?form.sid_in=<sid>` | The view opens straight on that run, box filled. This is what makes a `sid` quotable in an operations note |
+
+The three converge on the same token, and the click and the link travel the same wire:
+the query parameter of the link and the token the click writes are one and the same
+name. That is held by a test, so renaming the input cannot silently break the link.
+
 > ### Read this before you use the view
 >
-> **The view has never been opened in a browser.** Its structure, its token wiring and
-> its searches are covered by the test suite and were replayed against a real instance
-> through the REST API; what happens **in the page after it loads** - the `depends` /
-> `rejects` panels appearing and disappearing, the text input clearing the selection,
-> and above all **clicking a row of the run list to select a run** - has been exercised
-> by **no** measurement. That is the one validation debt left on this deliverable.
+> **The view has never been opened in a browser**, and the one thing no test can reach
+> is what the page does after it loads: the `depends` / `rejects` panels appearing and
+> disappearing, the box clearing the selection, and the click filling the box. The
+> structure, the token wiring and the searches are frozen by the test suite and were
+> replayed against a real instance through the REST API - **nothing past the render
+> is measured**.
 >
-> Concretely: if the detail panels stay hidden after you click a run, type the `sid`
-> into the *Run (sid)* input instead - it drives the same token - and report it. It is
-> a plausible defect, not an impossible one.
+> What has been established, and how far it goes. The click writes `form.sid_in`,
+> which is where the dashboard framework of the platform keeps the **state of the
+> box** - the bare `sid_in` is what the box *produces*, not what it reads, which is
+> why an earlier version of this view left the box empty on click. That reading comes
+> from the shipped framework code of the target version and from a view Splunk ships
+> itself, not from a guess. **What it does not establish** is the chain that follows
+> in the page: that the box redisplays on a token write, and that its `<change>`
+> handler then fires. Those two links are read from code, never observed.
+>
+> The click is therefore built to degrade well: it sets the panel token **itself**,
+> and does not delegate it to the box. If the box failed to redisplay, the detail
+> panels would still open - you would see a selection with an empty box, which is
+> worth reporting, not a dead view.
+>
+> If nothing at all happens on click, use the box or the link above; both reach the
+> same token by a shorter path. Report it either way.
 >
 > The same limit applies to the **rendering**: a panel can be syntactically correct and
 > unreadable, or hidden by a condition.
 
 Panels, in order: entitlement check, legacy-format lines excluded, runs started with no
-journal line, the run list, then - **for a run selected in the run list or typed into
-the `sid` input**, a selection mechanism that carries the debt stated just above - its
-summary, the status breakdown observed against declared, the HTTP code breakdown, the
-breakdown by application and object type, the resolved objects with their before/after
-state, the events refused before endpoint resolution, and the errors.
+journal line, the run list, then - for the run selected by any of the three ways above -
+its summary, the status breakdown observed against declared, the HTTP code breakdown,
+the breakdown by application and object type, the resolved objects with their
+before/after state, the events refused before endpoint resolution, and the errors.
 
 ### What the entitlement check does, and what it does not
 
@@ -1365,7 +1389,7 @@ modification of a vendored file, an addition or a disappearance are still detect
 | **Restore only after indexing** | The journal is only queryable after ingestion | The file of the run is self-contained and usable immediately |
 | **Redirecting the journal index takes two overrides** | Overriding only `inputs.conf` leaves every shipped search returning an empty result **without saying so** | Override `local/inputs.conf` **and** `local/macros.conf` |
 | **Dashboard requires an index entitlement** | Without read access to the journal index the view shows nothing | The *Entitlement check* panel distinguishes "no run" from "no access". Granting the access is outside this app |
-| **The monitoring view has never been opened in a browser** | Its **client-side** behaviour is unmeasured: the panels that appear once a run is selected, the input that clears the selection, and **the click on a row of the run list**. The detail panels may fail to appear | Structure, token wiring and searches are frozen by the test suite and were replayed through the REST API; **nothing after the page loads is measured**. Fallback: type the `sid` into the *Run (sid)* input, which drives the same token. See [Run monitoring view](#run-monitoring-view) |
+| **The monitoring view has never been opened in a browser** | Its **client-side** behaviour is unmeasured. The token the click writes is the one the framework reads for the state of the *Run (sid)* box - established on the shipped framework code of the platform, not guessed. What stays unproven is what the page does next: that the box redisplays on that write, and that its `<change>` handler fires afterwards | Structure, token wiring and searches are frozen by the test suite and were replayed through the REST API; **nothing past the render is measured**. The click sets the panel token itself, so a box that failed to redisplay would still open the panels. Ways round: the box, or the link `?form.sid_in=<sid>`. See [Run monitoring view](#run-monitoring-view) |
 | **The entitlement check reports a silent window, it does not diagnose it** | A journal that stopped arriving and a period with no run produce the same reading | The panel states the ambiguity instead of guessing, and shows the date of the most recent line on every state. The index comparison beside it resolves the case **only** when the reader may search the index the lines went to |
 | **No automatic signal for 42 to 48 h for a reader entitled to the origin index only** | After a redirection, a holder of the read role who may search the old index and not the new one reads a clean state while the run list has already stopped. Measured on the shipped default range, whose length is seven days plus the hours elapsed today | **None, and it is not fixable inside the app**: detecting it means counting events in an index that reader may not search. The mitigation is a fact, not a signal - the date of the most recent journal line **opens the state on every state**, at every threshold, and the run list stops on the same day. Narrow the time range, or compare that date with how often runs are expected |
 | **The cause of a run with no journal line is read from a severity, not from a sentence** | A run is called fatal because it carries a `CRITICAL` diagnostic line, and "journal could not be opened" because a `WARNING` line names a journal file | That the message said so. It is the deliberate choice: the wording of a message is translated and reworded, its severity is not. Measured: of 19 fatal runs in a lab retention window, matching the English sentence found **1**. What it costs: a future message emitted at `CRITICAL` for something that is not a fatal error would be counted as one |
@@ -1395,7 +1419,8 @@ modification of a vendored file, an addition or a disappearance are still detect
 | The rollback macro returns nothing | The search time range does not cover the run, or the journal index was redirected without overriding `local/macros.conf`, or no write succeeded in that run | Widen the time range; check both override points |
 | The rollback macro returns nothing, and the search was written `search \`editacl_rollback(<sid>)\`` | **The macro is only valid in generating position.** Its definition opens on the `search` keyword, so the other form searches for the literal term `search` and matches nothing. Measured: **0 rows** in the faulty form, **160** in the correct one, same `sid` - `HTTP 200`, not one message | Write it as `\| \`editacl_rollback(<sid>)\``, with the leading pipe and no `search` keyword. Every example in this document uses that form |
 | The monitoring view lists runs but stops at a date | The journal index was redirected in `local/inputs.conf` without overriding `local/macros.conf`, or ingestion stopped | Read the *Entitlement check* panel: it compares the index the journal lands in with the index the view reads, and shows the date of the most recent line. **The view does not go empty in this case, it goes stale** |
-| The detail panels stay hidden after clicking a run | The client-side behaviour of the view is **not validated** - see [Known limits](#known-limits) | Type the `sid` into the *Run (sid)* input, which drives the same token. Report it: it is a known unmeasured path |
+| Clicking a run leaves the *Run (sid)* box empty, but the detail panels open | The box did not redisplay on the token write. The selection is correct - only the box is out of step, and the click was built so that this is what failure looks like | Nothing to do to read the run. Report it: it is a known unmeasured link - see [Known limits](#known-limits) |
+| Clicking a run does nothing at all: empty box, no detail panels | The client-side behaviour of the view is **not validated** - see [Known limits](#known-limits) | Type the `sid` into the *Run (sid)* box, or open the view as `?form.sid_in=<sid>`. Report it: it is a known unmeasured path |
 | A run does not appear in the view at all | It ran with `journal=false` | The *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype |
 | A saved search seems duplicated after an upgrade | The searches were renamed when the repository moved to English | See [Shipped searches](#shipped-searches) |
 
