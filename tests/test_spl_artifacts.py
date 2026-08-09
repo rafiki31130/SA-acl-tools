@@ -815,6 +815,33 @@ class SavedsearchesTest(unittest.TestCase):
 
     # -- section 12.7, blocking deliverable ---------------------------------- #
 
+    JOURNAL = "ACL - change journal"
+
+    def test_the_journal_search_groups_on_the_single_type_field(self):
+        """One notion, one field - in the shipped searches as in the view.
+
+        This search and the monitoring view are read side by side on the same run. It
+        must group on `eai_type`, and on nothing that names a handler path: a table
+        showing `savedsearch` next to another showing `saved/searches` for the same
+        objects is the defect this closes.
+        """
+        search = self.conf[self.JOURNAL]["search"]
+        self.assertRegex(search, r"BY[^|]*\beai_type\b")
+        for forbidden in ("handler", "handler_path", "family"):
+            self.assertNotIn(forbidden, search)
+
+    def test_the_journal_search_labels_the_empty_type_like_the_view_does(self):
+        """The literal is shared with the view on purpose: an unlabelled empty cell in
+        one artefact next to a named bucket in the other is a difference the reader has
+        to explain away."""
+        search = self.conf[self.JOURNAL]["search"]
+        self.assertIn('"(type not established)"', search)
+        view = os.path.join(
+            REPO_ROOT, "default", "data", "ui", "views", "editacl_runs.xml"
+        )
+        with open(view, encoding="utf-8") as handle:
+            self.assertIn('"(type not established)"', handle.read())
+
     AUDIT = "ACL - eventtype / derived object divergences"
 
     def test_the_divergence_audit_search_is_shipped(self):
