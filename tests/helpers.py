@@ -85,6 +85,33 @@ def acl_body(
     return json.dumps(document).encode("utf-8")
 
 
+#: `acl` block of an `admin/ntags` object, **copied from the platform**.
+#:
+#: Measured on 9.4.6 on a lab object of that family. Three properties matter and none
+#: of them is an invention of this fixture: there is no `can_change_perms` key, there
+#: is no `can_share_*` key, and `perms` is `null`. The handler publishes what it can
+#: say about its objects, and it says the whole permission side is absent - which it
+#: sums up as `modifiable: false`.
+NTAGS_ACL_BLOCK = {
+    "app": "search",
+    "can_list": True,
+    "can_write": True,
+    "modifiable": False,
+    "owner": "admin",
+    "perms": None,
+    "removable": False,
+    "sharing": "global",
+}
+
+
+def ntags_acl_body(name="witness_object"):
+    """Response body of a GET on an `admin/ntags` object, block copied from 9.4.6."""
+    block = dict(NTAGS_ACL_BLOCK)
+    return json.dumps(
+        {"entry": [{"name": name, "content": {}, "acl": block}]}
+    ).encode("utf-8")
+
+
 def acl_body_raw(acl_block):
     """Response body built from a raw `acl` block (parsing edge cases)."""
     return json.dumps(
@@ -252,11 +279,19 @@ def make_event(
     )
 
 
-def state(owner="nobody", sharing="global", read=(), write=(), can_change_perms=True):
+def state(
+    owner="nobody",
+    sharing="global",
+    read=(),
+    write=(),
+    can_change_perms=True,
+    perms_lock_source="can_change_perms",
+):
     return AclState(
         owner=owner,
         sharing=sharing,
         perms_read=tuple(read),
         perms_write=tuple(write),
         can_change_perms=can_change_perms,
+        perms_lock_source=perms_lock_source,
     )

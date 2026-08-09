@@ -120,7 +120,7 @@ stateDiagram-v2
   Read --> error : GET 5xx after one retry, or transport
 
   Read --> skipped_derived : rank 0, derived from an eventtype
-  Merge --> skipped_immutable : rank 1, can_change_perms = 0
+  Merge --> skipped_immutable : rank 1, permissions declared unchangeable
   Merge --> rejected : rank 2, empty sharing
   Merge --> rejected : rank 3, sharing outside user app global
   Merge --> rejected : rank 3bis, empty owner
@@ -148,8 +148,12 @@ conditions hold at once. Four consequences:
 - rank -1 skips private objects before any read, and rank 0 precedes every following
   check: an object derived from an `eventtype` comes out `skipped_derived` even when it
   is immutable, even in simulation, even when it is already compliant;
-- `can_change_perms` is read **in the GET response**, never in the input event -
-  trusting the event would make the guard rail bypassable by an upstream `eval`;
+- whether the permissions may be changed is read **in the GET response**, never in the
+  input event - trusting the event would make the guard rail bypassable by an upstream
+  `eval`. It is read under **two** key names, in order: `can_change_perms`, and
+  `modifiable` when the block carries no `can_change_perms` (section 4.16). The reason that
+  accompanies the status names the key that answered, so that one status can carry two
+  provenances without hiding either;
 - rank 6 precedes rank 7: an object that is already compliant is a `noop` **even in
   simulation**.
 
@@ -478,10 +482,49 @@ Recovery is a configuration reload of the family, not a rollback: the rollback m
 only keeps `outcome` lines with status `updated`, and it is right to exclude the object,
 since the disk never saw it change.
 
-### 4.16 `admin/ntags` refuses every ACL write
+### 4.16 `admin/ntags` refuses every ACL write - and says so beforehand
 
 Measured: `HTTP 500`, "ACL modification not supported by this handler". No workaround
 exists - that is a limit of the handler, not of the command.
+
+**The handler announces it in its ACL block, under a name the command did not read.**
+Measured on 9.4.6, the block of an `admin/ntags` object carries neither
+`can_change_perms` nor any `can_share_*` key, `perms` is `null`, and what is left is
+`"modifiable": false`. The whole permission side of the block is absent, and
+`modifiable` is the only statement about it the handler makes.
+
+Reading `can_change_perms` alone left that block silent. The fallback of the code -
+absent means permissive - then applied, rank 1 never fired, the POST went out, the
+`500` came back, and with it `runtime_divergence_possible`: a warning announcing a
+runtime view possibly mutated, on an object nothing had written. Of the three possible
+behaviours - abstain, try, try and cry wolf - the command had the worst one, on an
+entire family.
+
+The correction reads the fact under **both** names, in that order: `can_change_perms`
+when the block carries it, `modifiable` otherwise. Three properties make the order the
+whole design rather than a detail:
+
+- **the fallback adds an answer, it never overrides one.** `modifiable` speaks of the
+  object, `can_change_perms` of its ACL; the two are not synonyms, and a handler that
+  publishes both answers the exact question. Letting the approximate name win would
+  freeze the ACL of every object that happens to be read-only in content;
+- **nothing in the code names a family.** The correction is a property of the block
+  read, not a special case keyed on `admin/ntags`, which is what makes it hold for a
+  handler nobody has measured yet;
+- **the reason names the key that answered** - `modifiable=0` instead of
+  `can_change_perms=0`. Same status, same absence of a write, different provenance, and
+  the provenance belongs where every other rank already puts its reason.
+
+Census over the 1 502 objects of the 27 native handler paths of a 9.4.6 instance:
+`modifiable` published by 1 502, `can_change_perms` by 1 501. The single object without
+`can_change_perms` is the `admin/ntags` one, and it is also the single object carrying
+`modifiable = false`. **No object anywhere carries the two keys with contradictory
+values**, which is exactly why the precedence is frozen by a test rather than left to
+that observation. Two families held no object at the time of the census -
+`data/props/fieldaliases` and `data/ui/panels` - and the census says nothing about them.
+
+The objects of the family now come out `skipped_immutable` with `acl_error =
+"modifiable=0"`, no POST, no journal `intent` line, and no divergence warning.
 
 ### 4.17 Moving an application, and renaming
 

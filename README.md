@@ -639,7 +639,7 @@ once.
 |---|---|---|---|
 | -1 | The current scope is `user`, or - lacking a scope - the namespace carried by `id` is a named one | `skipped_private` | no |
 | 0 | The object is derived from an `eventtype` | `skipped_derived` | no |
-| 1 | `can_change_perms = 0` in the GET response | `skipped_immutable` | no |
+| 1 | The GET response declares the permissions unchangeable | `skipped_immutable` | no |
 | 2 | `new_sharing` column present, cell empty | `rejected` / `sharing_empty_not_allowed` | no |
 | 3 | Target scope outside `{user, app, global}` | `rejected` / `invalid_sharing:<value>` | no |
 | 3bis | `new_owner` column present, cell empty | `rejected` / `owner_empty_not_allowed` | no |
@@ -654,6 +654,15 @@ The `max_objects` ceiling comes before all of it: once reached, the object comes
 **Rank 6 precedes rank 7**: an object that is already compliant is a `noop` **even in
 simulation**. That is the useful information, and it is what lets you measure the
 convergence of a batch without writing.
+
+**Rank 1 reads two key names.** Splunkd states whether the permissions of an object may
+be changed under `can_change_perms` in a full ACL block, and under `modifiable` in a
+reduced block that carries no `perms` and no `can_share_*` - which is what
+`admin/ntags` publishes. The command reads `can_change_perms` when the block carries it
+and `modifiable` otherwise, never the reverse: the two are not synonyms, and the exact
+answer wins wherever it exists. `acl_error` names the key that answered -
+`can_change_perms=0` or `modifiable=0` - so that one status carries the two provenances
+without hiding either.
 
 An effective change of `sharing` is signalled by `acl_warning = "sharing_change"`, a
 change of owner by `acl_warning = "owner_change"`: in both cases what changes goes
@@ -1532,7 +1541,7 @@ modification of a vendored file, an addition or a disappearance are still detect
 | **Search output lost on a fatal error** | `resultCount = 0`: events already emitted disappear. Not fixable from a search command. **Reaching `max_objects` is no longer part of this** | The journal stays complete and remains the way to resume and to undo; `editacl.log` timestamps the interruption. The job is marked `isFailed = true`, which a scheduler detects |
 | **No retry on the POST** | A transport failure after sending leaves an `intent` with no `outcome` | Cross-check with `splunkd_access.log`. A retry could not tell "the POST never left" from "the POST succeeded and the response was lost" |
 | **`HTTP 5xx` on persistence: diverging runtime view** | The POST is refused, the disk is intact, but the runtime view of splunkd is mutated - and it is the runtime view that is authoritative for users, searches and access control. The object is excluded from the rollback set | `acl_warning = "runtime_divergence_possible"` on the **whole** `5xx` class + one `MSG[WARN]` per run. Recovery through a configuration reload (`admin/<family>/_reload`) or a member restart, **not** through `editacl_rollback` |
-| **`admin/ntags` refuses every ACL write** | Measured: `HTTP 500`, "ACL modification not supported by this handler". Objects of that family systematically come out `acl_status = "error"`, with `runtime_divergence_possible` since the code is a `5xx` | **No workaround**: that is a limit of the handler, not of the command. Exclude the family from the batch - `acl_inventory(...)` without `ntags`, or `\| search 'eai:type'!="ntags"`. Tags stay addressable through the `tags` and `fvtags` families |
+| **`admin/ntags` refuses every ACL write** | Measured: `HTTP 500`, "ACL modification not supported by this handler". The handler **announces it in its ACL block**, which carries no `can_change_perms` and states `"modifiable": false` with `perms: null`. The command reads that statement (rank 1), so objects of that family come out `acl_status = "skipped_immutable"`, `acl_error = "modifiable=0"`, **with no POST**, no journal `intent` line and no `runtime_divergence_possible` | **No workaround** for writing them: that is a limit of the handler, not of the command. Nothing to do to avoid the failed write - the command abstains. Excluding the family from the batch stays legitimate to shorten the output - `acl_inventory(...)` without `ntags`, or `\| search 'eai:type'!="ntags"`. Tags stay addressable through the `tags` and `fvtags` families |
 | **A green second pass does not prove the rollback set is right** | The idempotence check only covers **one of the two known failure modes** | Verifying a rollback means replaying `editacl_rollback` and comparing field by field, never observing a `noop` rate |
 | **Blind spot on derived objects** | A diverging derived object whose carrier enters no batch is reached by no cascade: if it references a decommissioned role that its carrier does not, that reference **survives** | The shipped divergence search measures the volume. The treatment is **upstream, on the deployer side** |
 | **Search head cluster replication** | Every write triggers a knowledge object replication | Batches bounded by `max_objects`, run outside peak hours. The command serialises its calls and implements **no** automatic throttling |
@@ -1566,7 +1575,7 @@ modification of a vendored file, an addition or a disappearance are still detect
 | Only ten objects were written | `max_objects` defaults to 10; the rest came out `skipped_ceiling` | Replay with an explicit `max_objects` |
 | `acl_before_*` / `acl_after_*` columns are empty on some rows | Those statuses never computed a merge (`skipped_private`, `skipped_derived`, `skipped_ceiling`, upstream rejections) | Expected. The columns are always present, empty where there is nothing to show |
 | An object comes out `unresolved_endpoint:<type>` | The type is absent from the mapping table | Add it through the override file; run the re-validation |
-| Objects of the `ntags` family always come out `error` | The handler refuses ACL writes | Exclude the family from the batch |
+| Objects of the `ntags` family come out `skipped_immutable` / `modifiable=0` | The handler refuses ACL writes and declares it in its ACL block. No POST is sent | Expected. Nothing to do; exclude the family from the batch only to shorten the output |
 | The monitoring view is a `404` | The account holds neither `editacl_auditor` nor `admin_all_objects` | Grant the role. It is not a deployment failure |
 | The monitoring view is empty | No index entitlement, or the journal index was redirected without overriding `local/macros.conf` | Read the *Entitlement check* panel first |
 | The rollback macro returns nothing | The search time range does not cover the run, or the journal index was redirected without overriding `local/macros.conf`, or no write succeeded in that run | Widen the time range; check both override points |

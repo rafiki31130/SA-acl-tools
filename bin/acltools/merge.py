@@ -105,13 +105,24 @@ def merge(current, event):
         perms_read=perms_read,
         perms_write=perms_write,
         can_change_perms=current.can_change_perms,
+        perms_lock_source=current.perms_lock_source,
     )
 
     # Normative order of section 5.4: it determines which status wins when several
     # conditions hold at once.
     rejection = None
     if not current.can_change_perms:                                     # rank 1
-        rejection = EventRejected("skipped_immutable", "can_change_perms=0")
+        # The reason names the ACL key the answer was read from. The status alone
+        # cannot: splunkd states the same fact under two names depending on the
+        # handler (`normalize.PERMS_LOCK_KEYS`), and an operator who filters on
+        # `skipped_immutable` is entitled to know which statement was obeyed - a full
+        # ACL block saying the permissions are frozen, or a reduced one that carries no
+        # permissions at all. That is a difference of provenance, not of outcome, so it
+        # belongs in the reason and not in a status of its own.
+        rejection = EventRejected(
+            "skipped_immutable",
+            "%s=0" % (current.perms_lock_source or "can_change_perms"),
+        )
     elif sharing_rejection is not None:                                  # ranks 2 and 3
         rejection = sharing_rejection
     elif owner_rejection is not None:                                    # rank 3bis

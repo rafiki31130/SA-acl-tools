@@ -34,6 +34,40 @@ class ControlOrderTest(unittest.TestCase):
         result = merge(current, make_event(owner=""))
         self.assertEqual(result.rejection.status, "skipped_immutable")
 
+    def test_rank_1_names_the_acl_key_the_answer_came_from(self):
+        """One status, two provenances - and the reason is what tells them apart.
+
+        The outcome is identical: no POST, `skipped_immutable`. What differs is which
+        statement of the platform was obeyed, and an operator filtering on that status
+        is entitled to know it without going back to the GET.
+        """
+        for source, expected in (
+            ("can_change_perms", "can_change_perms=0"),
+            ("modifiable", "modifiable=0"),
+        ):
+            with self.subTest(source=source):
+                current = state(
+                    owner="nobody",
+                    sharing="global",
+                    can_change_perms=False,
+                    perms_lock_source=source,
+                )
+                result = merge(current, make_event(read="*"))
+                self.assertEqual(result.rejection.status, "skipped_immutable")
+                self.assertEqual(result.rejection.error, expected)
+
+    def test_rank_1_falls_back_on_the_expected_key_when_no_source_is_named(self):
+        """A state built without a source - the case of a hand-written fixture - must
+        not produce a reason reading `=0`."""
+        current = state(can_change_perms=False, perms_lock_source="")
+        result = merge(current, make_event(read="*"))
+        self.assertEqual(result.rejection.error, "can_change_perms=0")
+
+    def test_the_source_survives_the_merge(self):
+        current = state(can_change_perms=False, perms_lock_source="modifiable")
+        result = merge(current, make_event(read="*"))
+        self.assertEqual(result.after.perms_lock_source, "modifiable")
+
     def test_rank_2_empty_sharing_wins_over_the_owner_rejection(self):
         current = state(owner="an_owner", sharing="app", read=(), write=())
         result = merge(current, make_event(sharing="", owner=""))

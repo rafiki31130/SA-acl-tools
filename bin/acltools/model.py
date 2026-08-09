@@ -189,6 +189,12 @@ class AclState:
     perms_read: Tuple[str, ...] = ()
     perms_write: Tuple[str, ...] = ()
     can_change_perms: bool = True
+    #: Name of the ACL key `can_change_perms` was read from - splunkd publishes that
+    #: fact under two names depending on the handler (`normalize.PERMS_LOCK_KEYS`).
+    #: Empty when the block carried neither, the case where the permissive default
+    #: applies. It is **not** part of the state compared by `is_noop`: it says where an
+    #: answer came from, not what the object is.
+    perms_lock_source: str = "can_change_perms"
 
 
 @dataclass(frozen=True)

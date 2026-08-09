@@ -3,14 +3,16 @@
 import unittest
 
 from acltools.normalize import (
+    PERMS_LOCK_KEYS,
     is_field_empty,
     normalize_roles,
     normalize_sharing,
     parse_acl_state,
+    read_perms_lock,
     serialize_roles,
 )
 
-from .helpers import acl_body_raw
+from .helpers import NTAGS_ACL_BLOCK, acl_body_raw
 
 
 class NormalizeRolesTest(unittest.TestCase):
@@ -150,6 +152,80 @@ class ParseAclStateTest(unittest.TestCase):
 
     def test_can_change_perms_absent_means_true(self):
         self.assertTrue(parse_acl_state({}).can_change_perms)
+
+
+class PermsLockTest(unittest.TestCase):
+    """The same fact under two names, and the order between them.
+
+    splunkd states whether an object's permissions may be changed under
+    `can_change_perms` in a full ACL block, and under `modifiable` in a reduced one
+    that carries no `perms` and no `can_share_*`. Reading only the first name leaves
+    the reduced block silent, and a silence read as the permissive default sends a
+    write to a handler that refuses every one of them.
+
+    The order is the point of these tests as much as the fallback is: a block carrying
+    both keys is answered by `can_change_perms`, whatever `modifiable` says.
+    """
+
+    def test_the_expected_key_comes_first(self):
+        self.assertEqual(PERMS_LOCK_KEYS[0], "can_change_perms")
+
+    def test_the_expected_key_alone(self):
+        for raw, expected in ((True, True), (False, False), ("0", False), ("1", True)):
+            with self.subTest(raw=raw):
+                value, source = read_perms_lock({"can_change_perms": raw})
+                self.assertEqual(value, expected)
+                self.assertEqual(source, "can_change_perms")
+
+    def test_the_other_name_answers_when_the_expected_key_is_absent(self):
+        for raw, expected in ((True, True), (False, False), ("0", False), ("1", True)):
+            with self.subTest(raw=raw):
+                value, source = read_perms_lock({"modifiable": raw})
+                self.assertEqual(value, expected)
+                self.assertEqual(source, "modifiable")
+
+    def test_the_expected_key_wins_when_both_are_present(self):
+        """Counter-test of the fallback: it adds an answer, it never overrides one.
+
+        `modifiable` speaks of the object, `can_change_perms` of its ACL. A handler
+        that publishes both answers the exact question, and letting the approximate
+        one win would freeze the ACL of every object that is merely read-only in
+        content. Measured on 9.4.6: 1 501 of the 1 502 objects publish both, and none
+        of them carries the two with contradictory values - which is precisely why
+        this ordering must be frozen by a test rather than by an observation.
+        """
+        value, source = read_perms_lock(
+            {"can_change_perms": True, "modifiable": False}
+        )
+        self.assertTrue(value)
+        self.assertEqual(source, "can_change_perms")
+
+        value, source = read_perms_lock(
+            {"can_change_perms": False, "modifiable": True}
+        )
+        self.assertFalse(value)
+        self.assertEqual(source, "can_change_perms")
+
+    def test_neither_key_is_the_permissive_default_and_names_no_source(self):
+        value, source = read_perms_lock({})
+        self.assertTrue(value)
+        self.assertEqual(source, "")
+
+    def test_the_measured_ntags_block(self):
+        """The block copied from the platform, parsed end to end."""
+        state = parse_acl_state(NTAGS_ACL_BLOCK)
+        self.assertFalse(state.can_change_perms)
+        self.assertEqual(state.perms_lock_source, "modifiable")
+        self.assertEqual(state.perms_read, ())
+        self.assertEqual(state.perms_write, ())
+        self.assertEqual(state.owner, "admin")
+        self.assertEqual(state.sharing, "global")
+
+    def test_a_full_block_still_names_the_expected_key(self):
+        state = parse_acl_state(
+            {"owner": "nobody", "sharing": "global", "can_change_perms": True}
+        )
+        self.assertEqual(state.perms_lock_source, "can_change_perms")
 
     def test_full_response_body(self):
         import json

@@ -18,13 +18,16 @@ from acltools.rest import RestResponse
 
 from .helpers import (
     FIXTURE_MAPPING,
+    NTAGS_ACL_BLOCK,
     FakeClock,
     FakeJournal,
     FakeRest,
     acl_body,
+    acl_body_raw,
     make_ctx,
     make_event,
     make_params,
+    ntags_acl_body,
 )
 
 ENDPOINT = "/servicesNS/nobody/my_app/saved/searches/My%20search"
@@ -1386,3 +1389,95 @@ class InternalErrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImmutableThroughTheOtherKeyTest(unittest.TestCase):
+    """A whole family the platform declares frozen, and the command used to try anyway.
+
+    `admin/ntags` refuses every ACL write - `HTTP 500`, "ACL modification not supported
+    by this handler" - and it says so **beforehand**, in its ACL block: no
+    `can_change_perms`, no `can_share_*`, `perms: null`, `modifiable: false`. Reading
+    only `can_change_perms` made that block silent, the permissive default applied,
+    rank 1 never fired, the POST went out, and the `5xx` came back with
+    `runtime_divergence_possible` in tow - a warning that says a runtime view may have
+    been mutated, raised on an object that was never written.
+
+    That warning is the only one of the command that speaks of a state the rollback
+    cannot restore. Raising it on an entire family is what makes it worth nothing on
+    the day it is true.
+    """
+
+    NTAGS_ID = "https://127.0.0.1:8089/servicesNS/nobody/my_app/admin/ntags/enabled"
+    NTAGS_ENDPOINT = "/servicesNS/nobody/my_app/admin/ntags/enabled"
+
+    def _event(self, **kwargs):
+        return make_event(
+            title="enabled",
+            id_value=self.NTAGS_ID,
+            eai_type="ntags",
+            current_sharing="global",
+            read="*",
+            **kwargs
+        )
+
+    def _rest(self, body=None):
+        return FakeRest(
+            default_get=RestResponse(200, body or ntags_acl_body(name="enabled")),
+            # Scripted so that the absence of a POST is established by the recording
+            # and not by the absence of a scripted response.
+            default_post=RestResponse(
+                500,
+                b'{"messages":[{"type":"ERROR","text":"ACL modification not '
+                b'supported by this handler"}]}',
+            ),
+        )
+
+    def test_the_object_is_skipped_with_no_exchange(self):
+        rest = self._rest()
+        journal = FakeJournal()
+        result = processor(rest, journal=journal).process(self._event())
+        self.assertEqual(result.status, "skipped_immutable")
+        self.assertEqual(result.error, "modifiable=0")
+        self.assertEqual(result.endpoint, self.NTAGS_ENDPOINT)
+        self.assertEqual(rest.posts(), [])
+        self.assertEqual(result.http_code, 200)
+        self.assertFalse(result.journaled)
+        self.assertEqual(journal.intents, [])
+
+    def test_the_divergence_warning_is_not_raised(self):
+        result = processor(self._rest()).process(self._event())
+        self.assertNotIn(RUNTIME_DIVERGENCE_WARNING, result.warnings)
+
+    def test_the_write_counter_is_not_incremented(self):
+        proc = processor(self._rest())
+        proc.process(self._event())
+        self.assertEqual(proc.counter, 0)
+
+    def test_an_object_of_the_same_family_that_allows_it_is_still_written(self):
+        """Counter-test: the fallback reads the block, it does not name a family.
+
+        Nothing in the correction knows the word `ntags`. An object whose block does
+        carry `can_change_perms = true` is written, even with `modifiable = false`
+        beside it - which is the only reading that keeps the expected key
+        authoritative.
+        """
+        block = dict(NTAGS_ACL_BLOCK)
+        block["can_change_perms"] = True
+        rest = FakeRest(
+            default_get=RestResponse(200, acl_body_raw(block)),
+            default_post=RestResponse(200, b"{}"),
+        )
+        result = processor(rest).process(self._event())
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(len(rest.posts()), 1)
+
+    def test_a_block_carrying_neither_key_keeps_the_permissive_default(self):
+        """The fallback adds an answer where the platform gives one, nowhere else."""
+        block = {"owner": "admin", "sharing": "global", "perms": {"read": [], "write": []}}
+        rest = FakeRest(
+            default_get=RestResponse(200, acl_body_raw(block)),
+            default_post=RestResponse(200, b"{}"),
+        )
+        result = processor(rest).process(self._event())
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(len(rest.posts()), 1)
