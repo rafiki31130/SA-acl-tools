@@ -106,8 +106,8 @@ DIAGNOSTIC_PANEL = "Runs started with no journal line"
 VIEW_ALLOWED_COMMANDS = frozenset(
     (
         "addinfo", "append", "appendcols", "convert", "eval", "eventcount",
-        "eventstats", "fields", "mvexpand", "rename", "rex", "search", "sort",
-        "stats", "table", "transpose", "tstats", "where",
+        "eventstats", "fields", "multisearch", "mvexpand", "rename", "rex",
+        "search", "sort", "stats", "table", "transpose", "tstats", "where",
     )
 )
 
@@ -735,6 +735,36 @@ class TheDiagnosticIsReadAsFreeTextTest(unittest.TestCase):
         self.root = view_tree().getroot()
         self.query = dict(queries(self.root))[DIAGNOSTIC_PANEL]
         self.props = read_splunk_conf("default", "props.conf")
+
+    def test_the_two_sources_are_unioned_and_not_ored(self):
+        """MEASURED, and the panel was wrong because of it.
+
+        `search (`acl_journal_source`) OR (`acl_diag_source`)` parses, runs, returns
+        rows, and drops most of both sources. On a lab, one seven-day window, the same
+        instance and the same moment:
+
+            search (macro) OR (macro)                        9 diag,  1 403 journal
+            search macro OR macro       (no parentheses)     9 diag,      0 journal
+            index=... (sourcetype=a OR sourcetype=b)     2 268 diag, 17 770 journal
+            multisearch [search macro] [search macro]    2 268 diag, 17 770 journal
+
+        It keeps the newest diagnostic line of each run and the oldest journal lines, so
+        the filter of this panel - `journal_lines = 0` - was true for nine runs that had
+        each written a complete journal, and the panel listed all nine as having written
+        none. Nothing is reported by the platform in either direction.
+
+        `multisearch` unions two independent searches rather than asking one search to
+        match two index-and-sourcetype pairs. Both branches still name their source by a
+        macro, so D-51 holds.
+        """
+        self.assertIn("| multisearch", self.query)
+        self.assertIn("[search `acl_journal_source`]", self.query)
+        self.assertIn("[search `acl_diag_source`]", self.query)
+        for title, query in queries(self.root):
+            with self.subTest(panel=title):
+                self.assertNotRegex(
+                    query, r"`(?:acl_journal_source|acl_diag_source)`\s*\)?\s+OR\s"
+                )
 
     def test_the_diagnostic_sourcetype_has_automatic_extraction_turned_off(self):
         # The single line that removes the class rather than one instance of it.

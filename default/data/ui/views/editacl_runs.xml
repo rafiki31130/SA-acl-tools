@@ -130,7 +130,31 @@
   </row>
 
   <row>
-    <!-- This panel aggregates BY sid over the DIAGNOSTIC sourcetype, whose file is free
+    <!-- THE TWO SOURCES ARE UNIONED BY `multisearch`, AND THAT IS A CORRECTION.
+         This panel is the only one that has to read both files at once, and the obvious
+         way to do it - `search (`acl_journal_source`) OR (`acl_diag_source`)` - SILENTLY
+         LOSES MOST OF BOTH. Measured on a lab over one seven-day window, same instance,
+         same moment:
+
+           search (macro) OR (macro)                            9 diag,  1 403 journal
+           search macro OR macro          (no parentheses)      9 diag,      0 journal
+           index=... (sourcetype=a OR sourcetype=b)         2 268 diag, 17 770 journal
+           multisearch [search macro] [search macro]        2 268 diag, 17 770 journal
+
+         Nothing is reported. The panel keeps the NEWEST diagnostic line of each run and
+         the OLDEST journal lines, so its filter - `journal_lines = 0` - was true for
+         nine runs that had all written a full journal, and it listed every one of them
+         as having produced none. It was accusing healthy runs. Found by replaying the
+         shipped panel against the lab and reading the rows one by one, which is the only
+         way this class of defect is ever found: an OR of two source designations parses,
+         runs, returns rows, and is wrong.
+
+         `multisearch` unions two independent searches instead of asking one search to
+         match two index-and-sourcetype pairs at once. Each branch still names its source
+         by its macro, so D-51 holds - and it holds better than before, since neither
+         branch can be collapsed into the other.
+
+         What follows aggregates BY sid over the DIAGNOSTIC sourcetype, whose file is free
          text (section 8.1). Its fields must therefore be read from `_raw` by an anchored
          `rex`, and never from an extracted field.
 
@@ -226,7 +250,9 @@
       </html>
       <table>
         <search>
-          <query>search (`acl_journal_source`) OR (`acl_diag_source`)
+          <query>| multisearch
+    [search `acl_journal_source`]
+    [search `acl_diag_source`]
 | eval diag_raw = if(sourcetype="editacl:diag", _raw, null())
 | rex field=diag_raw "^\S+\s+(?&lt;diag_level&gt;[A-Z]+)\s+sid=(?&lt;diag_sid&gt;\S+)"
 | rex field=diag_raw "\bversion=\S+\s+user=(?&lt;diag_user&gt;\S+)\s"
