@@ -118,7 +118,7 @@ def build_event(record, names):
 
 
 def build_app_event(record, names):
-    """Build the `AppEventInput` of a record (v4.2 sections 8.3, 8.4).
+    """Build the `AppEventInput` of a record (v4.3 sections 8.3, 8.4).
 
     Same module, same presence predicate, same rule: `field_present` is consulted here
     too, and nowhere else. That is the whole reason this function lives in `binding.py`

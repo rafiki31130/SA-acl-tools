@@ -1,4 +1,4 @@
-"""Family table `stanza name` -> handler path (v4.2 section 5.2).
+"""Family table `stanza name` -> handler path (v4.3 section 5.2).
 
 Two sources, in this order: `bin/app_acl_family_map.json` (shipped), then
 `lookups/app_acl_family_map_override.csv` (created by the operator, never shipped),

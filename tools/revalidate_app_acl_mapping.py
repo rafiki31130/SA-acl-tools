@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Re-validation of the FAMILY table on the target platform (v4.2 section 5.2, req. 4).
+"""Re-validation of the FAMILY table on the target platform (v4.3 section 5.2, req. 4).
 
 The table shipped in `bin/app_acl_family_map.json` was established empirically on a
 single version of Splunk Enterprise, by a real `POST` per entry. It is **not** presumed

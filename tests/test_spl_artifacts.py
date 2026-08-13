@@ -767,7 +767,7 @@ class SavedsearchesTest(unittest.TestCase):
         "ACL - change journal",
     )
 
-    #: The two application-level searches (v4.2 section 14.1, deliverable 8). They are a
+    #: The two application-level searches (v4.3 section 14.1, deliverable 8). They are a
     #: separate tuple: the controls above bear on searches built on `acl_inventory`, a
     #: macro, while these two are built on the journal of the other command and on a
     #: generating command. Folding them into `NAMES` would make three of those controls
@@ -925,7 +925,7 @@ class LookupsAndMetadataTest(unittest.TestCase):
 
 
 class AppLevelMacrosTest(unittest.TestCase):
-    """The five application-level macros (v4.2 sections 11.1 and 11.4).
+    """The five application-level macros (v4.3 sections 11.1 and 11.4).
 
     **This class is where the hole the previous project paid for is held shut.** The
     rollback of `editacl` re-emitted a field the journal often left empty, and 515 written

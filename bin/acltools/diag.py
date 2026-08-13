@@ -35,7 +35,7 @@ BACKUP_COUNT = 5
 
 LOGGER_NAME = "editacl.diag"
 
-#: Diagnostic file of the application-level command (v4.2 section 11.1, **DV-3**). A
+#: Diagnostic file of the application-level command (v4.3 section 11.1, **DV-3**). A
 #: file of its own, for the same three reasons the journal has one: a shared `sid` would
 #: make the two commands write the same path, the unit of account differs - a stanza is
 #: not an object - and the format is not versioned, so adding keys to an existing
@@ -295,7 +295,7 @@ class Diagnostics(NullDiagnostics):
 
 
 class AppDiagnostics(Diagnostics):
-    """Writer of `editappacl.log` (v4.2 section 11.1).
+    """Writer of `editappacl.log` (v4.3 section 11.1).
 
     Same machinery, same redaction, same tolerance to its own failures. What differs is
     what there is to say: the parameters are not the same, the table is not the same, and

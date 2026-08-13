@@ -79,7 +79,7 @@ class LayoutTest(unittest.TestCase):
             "__init__.py", "errors.py", "model.py", "normalize.py", "mapping.py",
             "endpoint.py", "merge.py", "preflight.py", "journal.py", "rest.py",
             "pipeline.py",
-            # Application-level core (v4.2 section 14.1, deliverable 2). The provenance,
+            # Application-level core (v4.3 section 14.1, deliverable 2). The provenance,
             # target, impact and family modules are named by the contract; the others
             # follow the same split as the object-level core, layer by layer.
             "appacl_model.py", "appacl_family.py", "appacl_target.py",
@@ -190,7 +190,7 @@ class DeployableArchiveTest(unittest.TestCase):
 class CommandsConfTest(unittest.TestCase):
     """Section 2.1: the keys are normative, reproduced identically.
 
-    The same seven keys for both commands (v4.2 section 8.1 reproduces the template of
+    The same seven keys for both commands (v4.3 section 8.1 reproduces the template of
     v3.14 section 2.1). Only `filename` differs, and freezing the whole stanza key by key
     is what makes an eighth key - added for a run-time need and never decided - fail the
     suite instead of shipping.
@@ -215,7 +215,7 @@ class CommandsConfTest(unittest.TestCase):
             "is_risky": "true",
             "maxinputs": "0",
         },
-        # v4.2 section 7.2: the same seven keys, with the one justified divergence of
+        # v4.3 section 7.2: the same seven keys, with the one justified divergence of
         # value - `is_risky = false`, the command mutating nothing.
         "appaclinventory": {
             "filename": "appaclinventory.py",
@@ -522,7 +522,7 @@ class SearchBnfConfTest(unittest.TestCase):
                     self.assertIn(command, self.conf.get(stanza, example))
 
     def test_the_two_commands_point_at_each_other(self):
-        """v4.2 section 12.3: the descriptions cross-reference through `related`.
+        """v4.3 section 12.3: the descriptions cross-reference through `related`.
 
         The order of use - generic first, specific by exception - is a rule an operator
         needs at the moment they choose a command, and the assistant is where they read
@@ -634,7 +634,7 @@ class InputsConfTest(unittest.TestCase):
             "index": "_internal",
             "sourcetype": "editacl:diag",
         },
-        # v4.2 section 11.1, DV-3: separate files, separate sourcetypes. A shared file
+        # v4.3 section 11.1, DV-3: separate files, separate sourcetypes. A shared file
         # name would reopen the line-loss window D-3 closed, since the two commands can
         # share a `sid` inside one search.
         "monitor://$SPLUNK_HOME/var/log/splunk/editappacl_journal*.log": {
@@ -751,7 +751,7 @@ class PropsConfTest(unittest.TestCase):
             "EXTRACT-editacl_diag_journal":
                 "(?<journal_file>editacl_journal\\S*\\.log)",
         },
-        # v4.2 section 11.1: the application-level pair. The journal stanza is identical
+        # v4.3 section 11.1: the application-level pair. The journal stanza is identical
         # key for key - it is the same format, produced by the same builders - and the
         # diagnostic one differs only where the parameter line differs.
         "editappacl:journal": {

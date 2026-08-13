@@ -1,4 +1,4 @@
-"""State machine of `editappacl` (v4.2 sections 8.7, 9, 10, 11.2).
+"""State machine of `editappacl` (v4.3 sections 8.7, 9, 10, 11.2).
 
 It carries the normative order of the controls, the ordering of the journal lines with
 respect to the POST, the two volume ceilings and the deduplication of targets. It is the

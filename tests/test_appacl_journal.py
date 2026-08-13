@@ -1,4 +1,4 @@
-"""Application-level journal (v4.2 sections 11.1, 11.2, 11.3).
+"""Application-level journal (v4.3 sections 11.1, 11.2, 11.3).
 
 The line that matters most in this file is the `intent` of a **creation**. The effective
 state of a target that had no stanza is useful information - it says what the objects saw

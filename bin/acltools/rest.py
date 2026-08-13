@@ -170,7 +170,7 @@ class RestClient(object):
         return self._request("POST", object_path + "/acl", payload=body)
 
     def get_app_acl(self, path):
-        """`GET <path>?output_mode=json` - one retry on `5xx` (v4.2 section 8.7).
+        """`GET <path>?output_mode=json` - one retry on `5xx` (v4.3 section 8.7).
 
         The application-level paths are **not** object paths: the `[]` path already
         carries its `/acl` suffix and the family path its `/_acl` action, so the read and

@@ -1,4 +1,4 @@
-"""The inventory core (v4.2 section 7), and the bounds it inherits from section 6.
+"""The inventory core (v4.3 section 7), and the bounds it inherits from section 6.
 
 What this module holds, and it is the whole reason the command exists: **the distinction
 between an inherited value and a frozen one**. Measured (Q0-4), REST answers the same

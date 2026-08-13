@@ -1,4 +1,4 @@
-"""Provenance: reading the `.meta` files (v4.2 section 6).
+"""Provenance: reading the `.meta` files (v4.3 section 6).
 
 **This module is the exception to the "API only" rule of the project, and it carries its
 own bounds.** The rule aims at writes, because a write is what creates a replication

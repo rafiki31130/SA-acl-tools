@@ -1,4 +1,4 @@
-"""Merge engine of the application-level command (v4.2 sections 8.4, 8.6).
+"""Merge engine of the application-level command (v4.3 sections 8.4, 8.6).
 
 Three things are held here and nowhere else:
 

@@ -1,4 +1,4 @@
-"""Test doubles of the application-level command (v4.2).
+"""Test doubles of the application-level command (v4.3).
 
 Same discipline as `tests/helpers.py`: no HTTP simulation library, no socket, no local
 server, and JSON fixtures **written by hand** from the shape observed on the reference

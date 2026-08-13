@@ -1,4 +1,4 @@
-"""Immutable data structures of the application-level commands (v4.2).
+"""Immutable data structures of the application-level commands (v4.3).
 
 Same discipline as `model.py`, whose vocabulary this module extends rather than
 replaces: `dataclass(frozen=True)` carriers with no business method, plus the
@@ -13,13 +13,13 @@ the two lists would put every consumer of either in front of statuses the comman
 watches can never produce, and would make the syntax-tree control of
 `tests/test_statuses.py` - which requires each declared status to be **observed on a
 real case** - unsatisfiable for both at once. The separation is what keeps that control
-exact on each side (v4.2 section 14.2, "Statuts").
+exact on each side (v4.3 section 14.2, "Statuts").
 """
 
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
-#: The two target kinds of v4.2 section 1.1, and the **only** two. They are the domain
+#: The two target kinds of v4.3 section 1.1, and the **only** two. They are the domain
 #: of the required `stanza_kind` input field: a value outside it is rejected without any
 #: call (section 8.7, rank 0).
 STANZA_KIND_APP = "app_default"
@@ -283,8 +283,8 @@ class AppRunContext:
     """Run constants, identical on every journal line (section 11.2).
 
     No `host`, no `member`: v3.14 section 8.2 (D-46) removed both as duplicates of the
-    `host` metadata Splunk stamps at collection, and nothing in v4.2 reopens that. The
-    `acl_member` field of v4.2 section 6.3 belongs to the **inventory output**, which is
+    `host` metadata Splunk stamps at collection, and nothing in v4.3 reopens that. The
+    `acl_member` field of v4.3 section 6.3 belongs to the **inventory output**, which is
     a search result and carries no such metadata; it is not a journal key.
     """
 

@@ -1,4 +1,4 @@
-"""Impact estimate (v4.2 section 10.3).
+"""Impact estimate (v4.3 section 10.3).
 
 The estimate is what makes the second ceiling mean anything: `max_stanzas` bounds the
 number of acts, `max_impacted_objects` bounds what those acts **move**, and neither is

@@ -1,4 +1,4 @@
-"""Impact estimate of a generic write (v4.2 section 10.3).
+"""Impact estimate of a generic write (v4.3 section 10.3).
 
 **Definition.** `acl_impacted_estimate` is the number of **shared** objects of the
 application whose effective rights are today determined by the target stanza - those

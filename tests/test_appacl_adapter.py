@@ -3,7 +3,7 @@
 The adapter is where a business rule slips back in one line at a time, and where a
 message reaches the operator without saying which command emitted it. Both are held here
 by reading the syntax tree, and the message rule reuses **the extractor of
-`tests/test_message_prefix.py`** rather than a copy of it: v4.2 section 13.2 requires
+`tests/test_message_prefix.py`** rather than a copy of it: v4.3 section 13.2 requires
 that control to be extended to the new files, and extending it means the same instrument,
 not a second one.
 """
@@ -40,7 +40,7 @@ def _analyse():
 
 
 class TheSingleEmissionPointTest(unittest.TestCase):
-    """v4.2 section 13.2: one prefix, one emission point, checked mechanically.
+    """v4.3 section 13.2: one prefix, one emission point, checked mechanically.
 
     A search pipeline concatenates the messages of every command it chains, and the
     interface displays them stripped of their origin. Without the prefix, a warning about
@@ -112,7 +112,7 @@ class TheSingleEmissionPointTest(unittest.TestCase):
 
 
 class TheAdapterCarriesNoBusinessRuleTest(unittest.TestCase):
-    """The adapter wires, it does not decide (v4.2 section 14.1, deliverable 1)."""
+    """The adapter wires, it does not decide (v4.3 section 14.1, deliverable 1)."""
 
     def setUp(self):
         with open(ADAPTER_PATH, encoding="utf-8") as handle:

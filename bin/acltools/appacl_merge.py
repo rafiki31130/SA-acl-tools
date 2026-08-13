@@ -1,4 +1,4 @@
-"""Merge engine of the application-level command (v4.2 sections 8.4, 8.6).
+"""Merge engine of the application-level command (v4.3 sections 8.4, 8.6).
 
 **The presence of the column alone decides whether to modify or to preserve; the cell
 only decides the value** - the semantics of v3.14 section 3.2, reconducted without

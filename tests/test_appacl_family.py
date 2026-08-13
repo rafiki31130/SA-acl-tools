@@ -1,4 +1,4 @@
-"""Family table `stanza` -> handler path (v4.2 section 5.2).
+"""Family table `stanza` -> handler path (v4.3 section 5.2).
 
 The table is a **measurement transcribed**, not a derivation: each of its nineteen
 entries comes from a POST that answered `200` and from the stanza that write actually

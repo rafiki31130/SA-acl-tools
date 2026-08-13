@@ -5,7 +5,7 @@
 Same three jobs as the other two adapters, and nothing else:
 
 1. it inserts `bin/lib` then `bin` at the head of `sys.path`, before any other import;
-2. it declares the command and its three parameters (v4.2 section 7.3) and wires the
+2. it declares the command and its three parameters (v4.3 section 7.3) and wires the
    `acltools` core;
 3. it turns fatal exceptions into an error output and yields the rows of section 7.4.
 
@@ -30,7 +30,7 @@ import sys
 # precedence over the platform's, and `acltools` must be importable independently of the
 # working directory of the search process, which the platform does not guarantee.
 # The derivation from `__file__` is also the fallback route of the read root
-# (v4.2 section 6.2, bound 4) - which is why this file passes its own `__file__` to the
+# (v4.3 section 6.2, bound 4) - which is why this file passes its own `__file__` to the
 # resolver rather than letting the resolver go looking for one.
 # --------------------------------------------------------------------------- #
 _BIN = os.path.dirname(os.path.abspath(__file__))

@@ -1,4 +1,4 @@
-"""Parameters and legitimacy of an `editappacl` run (v4.2 sections 8.5, 13.1).
+"""Parameters and legitimacy of an `editappacl` run (v4.3 sections 8.5, 13.1).
 
 `validate_app_params` is **pure** and tests on its own. The checks that need the
 platform - capability, real-time search, role catalog, application state - are the ones

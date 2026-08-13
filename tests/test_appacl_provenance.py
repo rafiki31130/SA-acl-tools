@@ -1,4 +1,4 @@
-"""Reading the `.meta` files, and the bounds of that exception (v4.2 section 6).
+"""Reading the `.meta` files, and the bounds of that exception (v4.3 section 6).
 
 Two of the four bounds are held **mechanically** here, by reading the syntax tree of
 `bin/acltools/appacl_provenance.py` rather than by trusting a comment:

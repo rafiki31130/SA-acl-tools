@@ -5,7 +5,7 @@
 This file does three things and nothing else:
 
 1. it inserts `bin/lib` then `bin` at the head of `sys.path`, before any other import;
-2. it declares the command and its parameters (v4.2 section 8.5) and wires the
+2. it declares the command and its parameters (v4.3 section 8.5) and wires the
    `acltools` core;
 3. it turns fatal exceptions into an error output and projects the `acl_*` fields of
    section 8.8 into the output record.
@@ -25,7 +25,7 @@ import sys
 # directory of the search process, which the platform does not guarantee.
 # The path is derived from `__file__`, never from an environment variable nor from an
 # absolute path - and that same derivation is the fallback route of the read root
-# (v4.2 section 6.2, bound 4).
+# (v4.3 section 6.2, bound 4).
 # --------------------------------------------------------------------------- #
 _BIN = os.path.dirname(os.path.abspath(__file__))
 for _p in (os.path.join(_BIN, "lib"), _BIN):

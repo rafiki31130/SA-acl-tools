@@ -1,4 +1,4 @@
-"""State machine of `editappacl` (v4.2 sections 8.6, 8.7, 9, 10, 11.2).
+"""State machine of `editappacl` (v4.3 sections 8.6, 8.7, 9, 10, 11.2).
 
 Three things are held here, and the third is the one the increment exists for:
 

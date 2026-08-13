@@ -41,7 +41,7 @@ class FatalJournalError(FatalError):
 
 
 class FatalFamilyTableError(FatalError):
-    """Family table unreadable or malformed (v4.2 section 13.1, `editappacl` only).
+    """Family table unreadable or malformed (v4.3 section 13.1, `editappacl` only).
 
     Distinct from `FatalMappingError`, which bears on the `eai:type` table of
     `editacl`: the two tables have different keys, different sources and different
@@ -51,7 +51,7 @@ class FatalFamilyTableError(FatalError):
 
 
 class FatalProvenanceRootError(FatalError):
-    """Read root neither resolved nor unambiguous (v4.2 section 13.1).
+    """Read root neither resolved nor unambiguous (v4.3 section 13.1).
 
     Two independent routes lead to `etc/apps` (section 6.2, bound 4). The error covers
     the two cases the bound names, and they are not the same failure: **neither** route

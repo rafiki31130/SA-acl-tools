@@ -209,7 +209,7 @@ def check_capability(rest, capability=REQUIRED_CAPABILITY):
 
     The capability is a **parameter with a default**, and the default is the one of
     `editacl`: the second command of the app checks `edit_app_acl_bulk`, which is
-    neither implied by `edit_acl_bulk` nor implies it (v4.2 section 8.1). The two
+    neither implied by `edit_acl_bulk` nor implies it (v4.3 section 8.1). The two
     capabilities differ by orders of magnitude in blast radius - one rewrites the ACL of
     objects the pipeline **enumerates**, the other moves the rights of objects the
     pipeline does not enumerate - and `admin_all_objects` does not tell them apart. One

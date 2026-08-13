@@ -42,7 +42,7 @@ ROLE_NAME = "editacl_auditor"
 #: The two source macros (D-51). No search of the view names an index by hand.
 SOURCE_MACROS = ("acl_journal_source", "acl_diag_source")
 
-#: Their application-level counterparts (v4.2 section 11.1, **DV-3**). They are a
+#: Their application-level counterparts (v4.3 section 11.1, **DV-3**). They are a
 #: **separate** tuple and not two more entries in the one above, because the two are used
 #: for two different things: the view's panels must name one of `SOURCE_MACROS` and only
 #: those - a panel counting objects that read the stanza journal would absorb one unit of
@@ -1340,12 +1340,12 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         "": ("none", "read : [ * ], write : [ admin ]"),
         "commands": ("system", None),
         "commands/editacl": ("system", "read : [ * ], write : [ admin ]"),
-        # v4.2 section 14.1, deliverable 6: one stanza per command object, exported to
+        # v4.3 section 14.1, deliverable 6: one stanza per command object, exported to
         # the system for the same reason as the first - a command invocable only from
         # this app's context would be unusable from the ad hoc search where an operator
         # actually governs an application.
         "commands/editappacl": ("system", "read : [ * ], write : [ admin ]"),
-        # v4.2 section 7: the inventory is the FIRST command of the workflow - section
+        # v4.3 section 7: the inventory is the FIRST command of the workflow - section
         # 12.2 says to consult it before engaging either write tool - so a command
         # invocable only from a hidden app's own context would be consulted by nobody.
         "commands/appaclinventory": ("system", "read : [ * ], write : [ admin ]"),
@@ -1382,12 +1382,12 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
     #: `search`, and three refusals - the exhaustive form is the natural one.
     EXPECTED_AUTHORIZE = {
         "capability::edit_acl_bulk": {},
-        # v4.2 section 8.1: a capability of its own for the application-level write. It
+        # v4.3 section 8.1: a capability of its own for the application-level write. It
         # neither implies nor is implied by the one above, and both are granted to
         # `admin` at installation - declaring without granting produces an app that is
         # installed, loaded and unusable (D-29).
         "capability::edit_app_acl_bulk": {},
-        # v4.2 section 7.6: a capability of its own for the INVENTORY, and its motive is
+        # v4.3 section 7.6: a capability of its own for the INVENTORY, and its motive is
         # proper to that command - reading the metadata file short-circuits the
         # capability filtering REST applies, so the counters it publishes carry
         # information the API would not serve to a caller without `admin_all_objects`.

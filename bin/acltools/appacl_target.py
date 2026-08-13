@@ -1,4 +1,4 @@
-"""Target resolution and URI construction (v4.2 sections 8.3 and 11.3).
+"""Target resolution and URI construction (v4.3 sections 8.3 and 11.3).
 
 Two write paths, and they share nothing but the fact of being a path:
 
@@ -25,7 +25,7 @@ from .mapping import is_valid_handler_path
 #: (section 4.1).
 FIXED_CONTEXT = "nobody"
 
-#: Application context out of scope (v3.14 section 1.3, reconducted by v4.2
+#: Application context out of scope (v3.14 section 1.3, reconducted by v4.3
 #: section 1.2). Rejection is **per event**: section 13.1 enumerates the fatal errors
 #: exhaustively and does not list this one.
 FORBIDDEN_APP = "system"

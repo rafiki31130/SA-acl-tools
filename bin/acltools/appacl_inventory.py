@@ -1,4 +1,4 @@
-"""Inventory of the application-level ACL stanzas (v4.2 section 7).
+"""Inventory of the application-level ACL stanzas (v4.3 section 7).
 
 **What this command exists to answer**, and nothing else has its place in the output
 (section 7.1): *is this application still governable through its generic stanzas, or is
