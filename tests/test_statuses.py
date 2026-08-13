@@ -78,13 +78,40 @@ from . import BIN_DIR, REPO_ROOT
 #: SDK, left unmodified - is out of scope. This is a **declared boundary**, not a
 #: proof: see the limits at the top of the module.
 _PACKAGE = os.path.join(BIN_DIR, "acltools")
-SOURCES = tuple(
-    sorted(
-        os.path.join(_PACKAGE, name)
-        for name in os.listdir(_PACKAGE)
-        if name.endswith(".py")
+
+#: Prefix of the modules of the **application-level** command. They are excluded from
+#: `SOURCES` and scanned by `tests/test_appacl_statuses.py`, against the enumeration of
+#: `appacl_model.APP_ACL_STATUSES`.
+#:
+#: **The partition is the point, not a convenience.** The two commands do not share a
+#: status enumeration - one counts objects and knows nothing of `created` or
+#: `noop_inherited`, the other counts stanzas and knows nothing of `skipped_private` -
+#: so a single scan would make both directions of the control unsatisfiable: every status
+#: of one command would be "produced by the code and undeclared" for the other, and every
+#: status of the other would be "declared and dead". Partitioning keeps the control exact
+#: on each side. The **shared** modules - `journal.py`, `binding.py`, `normalize.py`,
+#: `mapping.py` - stay in `SOURCES` and carry no literal status either way.
+APP_MODULE_PREFIX = "appacl_"
+APP_ADAPTER = "editappacl.py"
+
+
+def _package_modules(app_level):
+    return tuple(
+        sorted(
+            os.path.join(_PACKAGE, name)
+            for name in os.listdir(_PACKAGE)
+            if name.endswith(".py")
+            and name.startswith(APP_MODULE_PREFIX) is app_level
+        )
     )
-) + (os.path.join(BIN_DIR, "editacl.py"),)
+
+
+SOURCES = _package_modules(False) + (os.path.join(BIN_DIR, "editacl.py"),)
+
+#: Counterpart set, consumed by `tests/test_appacl_statuses.py`. It lives here, next to
+#: the extractor, so that a module added to the package lands in exactly one of the two
+#: sets - neither in both, nor in neither.
+APP_SOURCES = _package_modules(True) + (os.path.join(BIN_DIR, APP_ADAPTER),)
 
 #: Attribute names that carry an `acl_status`. A write to one of them is a **status
 #: site**: it is canonical, propagated, or opaque - never ignored.
@@ -437,9 +464,20 @@ def scan_source(text, module="<fragment>"):
 
 def scan_the_core():
     """Scans `SOURCES`. Returns `(statuses, opaque sites)`."""
+    return scan_paths(SOURCES)
+
+
+def scan_paths(paths):
+    """Scans an explicit set of files. Returns `(statuses, opaque sites)`.
+
+    Extracted from `scan_the_core` so that the application-level suite scans its own
+    partition **with this very extractor**: a second copy of it would be a second thing
+    to keep in step, and the whole point of this module is that a hand-maintained
+    duplicate drifts.
+    """
     statuses = set()
     opaque_sites = []
-    for path in SOURCES:
+    for path in paths:
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
         seen, silent = scan_source(text, os.path.basename(path))
