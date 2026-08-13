@@ -57,7 +57,7 @@ class ThePartitionIsCompleteTest(unittest.TestCase):
         }
         expected.add(os.path.join(BIN_DIR, "editacl.py"))
         expected.add(os.path.join(BIN_DIR, "editappacl.py"))
-        expected.add(os.path.join(BIN_DIR, "app_acl_inventory.py"))
+        expected.add(os.path.join(BIN_DIR, "appaclinventory.py"))
         self.assertEqual(set(SOURCES) | set(APP_SOURCES), expected)
 
     def test_the_three_adapters_are_covered(self):

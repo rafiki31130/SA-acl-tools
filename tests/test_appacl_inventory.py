@@ -771,7 +771,7 @@ class TheExecutionMemberTest(unittest.TestCase):
         that is plausible and false, and the whole column exists to compare members."""
         paths = [
             os.path.join(BIN_DIR, "acltools", "appacl_inventory.py"),
-            os.path.join(BIN_DIR, "app_acl_inventory.py"),
+            os.path.join(BIN_DIR, "appaclinventory.py"),
         ]
         named_somewhere = False
         for path in paths:

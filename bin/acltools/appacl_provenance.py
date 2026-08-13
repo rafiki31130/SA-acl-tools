@@ -589,7 +589,7 @@ class ProvenanceReader(object):
     **Who calls it, and who does not, is a decision of the caller and not of this class.**
     `editappacl` refreshes before every target: it writes between rows, and section 13.4
     point 7 allows carrying only the object enumeration from one row to the next.
-    `app_acl_inventory` does not refresh: it writes nothing, so no row can invalidate the
+    `appaclinventory` does not refresh: it writes nothing, so no row can invalidate the
     read of another, and re-reading the same two files once per emitted row would buy
     nothing at all.
 

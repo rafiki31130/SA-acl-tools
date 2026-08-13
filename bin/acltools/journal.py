@@ -35,7 +35,7 @@ JOURNAL_BASENAME = "editacl_journal_%s.log"
 #: weight:
 #:
 #: 1. **File name collision.** The journal file name is indexed by `sid` (D-3), and
-#:    `| app_acl_inventory | ... | editappacl` and a `| editacl` can coexist in **one
+#:    `| appaclinventory | ... | editappacl` and a `| editacl` can coexist in **one
 #:    search**, hence share a `sid`. Two commands writing the same path reopen exactly
 #:    the line-loss window D-3 closed, on the sole safety net of an irreversible
 #:    operation.

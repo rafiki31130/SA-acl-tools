@@ -7,7 +7,7 @@ through the REST API, from an SPL pipeline describing the target state. They wor
 | Command | Level | What it touches |
 |---|---|---|
 | `editacl` | one object | The ACL of each knowledge object the pipeline enumerates |
-| `app_acl_inventory` | one application | Nothing. It **reports** the generic stanzas and their provenance |
+| `appaclinventory` | one application | Nothing. It **reports** the generic stanzas and their provenance |
 | `editappacl` | one application | The generic stanzas `[]` and `[<family>]` of an application, which govern every object that has none of its own |
 
 It also ships an inventory macro, five rollback and reporting macros, six saved searches
@@ -35,7 +35,7 @@ and a run monitoring view. Driving use case: decommissioning legacy roles, by
 >    the objects already treated**, and there is no REST path to free them. Two ways out
 >    only: rewrite them one by one with `editacl`, or accept that they stay out of reach
 >    of the generic.
-> 4. **`app_acl_inventory` is the instrument of the decision.** Run it **before** either
+> 4. **`appaclinventory` is the instrument of the decision.** Run it **before** either
 >    write tool: `acl_frozen_stanzas` and `acl_governable` say, per application and per
 >    family, how much generic governance is still possible.
 >
@@ -294,7 +294,7 @@ so `default.meta` and `local.meta` are read as **one set of stanzas**.
 
 ```mermaid
 flowchart LR
-  INV["| app_acl_inventory<br/>reads REST AND the file"] --> DEC{"acl_governable"}
+  INV["| appaclinventory<br/>reads REST AND the file"] --> DEC{"acl_governable"}
   DEC -- "yes" --> GOV["govern the generic<br/>| editappacl"]
   DEC -- "partial" --> MIX["the frozen objects will not move:<br/>editacl one by one, or leave them"]
   DEC -- "unknown" --> READ["the metadata could not be read:<br/>no conclusion is emitted"]
@@ -303,18 +303,22 @@ flowchart LR
   WAL --> IRR["app_acl_irreversible<br/>what the rollback will NOT undo"]
 ```
 
-**Why the inventory is a command and not a macro, and it is a trap of use.** Through
-REST, an object that **inherits** and an object carrying its **own** stanza of the same
-value return a strictly identical ACL block. Provenance has no REST answer at all, and an
-SPL macro cannot read a file. So `app_acl_inventory` is a **command**, invoked with a
-leading pipe and **never between backticks**, whereas `acl_inventory` is a macro and is
-invoked between backticks. The names read the other way round, which is exactly why this
-paragraph exists.
+**Why the inventory is a command and not a macro.** Through REST, an object that
+**inherits** and an object carrying its **own** stanza of the same value return a strictly
+identical ACL block. Provenance has no REST answer at all, and an SPL macro cannot read a
+file. So `appaclinventory` is a **command**, invoked with a leading pipe and **never
+between backticks**, whereas `acl_inventory` is a macro and is invoked between backticks.
+
+**The commands of this app carry no underscore, and that is not a style rule.** Measured on
+Splunk 9.4.6: the search parser **ends a command name at the first underscore**. A command
+declared `a_b_c` is looked up as `a`, and answers `Unknown search command 'a'` - in leading
+position as well as downstream, with no escaping that gets round it. Underscores belong to
+macro names, which resolve differently; they never appear in a command name here.
 
 ```
-| app_acl_inventory        <-- correct: it is a command
-| `app_acl_inventory`      <-- fails at run time: it is not a macro
-| `acl_inventory`          <-- correct: that one IS a macro
+| appaclinventory        <-- correct: it is a command
+| `appaclinventory`      <-- fails: it is not a macro
+| `acl_inventory`        <-- correct: that one IS a macro
 ```
 
 ---
@@ -322,7 +326,7 @@ paragraph exists.
 ## The inventory command
 
 ```
-| app_acl_inventory [apps=<string>] [families=<string>] [count_objects=<bool>]
+| appaclinventory [apps=<string>] [families=<string>] [count_objects=<bool>]
 ```
 
 | Parameter | Default | Role |
@@ -679,11 +683,13 @@ Limits that change what you have to do. The reasoning behind each one is in
 
 Limits proper to the application level:
 
-- **Run `app_acl_inventory` before either write tool.** Every object `editacl` has
+- **Run `appaclinventory` before either write tool.** Every object `editacl` has
   already written is out of reach of the generic, permanently, and the inventory is the
   only thing that says how many there are.
-- **`| app_acl_inventory` is a command, `` | `acl_inventory` `` is a macro.** The names
-  read the other way round. A command invoked between backticks fails at run time.
+- **`| appaclinventory` is a command, `` | `acl_inventory` `` is a macro.** A command
+  invoked between backticks fails at run time. And a command name **never carries an
+  underscore**: the parser of 9.4.6 truncates it at the first one, so the search would look
+  up a command that does not exist.
 - **Creating a generic stanza cannot be undone**, and `allow_create=false` is what stands
   in the way. What a rollback will not undo is listed by
   `` | `app_acl_irreversible(<sid>)` ``, and by nothing else.

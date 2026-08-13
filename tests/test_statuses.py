@@ -93,11 +93,11 @@ _PACKAGE = os.path.join(BIN_DIR, "acltools")
 #: `mapping.py` - stay in `SOURCES` and carry no literal status either way.
 APP_MODULE_PREFIX = "appacl_"
 
-#: The adapters of the application-level side. `app_acl_inventory.py` produces no status
+#: The adapters of the application-level side. `appaclinventory.py` produces no status
 #: at all - it writes nothing, so it has nothing to report the outcome of - and it is
 #: scanned all the same: a file left out of both sets is a place where a status could be
 #: born unseen, which is precisely the blind spot this device exists to close.
-APP_ADAPTERS = ("editappacl.py", "app_acl_inventory.py")
+APP_ADAPTERS = ("editappacl.py", "appaclinventory.py")
 
 
 def _package_modules(app_level):

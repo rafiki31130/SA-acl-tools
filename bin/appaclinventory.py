@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""`app_acl_inventory` search command - adapter, **no business rule here**.
+"""`appaclinventory` search command - adapter, **no business rule here**.
 
 Same three jobs as the other two adapters, and nothing else:
 
@@ -78,7 +78,7 @@ _FAMILY_OVERRIDE_CSV = os.path.join(
 #: pipeline that ends in `editappacl`, so its messages sit next to that command's -
 #: without the prefix, a reservation about a truncated inventory would be indistinguishable
 #: from a warning about an irreversible write.
-MESSAGE_PREFIX = "app_acl_inventory: "
+MESSAGE_PREFIX = "appaclinventory: "
 
 #: Emitted once when the family table could not be loaded.
 #:
@@ -140,7 +140,7 @@ class AppAclInventoryCommand(GeneratingCommand):
     ##Syntax
 
     .. code-block::
-        app_acl_inventory [apps=<string>] [families=<string>] [count_objects=<bool>]
+        appaclinventory [apps=<string>] [families=<string>] [count_objects=<bool>]
 
     ##Description
 
@@ -158,7 +158,7 @@ class AppAclInventoryCommand(GeneratingCommand):
     ##Example
 
     .. code-block::
-        | app_acl_inventory apps=my_app
+        | appaclinventory apps=my_app
         | where acl_governable!="yes"
     """
 

@@ -151,7 +151,7 @@ class AppFieldNames:
     """Name of the SPL field to read each piece of information from (sections 8.3, 8.4).
 
     Every logical input is a **parameter naming a field**, with a default that is the
-    field name `app_acl_inventory` emits. An operator who builds their pipeline on the
+    field name `appaclinventory` emits. An operator who builds their pipeline on the
     inventory therefore writes no parameter at all.
 
     There is **no** owner entry, in either direction: none is read, none is written
@@ -261,7 +261,7 @@ class AppParams:
 
 @dataclass(frozen=True)
 class AppInventoryParams:
-    """Validated parameters of `app_acl_inventory` (section 7.3).
+    """Validated parameters of `appaclinventory` (section 7.3).
 
     Three, and three only. Every column of the output either carries the governability
     decision or feeds `editappacl`, so there is nothing else to switch on or off - and

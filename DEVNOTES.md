@@ -2560,7 +2560,7 @@ reading is the only thing that answers the question the whole increment exists f
 
 *Measured* - **Q0-4**: an object that **inherits** and an object carrying its **own** stanza
 of the same value return a **strictly identical** ACL block. Six alternative REST sources
-were probed, six negative. So without the file, `app_acl_inventory` cannot say whether an application is
+were probed, six negative. So without the file, `appaclinventory` cannot say whether an application is
 governable, and `editappacl` cannot tell a modification from a creation - which is the
 distinction the whole irreversibility dispositif rests on.
 
@@ -2813,14 +2813,44 @@ The restore depends on **no field the journal can leave empty**: the primary res
 route is `handler`, filled in at resolution time and therefore non-empty on every resolved
 family target, and it does not go through the shipped table either.
 
-### 27.9 Why the inventory is a command, and the trap that creates
+### 27.9 Why the inventory is a command, and why its name carries no underscore
 
-A macro cannot read a file, and the provenance has no REST source, so `app_acl_inventory`
-had to be a command. Its **name** says the opposite: the commands of this app carry no
-underscore (`editacl`, `editappacl`), its macros do (`acl_inventory`), and an operator who
-transposes the habit writes it between backticks and gets a run-time error. The name comes
-from the commissioner and was kept; the compensation is documentation, in the README and in
-the `searchbnf` description of both artefacts.
+A macro cannot read a file, and the provenance has no REST source, so `appaclinventory`
+had to be a command.
+
+**The name was changed after the pre-delivery audit, and the reason is a measurement, not
+a preference.** It was `app_acl_inventory`, and it was invocable by **no search at all**:
+
+> *Measured on Splunk 9.4.6, on three witness commands declared for the purpose* - the
+> parse failure precedes execution, so the scripts did not even have to exist:
+>
+> | Declared name | Invocation | splunkd |
+> |---|---|---|
+> | `zzzqqqwwwvvv2` | `\| makeresults \| zzzqqqwwwvvv2` | `Unknown search command 'zzzqqqwwwvvv2'` - **whole name** |
+> | `zzzqqq_wwwvvv` | `\| makeresults \| zzzqqq_wwwvvv` | `Unknown search command 'zzzqqq'` - **truncated** |
+> | `abc_def_ghi` | `\| makeresults \| abc_def_ghi` | `Unknown search command 'abc'` - at the **first** underscore |
+> | `audit_cmd_two` | `\| makeresults \| audit_cmd_two` | the fragment resolved as **another** command entirely |
+>
+> **The search parser ends a command name at the first underscore.** Identical in leading
+> position and downstream, with and without arguments, and **no escaping gets round it**:
+> quotes give `Missing a search command before '"'`, a backslash escape truncates the same
+> way, and backticks turn it into a macro lookup that fails.
+
+`editappacl`, with no underscore, ran normally on the same instance in the same session -
+which is the control that makes the finding a property of the name rather than of the app.
+
+So the rule is not stylistic: **a command name of this app carries no underscore, ever.**
+Splunk's own commands agree - `mvexpand`, `sendemail`, `inputlookup`. Underscores belong to
+**macro** names, which resolve through a different path and tolerate them: `acl_inventory`
+has always worked. `tests/test_app_layout.py` freezes the rule on `commands.conf` so that a
+future command cannot reintroduce it.
+
+**What this cost, and what it says about the test base.** The whole suite runs outside
+Splunk, by design and for good reasons - it needs no instance and no network. That design
+makes it **structurally blind** to anything the platform's parser decides: 1 288 tests, a
+mutation campaign, three reviews, and none of them could see a command that never starts.
+The lesson is not to weaken the property; it is that a deliverable whose entry point has
+never been invoked on a real instance has not been tested at all, whatever the count says.
 
 `acl_governable` is a **derivation and not an appreciation**: its three values recompute
 from columns the same row publishes, so an operator who distrusts the verdict can redo the

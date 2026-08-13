@@ -7,7 +7,7 @@ it already frozen object by object?*
 That question has **no REST answer**. Measured (Q0-4): an object that inherits and an
 object carrying its own stanza of the same value return a **strictly identical** ACL
 block, and six alternative REST sources were probed, six negative. The provenance comes
-from the file, and only from the file - which is why `app_acl_inventory` is a
+from the file, and only from the file - which is why `appaclinventory` is a
 **command** and not a macro, an SPL macro being unable to read one (section 6.1).
 
 The division of labour inside this module follows the bounds of section 6.2 exactly:

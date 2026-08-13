@@ -1,4 +1,4 @@
-"""`bin/app_acl_inventory.py` - adapter, wiring, and the rules that hold on its source.
+"""`bin/appaclinventory.py` - adapter, wiring, and the rules that hold on its source.
 
 Same three guard rails as the other two adapters, and deliberately the **same
 instruments**: v4.2 section 13.2 asks for the single-emission-point control to be
@@ -26,7 +26,7 @@ from .test_message_prefix import (
     _Extractor,
 )
 
-ADAPTER_PATH = os.path.join(BIN_DIR, "app_acl_inventory.py")
+ADAPTER_PATH = os.path.join(BIN_DIR, "appaclinventory.py")
 
 #: The one scope allowed to reach an SDK message method, `<class>.<method>` form.
 SINGLE_EMISSION_POINT = "AppAclInventoryCommand._emit_message"
@@ -69,14 +69,14 @@ class TheSingleEmissionPointTest(unittest.TestCase):
             len(self.extractor.sites),
             3,
             "the extractor found no call to an SDK message method in "
-            "bin/app_acl_inventory.py: it is reading nothing, or the file changed shape",
+            "bin/appaclinventory.py: it is reading nothing, or the file changed shape",
         )
 
     def test_no_construct_is_opaque(self):
         if not self.extractor.opaque:
             return
         detail = "\n".join(
-            "  app_acl_inventory.py:%d in %s -- %s\n        source: %s"
+            "  appaclinventory.py:%d in %s -- %s\n        source: %s"
             % (line, scope, reason, source)
             for scope, line, source, reason in self.extractor.opaque
         )
@@ -110,10 +110,10 @@ class TheSingleEmissionPointTest(unittest.TestCase):
         self.assertIn("write_error", reached)
 
     def test_the_prefix_is_the_command_name_a_colon_and_a_space(self):
-        self.assertIn('MESSAGE_PREFIX = "app_acl_inventory: "', _source())
+        self.assertIn('MESSAGE_PREFIX = "appaclinventory: "', _source())
 
     def test_the_prefix_is_not_repeated_on_the_literals(self):
-        self.assertEqual(_source().count('"app_acl_inventory: '), 1)
+        self.assertEqual(_source().count('"appaclinventory: '), 1)
 
     def test_the_three_prefixes_are_distinct(self):
         """Three commands, three prefixes: a shared one would defeat the whole purpose,

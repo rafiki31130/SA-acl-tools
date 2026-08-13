@@ -125,7 +125,7 @@ def parse_app_field_names(raw_names):
     """Validate the field-naming parameters and return an `AppFieldNames`.
 
     A `None` or missing value falls back on the default of the contract - the field
-    names `app_acl_inventory` emits - which makes the nominal case implicit: an operator
+    names `appaclinventory` emits - which makes the nominal case implicit: an operator
     who builds their pipeline on the inventory writes no parameter at all.
 
     Errors: `FatalConfigError` if a parameter designates an empty or syntactically

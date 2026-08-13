@@ -191,7 +191,7 @@ class EditAppAclCommand(StreamingCommand):
     ##Example
 
     .. code-block::
-        | app_acl_inventory apps=my_app | where acl_stanza_kind="family_default"
+        | appaclinventory apps=my_app | where acl_stanza_kind="family_default"
         | eval "eai:acl.perms.read" = "power"
         | editappacl dryrun=f max_stanzas=3
     """

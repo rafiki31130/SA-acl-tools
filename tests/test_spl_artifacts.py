@@ -1163,10 +1163,10 @@ class AppLevelSavedSearchesTest(unittest.TestCase):
 
     def test_the_governability_search_is_built_on_the_command(self):
         """On the COMMAND and not on a macro: the provenance it ventilates has no REST
-        source at all, which is the whole reason `app_acl_inventory` is a command."""
+        source at all, which is the whole reason `appaclinventory` is a command."""
         search = self.conf[self.GOVERNABILITY]["search"]
-        self.assertIn("| app_acl_inventory", search)
-        self.assertNotIn("`app_acl_inventory`", search)
+        self.assertIn("| appaclinventory", search)
+        self.assertNotIn("`appaclinventory`", search)
 
     def test_the_governability_search_groups_on_the_derived_verdict(self):
         search = self.conf[self.GOVERNABILITY]["search"]

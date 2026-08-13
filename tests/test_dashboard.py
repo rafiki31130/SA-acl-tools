@@ -1348,7 +1348,7 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         # v4.2 section 7: the inventory is the FIRST command of the workflow - section
         # 12.2 says to consult it before engaging either write tool - so a command
         # invocable only from a hidden app's own context would be consulted by nobody.
-        "commands/app_acl_inventory": ("system", "read : [ * ], write : [ admin ]"),
+        "commands/appaclinventory": ("system", "read : [ * ], write : [ admin ]"),
         "searchbnf": ("system", "read : [ * ], write : [ admin ]"),
         "macros": ("system", "read : [ * ], write : [ admin ]"),
         "transforms": ("system", "read : [ * ], write : [ admin ]"),

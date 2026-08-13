@@ -53,7 +53,7 @@ class LayoutTest(unittest.TestCase):
         ("metadata", "default.meta"),
         ("bin", "editacl.py"),
         ("bin", "editappacl.py"),
-        ("bin", "app_acl_inventory.py"),
+        ("bin", "appaclinventory.py"),
         ("bin", "acl_endpoint_map.json"),
         ("bin", "app_acl_family_map.json"),
         ("bin", "acltools", "__init__.py"),
@@ -217,8 +217,8 @@ class CommandsConfTest(unittest.TestCase):
         },
         # v4.2 section 7.2: the same seven keys, with the one justified divergence of
         # value - `is_risky = false`, the command mutating nothing.
-        "app_acl_inventory": {
-            "filename": "app_acl_inventory.py",
+        "appaclinventory": {
+            "filename": "appaclinventory.py",
             "chunked": "true",
             "python.version": "python3",
             "local": "true",
@@ -285,6 +285,54 @@ class CommandsConfTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.conf.get(command, "is_risky"), "false")
 
+    def test_no_command_name_carries_an_underscore(self):
+        """**Anomaly A-1 of the pre-delivery audit, and the rule that closes it.**
+
+        *Measured on Splunk 9.4.6*, on three witness commands declared for the purpose:
+        **the search parser ends a command name at the first underscore.** A command
+        declared `abc_def_ghi` is looked up as `abc` and answers
+        `Unknown search command 'abc'`; `audit_cmd_two` resolved its fragment as another
+        command entirely. Identical in leading position and downstream, with and without
+        arguments, and **no escaping gets round it** - quotes fail on `Missing a search
+        command before '"'`, a backslash truncates the same way, and backticks turn it
+        into a macro lookup that fails.
+
+        The command shipped as `app_acl_inventory` was therefore invocable by **no search
+        at all**: correctly declared, loaded, exported, visible in `admin/commandsconf`,
+        and unreachable. `editappacl` ran normally on the same instance in the same
+        session, which is the control that makes it a property of the name.
+
+        **Why this test and not a note.** The whole suite runs outside Splunk, which is a
+        deliberate property - no instance, no network - and which makes it structurally
+        blind to what the platform's parser decides. Nothing in 1 288 tests could see it,
+        and it cost a gate. A dash is legal in a command name and stays legal; only the
+        underscore is forbidden, because only the underscore truncates.
+        """
+        for command in self.conf.sections():
+            with self.subTest(command=command):
+                self.assertNotIn(
+                    "_", command,
+                    "command %r carries an underscore: the SPL parser of 9.4.6 would "
+                    "truncate it at the first one, and the command would be invocable "
+                    "by no search. Rename it - the app's convention, and Splunk's own "
+                    "(mvexpand, sendemail, inputlookup), is a single unbroken word."
+                    % command,
+                )
+
+    def test_the_declared_file_names_match_the_command_names(self):
+        """A command whose script is named otherwise still runs, so nothing would report
+        the drift; and the day somebody greps for the command to find its code, they find
+        nothing. The rename of A-1 is the moment to freeze the correspondence."""
+        for command, keys in self.EXPECTED.items():
+            with self.subTest(command=command):
+                self.assertEqual(keys["filename"], "%s.py" % command)
+
+    def test_the_underscore_rule_is_checked_against_something(self):
+        """Guard rail on the guard rail: a `commands.conf` that stopped declaring any
+        command would make the rule above true by vacuity, and this app would ship
+        nothing at all."""
+        self.assertGreaterEqual(len(self.conf.sections()), 3)
+
     def test_the_writing_set_is_a_subset_of_the_declared_commands(self):
         """Guard rail on the guard rail: a command renamed out of `WRITING` would make
         the risk check above true by vacuity."""
@@ -330,7 +378,7 @@ class SearchBnfConfTest(unittest.TestCase):
         """
         commands = read_conf("default", "commands.conf").sections()
         self.assertEqual(
-            sorted(commands), ["app_acl_inventory", "editacl", "editappacl"]
+            sorted(commands), ["appaclinventory", "editacl", "editappacl"]
         )
         for command in commands:
             with self.subTest(command=command):
@@ -363,7 +411,7 @@ class SearchBnfConfTest(unittest.TestCase):
     COMMANDS = (
         ("editacl", "editacl.py", "EditAclCommand"),
         ("editappacl", "editappacl.py", "EditAppAclCommand"),
-        ("app_acl_inventory", "app_acl_inventory.py", "AppAclInventoryCommand"),
+        ("appaclinventory", "appaclinventory.py", "AppAclInventoryCommand"),
     )
 
     @staticmethod
@@ -614,7 +662,7 @@ class InputsConfTest(unittest.TestCase):
     def test_the_two_journals_do_not_share_a_file_name(self):
         """The reason DV-3 exists, checked on the two producers rather than on prose.
 
-        `| app_acl_inventory | ... | editappacl` and a `| editacl` can coexist in one
+        `| appaclinventory | ... | editappacl` and a `| editacl` can coexist in one
         search and therefore share a `sid`; two commands writing the same path would lose
         lines at the moment one of them rotates or truncates.
         """
