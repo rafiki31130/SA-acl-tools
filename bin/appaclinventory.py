@@ -49,7 +49,6 @@ from splunklib.searchcommands import (  # noqa: E402
 )
 
 from acltools.appacl_family import load_family_table  # noqa: E402
-from acltools.appacl_impact import ImpactEstimator  # noqa: E402
 from acltools.appacl_inventory import (  # noqa: E402
     INVENTORY_OUTPUT_FIELDS,
     InventoryBuilder,
@@ -61,7 +60,11 @@ from acltools.appacl_preflight import (  # noqa: E402
 )
 from acltools.appacl_provenance import ProvenanceReader, resolve_apps_root  # noqa: E402
 from acltools.errors import FatalError, FatalFamilyTableError  # noqa: E402
-from acltools.preflight import check_capability, check_realtime  # noqa: E402
+from acltools.preflight import (  # noqa: E402
+    AppStateCache,
+    check_capability,
+    check_realtime,
+)
 from acltools.rest import RestClient  # noqa: E402
 
 _APP_ROOT = os.path.dirname(_BIN)
@@ -89,9 +92,9 @@ MESSAGE_PREFIX = "appaclinventory: "
 #: file and only uses the table to fill `acl_handler`. Without it, every family comes out
 #: `unmapped` - degraded, stated, and still useful.
 TABLE_UNREADABLE_WARNING = (
-    "family table unreadable: the inventory carries on, every family coming out with "
-    "acl_write_path=unmapped and an empty acl_handler. The governability columns are "
-    "unaffected, they are read from the metadata files."
+    "family table unreadable: the inventory carries on, every family coming out with an "
+    "empty acl_handler and acl_effective_status=no_handler. The reach columns are "
+    "unaffected - they are read from the metadata files, not from the table."
 )
 
 
@@ -128,19 +131,25 @@ def _truthy(value, default=True):
     return str(value).strip().lower() in ("1", "true", "t", "yes", "y", "on")
 
 
-# `type` is not passed to `@Configuration`: `GeneratingCommand` leaves it at `streaming`,
-# which is the pipeline this command belongs to, and `generating` is read-only and
-# already `True`. `local = true` is carried by `commands.conf`, where it also says that
-# distributing a command that reads the local file system would make it read an
-# arbitrary member's tree.
-@Configuration(local=True)
+# `type="reporting"` is the whole of what this decorator carries beyond `local`, and it is
+# not a preference: it is the ONLY route. Measured (v4.5 section 7.2) - the command used to
+# produce EVENTS (`eventCount=9`, empty `reportSearch`) where the native generating commands
+# produce results, so Splunk Web opened it on the Events tab and showed a raw-event view of
+# rows that have no raw event. On a `chunked` command the `type` key of `commands.conf` is
+# measured WITHOUT EFFECT - tried with a service restart - because the metadata the SDK
+# sends in the `getinfo` chunk prevails. A test that froze that key would freeze a placebo.
+#
+# `generating` says the command OPENS the pipeline; `type` says WHICH pipeline. The two
+# settings are independent, and `type` is modifiable here where `StreamingCommand` pins it -
+# which is why the two write commands are untouched.
+@Configuration(local=True, type="reporting")
 class AppAclInventoryCommand(GeneratingCommand):
     """Inventories the GENERIC ACL stanzas of the applications and their PROVENANCE.
 
     ##Syntax
 
     .. code-block::
-        appaclinventory [apps=<string>] [families=<string>] [count_objects=<bool>]
+        appaclinventory [apps=<string>] [families=<string>]
 
     ##Description
 
@@ -159,7 +168,7 @@ class AppAclInventoryCommand(GeneratingCommand):
 
     .. code-block::
         | appaclinventory apps=my_app
-        | where acl_governable!="yes"
+        | where acl_reach!="all"
     """
 
     apps = Option(
@@ -173,15 +182,6 @@ class AppAclInventoryCommand(GeneratingCommand):
         require=False,
         default=None,
     )
-    count_objects = Option(
-        doc="Enumerate the objects through REST to fill acl_objects_total and "
-            "acl_objects_inheriting. Costs one REST call per application and family. "
-            "Default: false.",
-        require=False,
-        default=False,
-        validate=validators.Boolean(),
-    )
-
     def __init__(self):
         super(AppAclInventoryCommand, self).__init__()
         self._builder = None
@@ -214,15 +214,16 @@ class AppAclInventoryCommand(GeneratingCommand):
     # -- declaration of the output field set (section 7.4) ------------------ #
 
     def _declare_output_fields(self):
-        """Declare the whole field set of section 7.4 to the writer.
+        """Declare the whole field set of section 7.4 to the writer, **in order**.
 
         The SDK writer builds the stream header from the keys of the **first** record
-        emitted, then projects every later record onto it. The first record of an
-        inventory is always an `app_default` row, which is precisely the row that leaves
-        `acl_family_headers` filled and `acl_objects_*` empty - so without this
-        declaration a run with `count_objects=false` would lose two columns for the whole
-        table, and a run whose first application has no family would lose nothing
-        visible, which is worse.
+        emitted, then projects every later record onto it: a field absent from that record
+        disappears from the entire output with no error and no warning.
+
+        The **order** matters as much as the set, and a test freezes it. Measured before
+        the v4.5 revision: the emitted order did not match the declared one, `acl_member`
+        coming out ninth instead of last - so the seven columns that form the input
+        contract of `editappacl` were not the seven an operator saw first.
         """
         writer = getattr(self, "_record_writer", None)
         declared = getattr(writer, "custom_fields", None)
@@ -247,7 +248,6 @@ class AppAclInventoryCommand(GeneratingCommand):
         self._params = validate_inventory_params(
             apps=self.apps,
             families=self.families,
-            count_objects=self.count_objects,
         )
 
         session_key = getattr(info, "session_key", None)
@@ -304,8 +304,11 @@ class AppAclInventoryCommand(GeneratingCommand):
             rest=rest,
             provenance_reader=provenance,
             table=table,
-            impact=ImpactEstimator(rest, provenance, table),
             member=resolve_member(rest),
+            # Consulted only when a platform read has already failed, so that a row can say
+            # `app_disabled` rather than the undifferentiated `unreadable`. Memoized per
+            # application, and never called on the nominal path.
+            app_disabled_fn=AppStateCache(rest).is_app_disabled,
         )
 
     # -- generation --------------------------------------------------------- #

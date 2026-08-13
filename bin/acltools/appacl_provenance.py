@@ -99,7 +99,22 @@ FALLBACK_DIRNAME_LEVELS = 3
 META_ACCESS_KEY = "access"
 META_EXPORT_KEY = "export"
 
-#: Provenance values (section 7.4), closed domain.
+#: Closed domain of `acl_stanza_layer` (v4.5 section 7.4): which file the stanza is
+#: written in, and therefore which layer the `acl_file_*` columns quote.
+LAYER_LOCAL = "local"
+LAYER_DEFAULT = "default"
+LAYER_NONE = "none"
+
+#: Closed domain of `acl_file_read` (v4.5 section 7.4). It separates *the stanza is not in
+#: this file* from *the file could not be read in full* - the second invalidates the
+#: decision counters, the first does not.
+FILE_READ_OK = "ok"
+FILE_READ_PARTIAL_PREFIX = "partial:"
+FILE_READ_UNREADABLE = "unreadable"
+
+#: Provenance values, kept for the reader's own vocabulary. They no longer reach the
+#: output: the column that published them promised where the effective value came from
+#: and did not deliver it (v4.5 section 7.4).
 PROVENANCE_LOCAL = "local"
 PROVENANCE_DEFAULT = "default"
 PROVENANCE_INHERITED = "inherited"
@@ -456,7 +471,7 @@ class AppProvenance(object):
     # -- presence and provenance -------------------------------------------- #
 
     def present_local(self, stanza):
-        """Does the stanza **exist** in `local.meta`? (section 7.4, `acl_present_local`)
+        """Does the stanza **exist** in `local.meta`?
 
         Presence, and presence only. It is **not** the predicate that decides whether the
         stanza governs anything - `materialized_local` is - and the two were conflated
@@ -501,6 +516,56 @@ class AppProvenance(object):
         """Literal keys of the stanza in `local.meta`, empty dict when absent."""
         return self.local.get(stanza)
 
+    def stanza_layer(self, stanza):
+        """Which file the stanza is **written in** - `local`, `default`, or neither.
+
+        `local` wins when both carry it, and that is not a preference: at equal
+        specificity the local layer is the one splunkd applies (measured, HY-2). The
+        column built on this answer therefore names the layer the literal values beside it
+        are quoted from, which is all it promises.
+
+        **It does not say where the effective value comes from**, and the v4.5 contract
+        withdrew that promise rather than repairing it: a `[commands]` stanza carrying only
+        `export` lives in `default.meta` while its permissions are inherited from `[]`.
+        Answering the real question would mean replaying the platform's inheritance
+        resolution, which bound 2 of section 6.2 forbids.
+        """
+        if self.present_local(stanza):
+            return LAYER_LOCAL
+        if self.present_default(stanza):
+            return LAYER_DEFAULT
+        return LAYER_NONE
+
+    def literal_any(self, stanza):
+        """Literal keys of the stanza, from the layer `stanza_layer` names.
+
+        **The correction of the measured defect**: reading `local.meta` alone produced
+        zero non-empty literal on 124 rows, while 97 of them carried a filled stanza in
+        `default.meta` that nobody looked at. It was never "the stanza does not exist" - it
+        was "we read one layer out of two".
+        """
+        if self.present_local(stanza):
+            return self.local.get(stanza)
+        if self.present_default(stanza):
+            return self.default.get(stanza)
+        return {}
+
+    def read_status(self):
+        """Were the two metadata files read **in full**? Closed domain.
+
+            ok            both read, every line parsed
+            partial:<n>   read, <n> lines skipped - the counters may understate
+            unreadable    neither could be read; no count is trustworthy
+
+        It answers **one** question, where the column it replaces carried two of different
+        natures - an exception class and a skipped-line tally - and came out empty on 124
+        rows out of 124.
+        """
+        if not self.available:
+            return FILE_READ_UNREADABLE
+        skipped = self.local.skipped + self.default.skipped
+        return "%s%d" % (FILE_READ_PARTIAL_PREFIX, skipped) if skipped else FILE_READ_OK
+
     # -- counts, and counts only (bound 3) ---------------------------------- #
 
     def _object_stanza_names(self, family=None):
@@ -538,7 +603,7 @@ class AppProvenance(object):
         """Number of distinct objects whose stanza **carries the permissions**.
 
         With no argument, over the whole application. This is the figure the impact
-        estimate subtracts and the one `acl_frozen_stanzas` publishes; before the
+        estimate subtracts and the one `acl_objects_with_own_perms` publishes; before
         remediation it counted every object stanza, frozen or not, and collapsed the
         estimate to zero on any application whose objects had been edited.
         """
@@ -565,7 +630,7 @@ class AppProvenance(object):
     def family_header_count(self):
         """Number of distinct family headers that **govern** their family.
 
-        It feeds the `app_default` line of `acl_governable`, whose `yes` asks that nothing
+        It feeds the `app_default` line of `acl_reach`, whose `all` asks that nothing
         stand between `[]` and the objects. A header that materializes nothing stands in
         the way of nothing.
         """

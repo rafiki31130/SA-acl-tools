@@ -75,6 +75,10 @@ class ImpactEstimator(object):
     depends on none of the handler caches of section 13.4 point 7 - that is the one thing
     the clause allows carrying from one row to the next.
 
+    The three public counting facades that used to serve the inventory were withdrawn
+    in v4.5 with `count_objects`: the inventory answers its question from the file, and
+    an estimator whose only remaining caller is the write command has one entry point.
+
     It does **not** memoize the provenance: this class asks the reader for it on every
     estimate, and `editappacl` refreshes that reader before each target. The subtraction
     below therefore always runs against the file as it stands, which matters as soon as a
@@ -140,42 +144,6 @@ class ImpactEstimator(object):
         return self._estimate_family(
             target.app, target.stanza, target.handler, provenance
         )
-
-    # -- counts published to the inventory (section 7.4) -------------------- #
-
-    def shared_object_count(self, app, handler_path):
-        """`acl_objects_total` of a family row: shared objects of this app in it.
-
-        Public face of the enumeration the estimate is built on. The inventory needs the
-        **two** figures - the population and the part of it that still inherits - because
-        their difference is exactly what `acl_frozen_stanzas` says in another unit, and
-        publishing only the estimate would leave the operator unable to check one against
-        the other.
-        """
-        return self._shared_object_count(app, handler_path)
-
-    def inheriting_count(self, app, family, handler_path):
-        """`acl_objects_inheriting` of a family row: those with no stanza of their own."""
-        provenance = self._provenance.provenance_of_app(app)
-        return self._estimate_family(app, family, handler_path, provenance)
-
-    def app_default_counts(self, app):
-        """`(total, inheriting)` for an `app_default` row.
-
-        The total spans every family of the table, the inheriting part only the families
-        with **no header** - which is the blast radius of `[]` itself, computed by the
-        very function the write command uses (section 10.3). Both are lower bounds for
-        the reasons the module docstring states: the families the table does not cover
-        cannot be enumerated at all.
-        """
-        provenance = self._provenance.provenance_of_app(app)
-        total = 0
-        if self._table is not None:
-            for family in self._table.families():
-                handler_path = self._table.resolve(family)
-                if handler_path:
-                    total += self._shared_object_count(app, handler_path)
-        return total, self._estimate_app_default(app, provenance)
 
     def _estimate_family(self, app, family, handler_path, provenance):
         if not handler_path:

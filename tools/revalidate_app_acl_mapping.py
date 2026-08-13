@@ -242,7 +242,8 @@ def main():
         print("  -> declare them in lookups/app_acl_family_map_override.csv BEFORE any")
         print("     real use: a family absent from the table comes out")
         print("     acl_status=rejected / acl_error=unresolved_family, and the")
-        print("     inventory reports it with acl_write_path=unmapped.")
+        print("     inventory reports it with an empty acl_handler and")
+        print("     acl_effective_status=no_handler.")
     else:
         print("  none: every family stanza seen on this platform is covered.")
 

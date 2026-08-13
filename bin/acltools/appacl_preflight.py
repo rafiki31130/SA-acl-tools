@@ -207,20 +207,21 @@ def validate_app_params(
     )
 
 
-def validate_inventory_params(apps=None, families=None, count_objects=False):
-    """Validate the three parameters of section 7.3. Pure function.
+def validate_inventory_params(apps=None, families=None):
+    """Validate the two parameters of v4.5 section 7.3. Pure function.
 
-    **No parameter of this command can be fatally invalid**, and that is a decision
-    rather than an omission: the two filters are passed through the allow list of
-    section 7.3, so a character the contract does not admit is dropped instead of
-    rejecting the run. Section 13.1 lists the fatal errors limitatively and names only
-    "invalid parameter: syntactically incorrect field name, `max_stanzas` or
-    `max_impacted_objects` not a strictly positive integer" - none of which this command
-    has. `count_objects` is the exception that proves it: a value that is not a boolean
-    **is** an invalid parameter, and it is refused as one.
+    **No parameter of this command can be fatally invalid**, and that is a decision rather
+    than an omission: both filters pass through the allow list of section 7.3, so a
+    character the contract does not admit is dropped instead of rejecting the run. Section
+    13.1 lists the fatal errors limitatively and names only "invalid parameter:
+    syntactically incorrect field name, `max_stanzas` or `max_impacted_objects` not a
+    strictly positive integer" - none of which this command has.
+
+    `count_objects` was the one parameter that could be fatally invalid, being a boolean.
+    It was withdrawn in v4.5 with the two columns it fed, so this function no longer has a
+    way to fail - which is the honest shape for a command that only reads.
     """
     return AppInventoryParams(
         apps=parse_app_filter(apps),
         families=parse_family_list(families),
-        count_objects=_as_bool(count_objects, "count_objects", default=False),
     )

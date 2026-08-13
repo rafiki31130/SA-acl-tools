@@ -1170,15 +1170,15 @@ class AppLevelSavedSearchesTest(unittest.TestCase):
 
     def test_the_governability_search_groups_on_the_derived_verdict(self):
         search = self.conf[self.GOVERNABILITY]["search"]
-        self.assertRegex(search, r"BY[^|]*\bacl_governable\b")
+        self.assertRegex(search, r"BY[^|]*\bacl_reach\b")
         self.assertIn("acl_member", search)
 
     def test_the_governability_search_keeps_the_columns_the_verdict_derives_from(self):
         """The verdict recomputes from the counters, so the counters travel with it: a
         table showing `partial` without saying how much would be an opinion."""
         search = self.conf[self.GOVERNABILITY]["search"]
-        self.assertIn("acl_frozen_stanzas", search)
-        self.assertIn("acl_family_headers", search)
+        self.assertIn("acl_objects_with_own_perms", search)
+        self.assertIn("acl_families_with_own_perms", search)
 
 
 class AppLevelRevalidationTest(unittest.TestCase):

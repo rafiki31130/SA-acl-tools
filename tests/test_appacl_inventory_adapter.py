@@ -169,18 +169,71 @@ class TheAdapterCarriesNoBusinessRuleTest(unittest.TestCase):
         self.assertIn("GeneratingCommand", _code_only())
         self.assertIn("def generate(self)", _code_only())
 
-    def test_it_passes_no_type_to_the_configuration_decorator(self):
-        """Symmetric to the precedent v3.14 section 2.1 records: the base class decides
-        the pipeline, and the decorator must not contradict it."""
+    def _configuration_keywords(self):
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.Call):
                 continue
             if ast.unparse(node.func) != "Configuration":
                 continue
-            for keyword in node.keywords:
-                with self.subTest(keyword=keyword.arg):
-                    self.assertNotEqual(keyword.arg, "type")
-                    self.assertNotEqual(keyword.arg, "generating")
+            return {k.arg: ast.literal_eval(k.value) for k in node.keywords}
+        return None
+
+    def test_it_declares_the_reporting_type(self):
+        """**What the command DECLARES, not what it omits** (v4.5 section 7.2).
+
+        Measured: without it the command produced **events** - `eventCount=9`, empty
+        `reportSearch` - where the native generating commands produce results, so Splunk
+        Web opened the job on the Events tab and rendered rows that have no raw event.
+        `| rest` and `| metadata` are the witnesses: `eventCount=0`, `reportSearch` filled.
+
+        The previous version of this test froze the **absence** of the keyword. That is
+        exactly the shape friction #413 names: a contract that only states absences cannot
+        detect an unsuitable default. Both halves are checked here - the decorator carries
+        the value, and `commands.conf` still carries no `type` key, where it would be inert.
+        """
+        keywords = self._configuration_keywords()
+        self.assertIsNotNone(keywords, "no @Configuration call found in the adapter")
+        self.assertEqual(
+            keywords.get("type"), "reporting",
+            "the adapter must declare type=\"reporting\": on a chunked command it is the "
+            "ONLY route, the type key of commands.conf being measured without effect.",
+        )
+        self.assertEqual(keywords.get("local"), True)
+
+    def test_it_does_not_redeclare_the_generating_flag(self):
+        """`generating` is read-only on the base class and already true; passing it would
+        be refused. The precedent is exact - `@Configuration(type='streaming')` is refused
+        on a StreamingCommand, `type` being pinned there."""
+        self.assertNotIn("generating", self._configuration_keywords())
+
+    def test_commands_conf_carries_no_type_key(self):
+        """The other half. On a `chunked` command the `type` key of `commands.conf` is
+        measured **without effect** - tried with a service restart - because the metadata
+        the SDK sends in the `getinfo` chunk prevails. A test freezing that key would
+        freeze a placebo."""
+        from .test_spl_artifacts import read_splunk_conf
+
+        for stanza, keys in read_splunk_conf("default", "commands.conf").items():
+            with self.subTest(command=stanza):
+                self.assertNotIn("type", keys)
+
+    def test_the_two_write_commands_are_untouched(self):
+        """`type` is pinned on `StreamingCommand`, and the setting is carried by each
+        class's own decorator: the reporting classification cannot leak sideways."""
+        import os
+
+        from . import BIN_DIR
+
+        for name in ("editacl.py", "editappacl.py"):
+            with open(os.path.join(BIN_DIR, name), encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and ast.unparse(node.func) == "Configuration":
+                    with self.subTest(command=name):
+                        self.assertNotIn(
+                            "type", {k.arg for k in node.keywords},
+                            "%s must not declare a type: the base class pins it" % name,
+                        )
 
 
 class TheMisleadingLocalizationsAreForbiddenHereTooTest(unittest.TestCase):
@@ -224,7 +277,7 @@ class TheDeclaredOutputFieldsTest(unittest.TestCase):
 
     The trap is sharper on a generating command than on a streaming one: the first record
     of an inventory is ALWAYS an `app_default` row, which is the one row leaving
-    `acl_objects_*` empty when `count_objects` is off. Without the declaration those two
+    `acl_families_with_own_perms` filled from an application fact. Without the
     columns would vanish from the whole table, and a run whose first application has no
     family would lose more still - with no error and no warning.
     """
@@ -285,16 +338,17 @@ class TheFatalErrorsAreTheContractualOnesTest(unittest.TestCase):
         self.assertIn("TABLE_UNREADABLE_WARNING", source)
 
     def test_the_degraded_mode_is_stated_to_the_operator(self):
-        """A degradation nobody announces is a silent one, and the column it degrades -
-        `acl_write_path` - is the one that says whether the tool could act."""
+        """A degradation nobody announces is a silent one, and the columns it degrades -
+        `acl_handler`, and `acl_effective_status` with it - are the ones that say whether
+        the tool can act on the family at all."""
         from importlib import import_module
 
         module = import_module("acltools.appacl_inventory")
         source = _source()
         marker = source.index("TABLE_UNREADABLE_WARNING = (")
-        text = source[marker:marker + 600]
-        self.assertIn("unmapped", text)
-        self.assertIn(module.WRITE_PATH_UNMAPPED, text)
+        text = source[marker:marker + 700]
+        self.assertIn("acl_handler", text)
+        self.assertIn(module.EFFECTIVE_NO_HANDLER, text)
 
     def test_the_fatal_path_marks_the_job_as_failed(self):
         """The SDK's `error_exit` sends a final chunk carrying `finished: true`, after

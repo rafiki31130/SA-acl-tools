@@ -2724,7 +2724,8 @@ reassures.
 
 1. `acl_impacted_estimate`, hence the `max_impacted_objects` ceiling, which bounded nothing
    while its input was zero.
-2. `acl_frozen_stanzas` and `acl_governable`. With the old predicate every application
+2. `acl_objects_with_own_perms` and `acl_reach` - `acl_frozen_stanzas` and
+   `acl_governable` as they were then named. With the old predicate every application
    whose objects had been edited came out `partial`, and `yes` was reachable only on an
    application delivered as a package and never touched - the decision aid said *you can no
    longer govern this* about applications that were perfectly governable.
@@ -2852,8 +2853,8 @@ mutation campaign, three reviews, and none of them could see a command that neve
 The lesson is not to weaken the property; it is that a deliverable whose entry point has
 never been invoked on a real instance has not been tested at all, whatever the count says.
 
-`acl_governable` is a **derivation and not an appreciation**: its three values recompute
-from columns the same row publishes, so an operator who distrusts the verdict can redo the
+`acl_reach` is a **derivation and not an appreciation**: its three values recompute from
+columns the same row publishes, so an operator who distrusts the verdict can redo the
 arithmetic without leaving the table. That is the same discipline as the status enumeration
 - a figure whose provenance cannot be retraced is a figure nobody can contest.
 
@@ -2873,6 +2874,82 @@ than an estimate named as such.
   the third adapter, **with the extractor of `tests/test_message_prefix.py`** rather than a
   copy of it. Extending a control means reusing the instrument; a second copy of it would
   be exactly the drift the control exists to catch.
+
+
+### 27.11 The output contract, rewritten after the first look at it
+
+**Six findings in ten minutes, after two independent audits and five gates.** The command
+had never been opened in Splunk Web. Every column had its clause, its presence test and its
+audit against that clause; nobody had asked what an operator *understands* when reading the
+table. That is the whole diagnosis, and the correction is a criterion rather than a list:
+*every column must be understood by an operator who has read neither the contract nor the
+code.* A column that needs an explanation to be read is badly named, badly cut, or has no
+business in the output.
+
+**`type="reporting"`, and it is the only route.** Measured: the command produced **events** -
+`eventCount=9`, empty `reportSearch` - where the native generating commands produce results,
+so Splunk Web opened the job on the Events tab and rendered rows that have no raw event.
+
+| Search | `eventCount` | `resultCount` | `reportSearch` | `/events` |
+|---|---|---|---|---|
+| `\| appaclinventory` before | **9** | 9 | *(empty)* | 9 rows |
+| `\| appaclinventory` with `type="reporting"` | **0** | 9 | filled | empty |
+| `\| rest /services/apps/local` (native) | 0 | 5 | filled | empty |
+| `\| metadata type=sourcetypes` (native) | 0 | 45 | filled | empty |
+
+**Platform fact, and it reaches past this command**: on a `chunked` command the `type` key
+of `commands.conf` is **without effect** - tried with a service restart. The metadata the SDK
+sends in the `getinfo` chunk prevails, so the decorator is not the cleanest route, it is the
+**only** one, and a test freezing that key would freeze a placebo. `generating` says the
+command **opens** the pipeline; `type` says **which** pipeline; the two settings are
+independent, and `type` is modifiable on `GeneratingCommand` where `StreamingCommand` pins
+it - which is why the two write commands are untouched.
+
+**Four levels, and no column mixes two.** The columns had been side by side with nothing
+separating them, and that is where the two most serious findings came from. A row now answers
+four separable questions: which stanza it describes and why it is there, what the platform
+applies, what the file carries, and what stands between the two.
+
+**One rule replaces four semantics of the empty cell**: *no column is ever empty without
+another saying why.* Before, an empty cell could mean the stanza is absent, the family is
+outside the table, the call failed, or the application is disabled - and 26 rows out of 124,
+a fifth of them, were mute about which. `acl_effective_status` now explains the platform
+columns and `acl_stanza_layer` the file columns.
+
+**Two cells the rule does not cover, and they are reported rather than papered over.** On an
+**application** row, `acl_handler` is empty because a `[]` address needs no handler, and it is
+`acl_stanza_kind` that says so, not `acl_effective_status`. And `acl_member` is listed among
+the always-filled columns while section 6.3 specifies an **empty** value as its measured
+fallback; it is a run-level fact, identical on every row, documented with its remedy rather
+than explained per row. Both are in the tests, named, with the reasoning.
+
+**`acl_file_*` read both layers, and that was a bug of the first order.** They read
+`local.meta` alone: **zero non-empty value on 124 rows**, while **97** of them carried a
+filled stanza in `default.meta`. It was never "the stanza does not exist"; it was "we read one
+layer out of two".
+
+**The promise of `acl_provenance` was withdrawn, not repaired.** The clause said the column
+told where the effective value came from; it told which layer the stanza *name* lives in, and
+the deliverable contradicted itself on a real row - `[commands]` reported `default` while its
+`default.meta` stanza carries only `export`, the permissions being inherited from `[]`.
+Restoring the real promise would mean replaying splunkd's inheritance resolution, which bound
+2 of section 6.2 forbids on purpose: that bound is what keeps the read exception from becoming
+a reimplementation of the platform, and it is worth more than a column. `acl_stanza_layer`
+promises only what it measures, and the operator who wants the rest now has the file columns
+and the platform columns side by side to cross - which was not the case before.
+
+**`count_objects` and its two columns are gone.** Measured: **+790 REST calls** and a factor
+**6,4 to 7,3** on 41 applications, for a lower bound with three reservations, empty by
+default. The cost follows applications x families of the table, not rows emitted: an
+application producing one row still pays its nineteen calls. The question the inventory answers
+is settled by the **file**; the blast-radius question is answered where it engages, in the
+simulation of `editappacl`, per target. A capability moved, not removed.
+
+**What this episode says about the gates.** The suite was solid - 1 288 tests, eighteen
+deliberate mutations of the critical guard rails all caught - and it could not see any of
+this, because none of it is a property of the code. It is a property of what a human reads.
+Integration scenario 14bis exists for that: a real output, a reader who has read nothing, and
+a column they cannot name is a defect of the output rather than of their attention.
 
 ---
 

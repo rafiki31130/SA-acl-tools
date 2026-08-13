@@ -1,10 +1,16 @@
-"""The inventory core (v4.3 section 7), and the bounds it inherits from section 6.
+"""The inventory core (v4.5 section 7), and the bounds it inherits from section 6.
 
 What this module holds, and it is the whole reason the command exists: **the distinction
-between an inherited value and a frozen one**. Measured (Q0-4), REST answers the same
-block for both, so every test below that touches `acl_present_local`,
-`acl_frozen_stanzas`, `acl_provenance` or `acl_governable` is exercising the one thing
-no REST source can give.
+between an inherited value and one the object carries itself**. Measured (Q0-4), REST
+answers the same block for both, so every test below that touches `acl_stanza_layer`,
+`acl_objects_with_own_perms` or `acl_reach` is exercising the one thing no REST source can
+give.
+
+**The output contract was rewritten in v4.5**, after the command was first opened in Splunk
+Web: 21 columns became 18, organised in four named levels, under one rule - *no column is
+ever empty without another saying why*. The tests here are written against that rule rather
+than against the column list, because the list is the consequence and the rule is the
+contract.
 
 No Splunk, no network, no file system: the REST port is an in-memory double, and the
 provenance is the **real** reader fed with the text of a `.meta` file - substituting the
@@ -15,23 +21,29 @@ import ast
 import os
 import unittest
 
-from acltools.appacl_impact import ImpactEstimator
 from acltools.appacl_inventory import (
-    GOVERNABLE_PARTIAL,
-    GOVERNABLE_UNKNOWN,
-    GOVERNABLE_YES,
+    APP_STANZA_LABEL,
+    EFFECTIVE_APP_DISABLED,
+    EFFECTIVE_NO_HANDLER,
+    EFFECTIVE_OK,
+    EFFECTIVE_UNREADABLE,
     INVENTORY_OUTPUT_FIELDS,
+    REACH_ALL,
+    REACH_PARTIAL,
+    REACH_UNKNOWN,
+    ROW_REASON_APP,
+    ROW_REASON_OBJECTS,
+    ROW_REASON_REQUESTED,
+    ROW_REASON_STANZA,
     SERVER_INFO_PATH,
-    WRITE_PATH_MAPPED,
-    WRITE_PATH_UNMAPPED,
     InventoryBuilder,
     app_matches,
     export_of,
     families_to_emit,
-    governable_of,
     list_applications,
     parse_app_filter,
     parse_family_list,
+    reach_of,
     resolve_member,
     sanitize_filter,
     split_access,
@@ -46,7 +58,14 @@ from acltools.appacl_preflight import (
     REQUIRED_INVENTORY_CAPABILITY,
     validate_inventory_params,
 )
-from acltools.errors import FatalConfigError
+from acltools.appacl_provenance import (
+    FILE_READ_OK,
+    FILE_READ_PARTIAL_PREFIX,
+    FILE_READ_UNREADABLE,
+    LAYER_DEFAULT,
+    LAYER_LOCAL,
+    LAYER_NONE,
+)
 
 from . import BIN_DIR
 from .appacl_helpers import (
@@ -55,55 +74,29 @@ from .appacl_helpers import (
     FakeProvenanceReader,
     app_acl_body,
     frozen_stanza,
-    object_listing_body,
     provenance,
     scoped_stanza,
     touched_stanza,
 )
 from .test_spl_artifacts import read_splunk_conf
 
-#: A `local.meta` of an application that is **governed**: it carries generic stanzas and
-#: not a single object stanza. That is the shape `acl_governable = "yes"` describes.
-GOVERNED_META = """[]
-access = read : [ power ], write : [ admin ]
-export = none
+#: A `local.meta` of an application nobody has frozen: a `[]`, a `[views]` header, and no
+#: object stanza at all.
+GOVERNED_META = frozen_stanza("") + frozen_stanza("views")
 
-[views]
-access = read : [ power, user ], write : [ power ]
-export = none
-"""
-
-#: A `local.meta` of an application that is **frozen**: three of its views carry their
-#: own stanza, which no measured REST path removes. Writing `[views]` will not move them.
-FROZEN_META = """[]
-access = read : [ power ], write : [ admin ]
-export = none
-
-[views]
-access = read : [ power ], write : [ power ]
-export = none
-
-[views/dashboard_one]
-access = read : [ admin ], write : [ admin ]
-export = none
-
-[views/dashboard_two]
-access = read : [ admin ], write : [ admin ]
-export = none
-
-[savedsearches/nightly_report]
-access = read : [ admin ], write : [ admin ]
-export = none
-"""
+#: An application frozen object by object: two views and one saved search carry their own
+#: permissions.
+FROZEN_META = (
+    frozen_stanza("")
+    + frozen_stanza("views")
+    + frozen_stanza("views/dashboard_one")
+    + frozen_stanza("views/dashboard_two")
+    + frozen_stanza("savedsearches/nightly_report")
+)
 
 
 def _executable_source(source):
-    """The source stripped of its comments and of its docstrings.
-
-    Naming a trap is how it stays named, so a docstring that spells `SPLUNK_SERVER_NAME`
-    out must not fail the control that forbids **reaching** it. What is left after this
-    stripping is exactly what runs.
-    """
+    """The source stripped of its comments and of its docstrings."""
     without_comments = "\n".join(
         line for line in source.splitlines() if not line.strip().startswith("#")
     )
@@ -111,777 +104,30 @@ def _executable_source(source):
     rendered = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-            continue                                  # bare string: a docstring
+            continue
         if isinstance(node, (ast.Call, ast.Attribute, ast.Subscript, ast.Name)):
             rendered.append(ast.unparse(node))
     return "\n".join(rendered)
 
 
-def make_params(apps=("*",), families=(), count_objects=False):
-    return AppInventoryParams(
-        apps=tuple(apps), families=tuple(families), count_objects=count_objects
-    )
+def make_params(apps=("*",), families=()):
+    return AppInventoryParams(apps=tuple(apps), families=tuple(families))
 
 
-def builder(rest=None, prov=None, table=FIXTURE_TABLE, impact=None, member=""):
+def builder(rest=None, prov=None, table=FIXTURE_TABLE, member="", disabled=None):
     rest = rest or FakeAppRest()
     reader = FakeProvenanceReader(prov if prov is not None else provenance())
     return InventoryBuilder(
         rest=rest,
         provenance_reader=reader,
         table=table,
-        impact=impact,
         member=member,
+        app_disabled_fn=disabled,
     )
-
-
-# --------------------------------------------------------------------------- #
-# Section 7.3 - the parameters, and the allow list that guards them
-# --------------------------------------------------------------------------- #
-
-class TheParametersTest(unittest.TestCase):
-    """Three parameters, and the filter convention of the repository applied to two."""
-
-    def test_the_application_filter_defaults_to_everything(self):
-        for raw in (None, "", "   ", ",,,"):
-            with self.subTest(raw=raw):
-                self.assertEqual(parse_app_filter(raw), ("*",))
-
-    def test_the_application_filter_splits_on_commas(self):
-        self.assertEqual(parse_app_filter("a, b ,c"), ("a", "b", "c"))
-
-    def test_the_family_list_is_empty_by_default(self):
-        for raw in (None, "", " , "):
-            with self.subTest(raw=raw):
-                self.assertEqual(parse_family_list(raw), ())
-
-    def test_a_character_outside_the_allow_list_is_dropped(self):
-        """Section 7.3: the argument is filtered before it is used as a pattern.
-
-        Dropping and not rejecting is the convention of the repository, and here it is
-        also the conservative choice: the filter governs what is SHOWN, so a mangled
-        pattern shows too little and never too much.
-        """
-        self.assertEqual(sanitize_filter("a|b;c`d$e"), "abcde")
-        self.assertEqual(sanitize_filter("my_app-1,other*"), "my_app-1,other*")
-
-    def test_a_regex_metacharacter_cannot_reach_the_matcher(self):
-        """The whole point of the allow list: `.` and `+` are not patterns here."""
-        self.assertEqual(parse_app_filter(".*"), ("*",))
-        self.assertFalse(app_matches("anything", parse_app_filter("a.c")))
-        self.assertTrue(app_matches("ac", parse_app_filter("a.c")))
-
-    def test_the_star_is_the_only_metacharacter(self):
-        cases = (
-            ("my_app", "*", True),
-            ("my_app", "my_app", True),
-            ("my_app", "my_*", True),
-            ("my_app", "*_app", True),
-            ("my_long_app", "my_*_app", True),
-            ("my_app", "*x*", False),
-            ("my_app", "other", False),
-            ("", "*", True),
-        )
-        for name, pattern, expected in cases:
-            with self.subTest(name=name, pattern=pattern):
-                self.assertEqual(app_matches(name, (pattern,)), expected)
-
-    def test_a_question_mark_is_not_a_metacharacter(self):
-        """`fnmatch` would honour `?` and `[...]`; the allow list does not let them
-        through, so an operator would see them silently deleted and get a filter doing
-        something else than what is on screen."""
-        self.assertEqual(parse_app_filter("my?app"), ("myapp",))
-
-    def test_count_objects_is_a_boolean_and_an_invalid_one_is_fatal(self):
-        self.assertFalse(validate_inventory_params().count_objects)
-        self.assertTrue(validate_inventory_params(count_objects="t").count_objects)
-        with self.assertRaises(FatalConfigError):
-            validate_inventory_params(count_objects="perhaps")
-
-    def test_the_validated_parameters_carry_the_contractual_defaults(self):
-        params = validate_inventory_params()
-        self.assertEqual(params.apps, ("*",))
-        self.assertEqual(params.families, ())
-        self.assertFalse(params.count_objects)
-
-    def test_the_capability_is_the_one_the_contract_names(self):
-        self.assertEqual(REQUIRED_INVENTORY_CAPABILITY, "list_app_acl")
-
-
-# --------------------------------------------------------------------------- #
-# Section 6.4 - literal values read from the file
-# --------------------------------------------------------------------------- #
-
-class TheLiteralValuesTest(unittest.TestCase):
-    """`access` carries both permissions on ONE line, so the two columns come from
-    splitting it - there is no `perms.read` key in a `.meta` file to look up.
-
-    Every case below is a shape the reader must survive rather than raise on: the reader
-    of section 6.4 is total.
-    """
-
-    def test_the_measured_shape_is_split_into_two_literals(self):
-        literal = {"access": "read : [ power ], write : [ admin ]"}
-        self.assertEqual(split_access(literal), ("power", "admin"))
-
-    def test_several_roles_keep_their_literal_form(self):
-        literal = {"access": "read : [ power, user ], write : [ admin ]"}
-        self.assertEqual(split_access(literal), ("power, user", "admin"))
-
-    def test_an_empty_permission_reads_back_as_the_empty_string(self):
-        """Measured (Q0-1 case E): after a POST carrying `perms.read=`, the file holds
-        `read : [  ]`. It is an EMPTY permission, which leaves the objects unreachable -
-        not an absent one, which would let them inherit."""
-        self.assertEqual(split_access({"access": "read : [  ], write : [ admin ]"}),
-                         ("", "admin"))
-
-    def test_the_reader_survives_every_malformed_shape(self):
-        for raw in (None, {}, {"access": ""}, {"access": "garbage"},
-                    {"access": "read : [ power"}, {"access": "read power ]"},
-                    {"access": "write : [ admin ], read : [ power ]"}):
-            with self.subTest(raw=raw):
-                result = split_access(raw)
-                self.assertEqual(len(result), 2)
-                self.assertTrue(all(isinstance(part, str) for part in result))
-
-    def test_the_order_of_the_two_clauses_does_not_matter(self):
-        self.assertEqual(
-            split_access({"access": "write : [ admin ], read : [ power ]"}),
-            ("power", "admin"),
-        )
-
-    def test_the_export_key_is_read_literally(self):
-        self.assertEqual(export_of({"export": "system"}), "system")
-        self.assertEqual(export_of({}), "")
-        self.assertEqual(export_of(None), "")
-
-
-# --------------------------------------------------------------------------- #
-# Section 7.4 - governability, a derivation and not an appreciation
-# --------------------------------------------------------------------------- #
-
-class TheGovernabilityIsADerivationTest(unittest.TestCase):
-    """The table of section 7.4, cell by cell, both kinds of row.
-
-    The property that matters is not the value but its **recomputability**: every one of
-    these verdicts is a function of columns the same row publishes, so an operator who
-    distrusts it can redo the arithmetic in SPL without leaving the table.
-    """
-
-    def test_a_family_with_no_frozen_object_is_governable(self):
-        self.assertEqual(
-            governable_of(STANZA_KIND_FAMILY, True, 0, 0), GOVERNABLE_YES
-        )
-
-    def test_a_family_with_a_frozen_object_is_only_partly_governable(self):
-        self.assertEqual(
-            governable_of(STANZA_KIND_FAMILY, True, 1, 0), GOVERNABLE_PARTIAL
-        )
-
-    def test_the_application_default_needs_neither_header_nor_frozen_object(self):
-        self.assertEqual(governable_of(STANZA_KIND_APP, True, 0, 0), GOVERNABLE_YES)
-
-    def test_a_family_header_takes_a_family_out_of_the_reach_of_the_default(self):
-        """Measured inheritance chain (Q0-3 verdict 4): an interposed header is read
-        instead of `[]`, so the application default no longer governs that family."""
-        self.assertEqual(governable_of(STANZA_KIND_APP, True, 0, 1), GOVERNABLE_PARTIAL)
-
-    def test_a_frozen_object_alone_is_enough_to_degrade_the_application_default(self):
-        self.assertEqual(governable_of(STANZA_KIND_APP, True, 1, 0), GOVERNABLE_PARTIAL)
-
-    def test_an_unreadable_provenance_yields_unknown_on_both_kinds(self):
-        """`unavailable` supports NO conclusion. `partial` would be one, and a wrong one
-        in the direction that matters: it would let an operator believe the file said
-        something."""
-        for kind in (STANZA_KIND_APP, STANZA_KIND_FAMILY):
-            with self.subTest(kind=kind):
-                self.assertEqual(
-                    governable_of(kind, False, 0, 0), GOVERNABLE_UNKNOWN
-                )
-                self.assertEqual(
-                    governable_of(kind, False, 5, 5), GOVERNABLE_UNKNOWN
-                )
-
-    def test_the_domain_is_closed(self):
-        values = set()
-        for kind in (STANZA_KIND_APP, STANZA_KIND_FAMILY):
-            for available in (True, False):
-                for frozen in (0, 3):
-                    for headers in (0, 3):
-                        values.add(governable_of(kind, available, frozen, headers))
-        self.assertEqual(
-            values, {GOVERNABLE_YES, GOVERNABLE_PARTIAL, GOVERNABLE_UNKNOWN}
-        )
-
-
-# --------------------------------------------------------------------------- #
-# Section 7.5 - which rows are emitted
-# --------------------------------------------------------------------------- #
-
-class TheEmittedRowsTest(unittest.TestCase):
-
-    def test_a_family_header_of_local_meta_produces_a_row(self):
-        self.assertIn("views", families_to_emit(provenance(local=GOVERNED_META), ()))
-
-    def test_a_family_header_of_default_meta_produces_a_row(self):
-        self.assertIn("views", families_to_emit(provenance(default=GOVERNED_META), ()))
-
-    def test_a_frozen_object_produces_the_row_of_its_family(self):
-        """Condition 2, and it is the one that carries the value of the whole command: a
-        family nobody governs but whose objects are frozen is exactly what an operator
-        has to see BEFORE deciding to govern it."""
-        emitted = families_to_emit(provenance(local=FROZEN_META), ())
-        self.assertIn("savedsearches", emitted)
-
-    def test_a_family_named_in_the_parameter_is_emitted_even_with_nothing_in_the_file(
-        self,
-    ):
-        emitted = families_to_emit(provenance(), ("macros",))
-        self.assertEqual(emitted, ("macros",))
-
-    def test_a_family_present_in_none_of_the_three_conditions_is_absent(self):
-        self.assertNotIn("macros", families_to_emit(provenance(local=GOVERNED_META), ()))
-
-    def test_the_order_is_stable(self):
-        """An inventory is compared with the one from another member (section 6.3). Two
-        runs ordering their rows by whatever a set iteration returned would diverge for
-        no reason at all."""
-        emitted = families_to_emit(provenance(local=FROZEN_META), ("macros", "nav"))
-        self.assertEqual(list(emitted), sorted(emitted))
-
-    def test_the_application_default_row_is_emitted_unconditionally(self):
-        rows = list(
-            builder().rows(make_params(), applications=["app_with_nothing"])
-        )
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["acl_stanza_kind"], STANZA_KIND_APP)
-        self.assertEqual(rows[0]["acl_present_local"], "false")
-
-    def test_the_filter_selects_the_applications(self):
-        rows = list(
-            builder().rows(
-                make_params(apps=("keep_*",)),
-                applications=["keep_one", "keep_two", "drop_me"],
-            )
-        )
-        self.assertEqual(
-            [row["eai:acl.app"] for row in rows], ["keep_one", "keep_two"]
-        )
-
-    def test_the_applications_come_out_sorted(self):
-        rows = list(
-            builder().rows(make_params(), applications=["zeta", "alpha", "mu"])
-        )
-        self.assertEqual([row["eai:acl.app"] for row in rows], ["alpha", "mu", "zeta"])
-
-
-# --------------------------------------------------------------------------- #
-# Section 7.4 - the rows themselves
-# --------------------------------------------------------------------------- #
-
-class TheRowsTest(unittest.TestCase):
-
-    def test_every_row_carries_exactly_the_declared_field_set(self):
-        """v3.14 section 5.7, D-33, and it bites harder on a generating command: the
-        writer freezes the header on the FIRST record, and the first record of an
-        inventory is always an `app_default` row - the one row that leaves
-        `acl_objects_*` empty when `count_objects` is off."""
-        rows = list(
-            builder(prov=provenance(local=FROZEN_META)).rows(
-                make_params(families=("macros",)), applications=["my_app"]
-            )
-        )
-        self.assertTrue(rows)
-        for row in rows:
-            with self.subTest(stanza=row["acl_stanza"]):
-                self.assertEqual(sorted(row), sorted(INVENTORY_OUTPUT_FIELDS))
-
-    def test_the_first_fields_are_the_input_contract_of_the_write_command(self):
-        """Section 7.3 of the write command: every parameter defaults to a field name
-        THIS command emits, so a pipeline built on it needs no parameter at all. The
-        control is on the names the other command reads, not on a copied list."""
-        defaults = DEFAULT_APP_FIELD_NAMES
-        for name in (defaults.app, defaults.stanza_kind, defaults.handler,
-                     defaults.stanza, defaults.new_perms_read,
-                     defaults.new_perms_write, defaults.new_sharing):
-            with self.subTest(field=name):
-                self.assertIn(name, INVENTORY_OUTPUT_FIELDS)
-
-    def test_the_effective_values_come_from_rest(self):
-        rest = FakeAppRest(
-            default_get=RestOk(app_acl_body(sharing="global", read=("a", "b"),
-                                            write=("c",)))
-        )
-        row = builder(rest=rest).app_default_row("my_app", provenance())
-        self.assertEqual(row["eai:acl.sharing"], "global")
-        self.assertEqual(row["eai:acl.perms.read"], "a,b")
-        self.assertEqual(row["eai:acl.perms.write"], "c")
-
-    def test_the_provenance_columns_come_from_the_file(self):
-        row = builder().app_default_row("my_app", provenance(local=GOVERNED_META))
-        self.assertEqual(row["acl_present_local"], "true")
-        self.assertEqual(row["acl_present_default"], "false")
-        self.assertEqual(row["acl_file_perms_read"], "power")
-        self.assertEqual(row["acl_file_perms_write"], "admin")
-        self.assertEqual(row["acl_file_export"], "none")
-        self.assertEqual(row["acl_provenance"], "local")
-
-    def test_the_file_and_the_platform_are_reported_side_by_side(self):
-        """The whole point of publishing both: `acl_file_*` says what the LOCAL layer
-        holds, `eai:acl.*` what splunkd SERVES. A divergence between them is the signal
-        that something else - the default layer, an upper generic - is deciding."""
-        rest = FakeAppRest(default_get=RestOk(app_acl_body(read=("effective_role",))))
-        row = builder(rest=rest).app_default_row("my_app", provenance(local=GOVERNED_META))
-        self.assertEqual(row["acl_file_perms_read"], "power")
-        self.assertEqual(row["eai:acl.perms.read"], "effective_role")
-
-    def test_a_failed_rest_read_leaves_the_effective_columns_empty(self):
-        """A read failure costs one row three cells, never the whole table: the columns
-        that carry the decision are the provenance ones, and they are read from a file."""
-        rest = FakeAppRest(default_get=RestFail())
-        row = builder(rest=rest).app_default_row("my_app", provenance(local=GOVERNED_META))
-        self.assertEqual(row["eai:acl.perms.read"], "")
-        self.assertEqual(row["eai:acl.sharing"], "")
-        self.assertEqual(row["acl_file_perms_read"], "power")
-
-    def test_the_application_row_counts_every_frozen_stanza_of_the_application(self):
-        """It counts them over the WHOLE application, not per family, which is what
-        makes the `app_default` line of the governability table recomputable from the
-        columns of its own row."""
-        row = builder().app_default_row("my_app", provenance(local=FROZEN_META))
-        self.assertEqual(row["acl_frozen_stanzas"], 3)
-        self.assertEqual(row["acl_family_headers"], 1)
-        self.assertEqual(row["acl_governable"], GOVERNABLE_PARTIAL)
-
-    def test_the_family_row_counts_only_its_own_family(self):
-        prov = provenance(local=FROZEN_META)
-        views = builder().family_row("my_app", "views", prov)
-        savedsearches = builder().family_row("my_app", "savedsearches", prov)
-        self.assertEqual(views["acl_frozen_stanzas"], 2)
-        self.assertEqual(savedsearches["acl_frozen_stanzas"], 1)
-
-    def test_the_family_row_leaves_the_header_count_empty(self):
-        """Section 7.4 confines `acl_family_headers` to the `app_default` line. Repeating
-        an application-wide figure on every family row would invite a `stats sum()` that
-        counts it once per family."""
-        row = builder().family_row("my_app", "views", provenance(local=FROZEN_META))
-        self.assertEqual(row["acl_family_headers"], "")
-
-    def test_a_family_of_the_table_carries_its_handler_and_a_write_path(self):
-        row = builder().family_row("my_app", "views", provenance(local=GOVERNED_META))
-        self.assertEqual(row["acl_handler"], "data/ui/views")
-        self.assertEqual(row["acl_write_path"], WRITE_PATH_MAPPED)
-
-    def test_a_family_absent_from_the_table_is_reported_as_unmapped(self):
-        """Section 6.4: a stanza whose name matches no expected shape is reported AS IT
-        STANDS, with an empty handler. It is a fact about the tool - the table does not
-        cover it - and never a claim about the platform."""
-        row = builder().family_row("my_app", "unknown_family", provenance())
-        self.assertEqual(row["acl_handler"], "")
-        self.assertEqual(row["acl_write_path"], WRITE_PATH_UNMAPPED)
-        self.assertEqual(row["eai:acl.perms.read"], "")
-
-    def test_the_application_default_row_is_always_mapped(self):
-        """Its URI is entirely determined by the application name: there is no family to
-        resolve and therefore nothing that can fail to resolve."""
-        row = builder().app_default_row("my_app", provenance())
-        self.assertEqual(row["acl_write_path"], WRITE_PATH_MAPPED)
-        self.assertEqual(row["acl_handler"], "")
-        self.assertEqual(row["acl_stanza"], "")
-
-    def test_an_absent_stanza_is_reported_inherited_and_not_as_a_failure(self):
-        """Measured: a freshly installed application has no `local.meta` at all. That is
-        a valid and informative answer, and the command turns it into `inherited`."""
-        row = builder().family_row("my_app", "views", provenance())
-        self.assertEqual(row["acl_present_local"], "false")
-        self.assertEqual(row["acl_provenance"], "inherited")
-        self.assertEqual(row["acl_provenance_error"], "")
-
-    def test_an_unreadable_file_yields_unavailable_with_its_error_class(self):
-        row = builder().app_default_row(
-            "my_app", provenance(local_error="PermissionError")
-        )
-        self.assertEqual(row["acl_provenance"], "unavailable")
-        self.assertEqual(row["acl_provenance_error"], "PermissionError")
-        self.assertEqual(row["acl_governable"], GOVERNABLE_UNKNOWN)
-
-    def test_the_skipped_line_count_is_reported(self):
-        row = builder().app_default_row(
-            "my_app", provenance(local="[]\nthis line has no equals sign\n")
-        )
-        self.assertEqual(row["acl_provenance_error"], "parse_skipped:1")
-
-    def test_the_booleans_are_emitted_in_the_lower_case_form_of_the_platform(self):
-        row = builder().app_default_row("my_app", provenance(local=GOVERNED_META))
-        self.assertIn(row["acl_present_local"], ("true", "false"))
-        self.assertNotIn("True", row.values())
-
-
-# --------------------------------------------------------------------------- #
-# Section 6.2 bound 3 - counts, never names
-# --------------------------------------------------------------------------- #
-
-class TheOutputCarriesCountsAndNeverObjectNamesTest(unittest.TestCase):
-    """**The reason the capability exists** (section 7.6).
-
-    Reading the file short-circuits the capability filtering REST applies: a caller
-    without `admin_all_objects` would see, through this command, object names the API
-    refuses them. A count exposes no name, and this is the test that says so about the
-    thing the operator actually receives - the emitted rows - rather than about the
-    module that builds them.
-    """
-
-    #: Names carried by the fixture's object stanzas. None may appear anywhere in the
-    #: emitted rows, in any field, in any form.
-    OBJECT_NAMES = ("dashboard_one", "dashboard_two", "nightly_report")
-
-    def test_no_emitted_value_contains_an_object_name(self):
-        rows = list(
-            builder(prov=provenance(local=FROZEN_META)).rows(
-                make_params(), applications=["my_app"]
-            )
-        )
-        self.assertTrue(rows)
-        rendered = " ".join(
-            "%s" % value for row in rows for value in row.values()
-        )
-        for name in self.OBJECT_NAMES:
-            with self.subTest(object=name):
-                self.assertNotIn(name, rendered)
-
-    def test_the_frozen_objects_are_nonetheless_counted(self):
-        """The negative control that makes the test above conclusive: if the fixture
-        carried no frozen object, "no name leaked" would be true by vacuity."""
-        rows = list(
-            builder(prov=provenance(local=FROZEN_META)).rows(
-                make_params(), applications=["my_app"]
-            )
-        )
-        self.assertEqual(
-            sum(int(row["acl_frozen_stanzas"] or 0) for row in rows), 6
-        )
-
-
-# --------------------------------------------------------------------------- #
-# Section 7.4 - the object counts, and what they cost
-# --------------------------------------------------------------------------- #
-
-class TheGovernabilityVerdictAfterAnomalyA2Test(unittest.TestCase):
-    """**The derived reach of A-2, which the auditor could name but not measure.**
-
-    The same definition of "frozen" feeds `acl_frozen_stanzas` and `acl_governable`. With
-    the old one, an application whose objects had merely been **edited** - which is every
-    real application - came out `partial`, and `yes` was reachable only on an application
-    delivered as a package and never touched. The decision aid said "you can no longer
-    govern this" about applications that were perfectly governable.
-    """
-
-    #: An application nobody has frozen: three views created or edited through splunkd,
-    #: each carrying the stanza splunkd writes on an edit and nothing more.
-    EDITED_ONLY = (
-        touched_stanza("views/edited_one")
-        + touched_stanza("views/edited_two")
-        + touched_stanza("views/edited_three")
-    )
-
-    def test_an_application_whose_objects_were_only_edited_is_governable(self):
-        row = builder().app_default_row("my_app", provenance(local=self.EDITED_ONLY))
-        self.assertEqual(row["acl_frozen_stanzas"], 0)
-        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
-
-    def test_the_family_row_agrees(self):
-        row = builder().family_row(
-            "my_app", "views", provenance(local=self.EDITED_ONLY)
-        )
-        self.assertEqual(row["acl_frozen_stanzas"], 0)
-        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
-
-    def test_one_really_frozen_object_is_enough_to_degrade_the_verdict(self):
-        """The negative control: the verdict still reacts, it just reacts to the right
-        thing."""
-        row = builder().family_row(
-            "my_app", "views",
-            provenance(local=self.EDITED_ONLY + frozen_stanza("views/frozen_one")),
-        )
-        self.assertEqual(row["acl_frozen_stanzas"], 1)
-        self.assertEqual(row["acl_governable"], GOVERNABLE_PARTIAL)
-
-    def test_a_family_header_that_materializes_nothing_does_not_degrade_the_app_row(self):
-        """Same predicate one level up: a header carrying only the scope leaves its family
-        inside the reach of the application default."""
-        row = builder().app_default_row("my_app", provenance(local=scoped_stanza("views")))
-        self.assertEqual(row["acl_family_headers"], 0)
-        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
-
-    def test_the_family_is_still_EMITTED_even_when_nothing_freezes_it(self):
-        """Section 7.5 condition 2 is about the **presence** of objects of the family, not
-        about their freezing, and it is deliberately left alone: an operator asking what a
-        family looks like must see it, whatever its stanzas carry."""
-        self.assertIn("views", families_to_emit(provenance(local=self.EDITED_ONLY), ()))
-
-    def test_the_row_still_reports_the_stanza_as_present(self):
-        """`acl_present_local` answers presence, which is what section 7.4 asks of it. It
-        is the freeze counters that changed, not this column - and the two questions are
-        now distinct rather than conflated."""
-        row = builder().family_row("my_app", "views", provenance(local=touched_stanza("views")))
-        self.assertEqual(row["acl_present_local"], "true")
-        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
-
-
-class TheObjectCountsTest(unittest.TestCase):
-    """`count_objects` is off by default because it costs one REST call per (application,
-    family), where the columns that carry the decision are read from one file."""
-
-    def _rest(self):
-        return FakeAppRest(
-            json_responses={
-                "/servicesNS/nobody/my_app/data/ui/views": RestOk(
-                    object_listing_body(
-                        [("dashboard_one", "my_app"), ("dashboard_two", "my_app"),
-                         ("dashboard_three", "my_app"), ("foreign", "other_app")]
-                    )
-                ),
-            },
-            default_json=RestOk(object_listing_body([])),
-        )
-
-    def _builder_with_impact(self, prov):
-        rest = self._rest()
-        reader = FakeProvenanceReader(prov)
-        impact = ImpactEstimator(rest, reader, FIXTURE_TABLE)
-        return rest, InventoryBuilder(
-            rest=rest, provenance_reader=reader, table=FIXTURE_TABLE, impact=impact
-        )
-
-    def test_the_columns_stay_empty_when_the_enumeration_was_not_asked_for(self):
-        _rest, build = self._builder_with_impact(provenance(local=FROZEN_META))
-        row = build.family_row("my_app", "views", provenance(local=FROZEN_META))
-        self.assertEqual(row["acl_objects_total"], "")
-        self.assertEqual(row["acl_objects_inheriting"], "")
-
-    def test_empty_is_not_zero(self):
-        """Zero is an ANSWER - the family is empty in this application - and confusing
-        the two would let a column nobody computed pass for a family nobody uses."""
-        _rest, build = self._builder_with_impact(provenance())
-        row = build.family_row("my_app", "macros", provenance(), count_objects=True)
-        self.assertEqual(row["acl_objects_total"], 0)
-        self.assertNotEqual(row["acl_objects_total"], "")
-
-    def test_the_enumeration_excludes_the_objects_of_other_applications(self):
-        """Measured on the lab: a namespace exposes the objects other applications share
-        globally - 33 entries for one that belonged to the app. A naive count would
-        overstate the population by a factor of 33."""
-        prov = provenance(local=FROZEN_META)
-        _rest, build = self._builder_with_impact(prov)
-        row = build.family_row("my_app", "views", prov, count_objects=True)
-        self.assertEqual(row["acl_objects_total"], 3)
-
-    def test_the_inheriting_count_subtracts_the_frozen_stanzas(self):
-        prov = provenance(local=FROZEN_META)
-        _rest, build = self._builder_with_impact(prov)
-        row = build.family_row("my_app", "views", prov, count_objects=True)
-        self.assertEqual(row["acl_objects_total"], 3)
-        self.assertEqual(row["acl_frozen_stanzas"], 2)
-        self.assertEqual(row["acl_objects_inheriting"], 1)
-
-    def test_the_two_columns_and_the_frozen_count_agree(self):
-        """Publishing the three lets the operator check one against the other, which is
-        what an estimate named as such is worth."""
-        prov = provenance(local=FROZEN_META)
-        _rest, build = self._builder_with_impact(prov)
-        row = build.family_row("my_app", "views", prov, count_objects=True)
-        self.assertEqual(
-            row["acl_objects_inheriting"],
-            row["acl_objects_total"] - row["acl_frozen_stanzas"],
-        )
-
-    def test_an_unmapped_family_cannot_be_enumerated(self):
-        prov = provenance()
-        _rest, build = self._builder_with_impact(prov)
-        row = build.family_row("my_app", "unknown_family", prov, count_objects=True)
-        self.assertEqual(row["acl_objects_total"], "")
-
-    def test_the_application_row_counts_the_population_it_still_governs(self):
-        """For `app_default` the inheriting part spans the families with NO header: a
-        family carrying one reads that header, not the application default (Q0-3
-        verdict 4)."""
-        prov = provenance(local=GOVERNED_META)
-        _rest, build = self._builder_with_impact(prov)
-        row = build.app_default_row("my_app", prov, count_objects=True)
-        self.assertEqual(row["acl_objects_total"], 3)
-        # `views` carries a header in GOVERNED_META, so its three objects are out of the
-        # blast radius of `[]`.
-        self.assertEqual(row["acl_objects_inheriting"], 0)
-
-    def test_the_enumeration_is_memoized_across_rows(self):
-        prov = provenance(local=FROZEN_META)
-        rest, build = self._builder_with_impact(prov)
-        build.family_row("my_app", "views", prov, count_objects=True)
-        before = rest.count("JSON")
-        build.family_row("my_app", "views", prov, count_objects=True)
-        self.assertEqual(rest.count("JSON"), before)
-
-
-# --------------------------------------------------------------------------- #
-# Section 6.3 - the execution member
-# --------------------------------------------------------------------------- #
-
-class TheExecutionMemberTest(unittest.TestCase):
-    """`acl_member` turns the SHC reservation into an instrument: run the inventory on
-    each member and compare, and a metadata replication gap becomes visible - which no
-    configuration audit sees, the change tracking of Splunk recording `.conf` files and
-    not `.meta` ones."""
-
-    def test_it_is_read_from_the_cheap_rest_call(self):
-        """HY-4, remaining branch, measured positive: `entry[0].content.serverName` of
-        `/services/server/info` carries the instance name."""
-        rest = FakeAppRest(
-            json_responses={
-                SERVER_INFO_PATH: RestOk(
-                    b'{"entry":[{"name":"server-info",'
-                    b'"content":{"serverName":"member_two"}}]}'
-                )
-            }
-        )
-        self.assertEqual(resolve_member(rest), "member_two")
-
-    def test_it_falls_back_on_the_empty_string(self):
-        """Specified fallback of section 6.3: emitted empty, the README saying to
-        discriminate by `splunk_server`. An empty column is honest; a plausible and false
-        member name would make two members look like one."""
-        for response in (RestFail(), RestOk(b"{}"), RestOk(b"not json"),
-                         RestOk(b'{"entry":[{"content":{}}]}')):
-            with self.subTest(response=response):
-                rest = FakeAppRest(json_responses={SERVER_INFO_PATH: response})
-                self.assertEqual(resolve_member(rest), "")
-
-    def test_it_reaches_every_row(self):
-        rows = list(
-            builder(member="member_two").rows(
-                make_params(), applications=["my_app"]
-            )
-        )
-        self.assertTrue(rows)
-        for row in rows:
-            self.assertEqual(row["acl_member"], "member_two")
-
-    def test_the_environment_variable_named_by_the_measurement_is_never_read(self):
-        """**Named trap** of HY-4: `SPLUNK_SERVER_NAME` carries the name of the systemd
-        SERVICE, not the `serverName` of the instance. It is exactly the kind of value
-        that is plausible and false, and the whole column exists to compare members."""
-        paths = [
-            os.path.join(BIN_DIR, "acltools", "appacl_inventory.py"),
-            os.path.join(BIN_DIR, "appaclinventory.py"),
-        ]
-        named_somewhere = False
-        for path in paths:
-            with open(path, encoding="utf-8") as handle:
-                source = handle.read()
-            named_somewhere = named_somewhere or "SPLUNK_SERVER_NAME" in source
-            with self.subTest(module=os.path.basename(path)):
-                # Docstrings and comments MAY name it - naming a trap is how it stays
-                # named. The executable part may not, in any construct at all.
-                self.assertNotIn(
-                    "SPLUNK_SERVER_NAME", _executable_source(source),
-                    "the trap is reachable from the code of %s" % path,
-                )
-        self.assertTrue(
-            named_somewhere,
-            "the trap is no longer named anywhere: a control that guards a rule nobody "
-            "states is a control the next contributor deletes",
-        )
-
-
-# --------------------------------------------------------------------------- #
-# Section 6.2 bound 4 - the read perimeter is the list of applications
-# --------------------------------------------------------------------------- #
-
-class TheReadPerimeterIsTheApplicationListTest(unittest.TestCase):
-
-    def test_the_applications_come_from_the_platform(self):
-        rest = FakeAppRest(
-            json_responses={
-                "/services/apps/local": RestOk(
-                    b'{"entry":[{"name":"one"},{"name":"two"}]}'
-                )
-            }
-        )
-        self.assertEqual(list_applications(rest), ["one", "two"])
-
-    def test_a_failed_listing_yields_no_application_rather_than_an_exception(self):
-        rest = FakeAppRest(json_responses={"/services/apps/local": RestFail()})
-        self.assertEqual(list_applications(rest), [])
-
-    def test_only_the_listed_applications_are_read(self):
-        """Bound 4: no `.meta` outside the applications the platform returns is opened -
-        not `etc/system`, not `etc/users`, not a path built from an input datum."""
-        rest = FakeAppRest(
-            json_responses={
-                "/services/apps/local": RestOk(b'{"entry":[{"name":"only_this_one"}]}')
-            }
-        )
-        reader = FakeProvenanceReader(provenance())
-        build = InventoryBuilder(
-            rest=rest, provenance_reader=reader, table=FIXTURE_TABLE
-        )
-        list(build.rows(make_params()))
-        self.assertEqual(reader.reads, ["only_this_one"])
-
-
-# --------------------------------------------------------------------------- #
-# Section 7.2 - the generating character, and where it is declared (HY-1)
-# --------------------------------------------------------------------------- #
-
-class TheGeneratingCharacterIsCarriedByTheSdkTest(unittest.TestCase):
-    """**HY-1, established rather than assumed, and frozen here.**
-
-    The contract left the point open and asked for it to be settled by trial. It is
-    settled from the vendored SDK itself, which is the artifact that decides: under the
-    chunked protocol the generating character is a **read-only configuration setting of
-    the base class**, fixed to `True` and announced for both protocol versions. No key of
-    `commands.conf` carries it, and none was added.
-
-    The precedent the contract cites is the symmetric one: `@Configuration(type=...)` is
-    REFUSED on a `StreamingCommand`, `type` being pinned by the base class there. Both
-    facts have the same shape - the base class decides, and the decorator must not
-    contradict it.
-    """
-
-    def _sdk_source(self):
-        path = os.path.join(
-            BIN_DIR, "lib", "splunklib", "searchcommands", "generating_command.py"
-        )
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
-
-    def test_the_sdk_pins_the_generating_setting(self):
-        source = self._sdk_source()
-        self.assertRegex(
-            source, r"generating\s*=\s*ConfigurationSetting\(\s*readonly=True,\s*value=True"
-        )
-
-    def test_the_setting_is_announced_for_the_chunked_protocol(self):
-        path = os.path.join(BIN_DIR, "lib", "splunklib", "searchcommands", "internals.py")
-        with open(path, encoding="utf-8") as handle:
-            internals = handle.read()
-        self.assertRegex(
-            internals,
-            r'"generating":\s*specification\(\s*type=bool,\s*constraint=None,'
-            r'\s*supporting_protocols=\[1,\s*2\]',
-        )
-
-    def test_commands_conf_declares_no_generating_key(self):
-        """If a key ever proves necessary, it goes into the normative set AND into the
-        test that freezes it - never glossed in on the side (section 7.2)."""
-        conf = read_splunk_conf("default", "commands.conf")
-        for stanza, keys in conf.items():
-            with self.subTest(command=stanza):
-                self.assertNotIn("generating", keys)
 
 
 class RestOk(object):
-    """Minimal successful REST response. Not a mock of the client: the client under test
-    is the real one everywhere else, and what is doubled here is the platform."""
+    """Minimal successful REST response. What is doubled here is the platform."""
 
     ok = True
     status = 200
@@ -894,6 +140,785 @@ class RestFail(object):
     ok = False
     status = 0
     body = b""
+
+
+# --------------------------------------------------------------------------- #
+# Section 7.4 - the field set, its order, and the rule that governs it
+# --------------------------------------------------------------------------- #
+
+class TheDeclaredFieldSetTest(unittest.TestCase):
+    """v3.14 D-33, and the ordering clause v4.5 adds to it.
+
+    The SDK writer fixes the stream header on the keys of the **first** record, so a field
+    absent from it disappears from the whole output with no signal - and the **order** of
+    that record is the order the operator sees. Measured before the revision: the emitted
+    order did not match the declared one, `acl_member` coming out ninth instead of last.
+    """
+
+    def test_there_are_eighteen_of_them(self):
+        self.assertEqual(len(INVENTORY_OUTPUT_FIELDS), 18)
+
+    def test_the_declaration_has_no_duplicate(self):
+        self.assertEqual(
+            len(INVENTORY_OUTPUT_FIELDS), len(set(INVENTORY_OUTPUT_FIELDS))
+        )
+
+    def test_the_first_seven_are_the_input_contract_of_the_write_command(self):
+        """Read from the code of the other command, never recopied: a renamed default
+        would otherwise leave `| appaclinventory | editappacl` silently needing
+        parameters."""
+        names = DEFAULT_APP_FIELD_NAMES
+        self.assertEqual(
+            list(INVENTORY_OUTPUT_FIELDS[:7]),
+            [names.app, names.stanza_kind, names.stanza, names.handler,
+             names.new_perms_read, names.new_perms_write, names.new_sharing],
+        )
+
+    def test_every_row_carries_exactly_the_declared_fields_in_the_declared_order(self):
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(families=("macros",)), applications=["my_app"]
+            )
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertEqual(list(row), list(INVENTORY_OUTPUT_FIELDS))
+
+    def test_the_withdrawn_columns_are_gone(self):
+        """Six columns removed in v4.5. A consumer still reading them must break loudly
+        rather than read an empty cell for ever."""
+        for gone in ("acl_write_path", "acl_present_local", "acl_present_default",
+                     "acl_objects_total", "acl_objects_inheriting",
+                     "acl_provenance_error", "acl_provenance", "acl_frozen_stanzas",
+                     "acl_family_headers", "acl_governable"):
+            with self.subTest(column=gone):
+                self.assertNotIn(gone, INVENTORY_OUTPUT_FIELDS)
+
+
+class NoColumnIsEmptyWithoutAnotherSayingWhyTest(unittest.TestCase):
+    """**The structural rule of v4.5**, and the one that replaces four semantics of the
+    empty cell.
+
+    The fixture below covers the four measured causes side by side: a family outside the
+    table, a disabled application, an unreadable metadata file, and a stanza that simply is
+    not there. For each row, either every column is filled, or a status column names the
+    reason.
+    """
+
+    #: The columns allowed to be empty, and the column that must then explain each.
+    #:
+    #: **Two cells the contract's rule does not cover, and both are reported rather than
+    #: papered over** (see the run report):
+    #:
+    #: - `acl_handler` on an **application** row. The rule names
+    #:   `acl_effective_status = no_handler` as its explanation, which is right on a family
+    #:   row and false on an application row: there the read succeeds and the handler is
+    #:   empty because a `[]` URI is determined by the application alone. The column that
+    #:   says so is `acl_stanza_kind`, and it is always filled;
+    #: - `acl_member`. The rule lists it among the columns "always filled", while section
+    #:   6.3 specifies an **empty** value as the measured fallback, with `splunk_server` as
+    #:   the documented remedy. It is a **run-level** fact, identical on every row, not a
+    #:   per-row mystery - so it is excluded here and explained in the README.
+    EXPLAINED = {
+        "eai:acl.perms.read": "acl_effective_status",
+        "eai:acl.perms.write": "acl_effective_status",
+        "eai:acl.sharing": "acl_effective_status",
+        "acl_file_perms_read": "acl_stanza_layer",
+        "acl_file_perms_write": "acl_stanza_layer",
+        "acl_file_export": "acl_stanza_layer",
+    }
+
+    #: Excluded from the "always filled" sweep, with the reason above.
+    RUN_LEVEL = ("acl_member",)
+
+    def _rows(self):
+        rest = FakeAppRest(
+            get_responses={
+                "/servicesNS/nobody/my_app/data/ui/views/_acl": RestFail(),
+            },
+            default_get=RestOk(app_acl_body()),
+        )
+        prov = provenance(local=FROZEN_META + touched_stanza("unknown_family/x"))
+        return list(
+            builder(rest=rest, prov=prov, disabled=lambda app: False).rows(
+                make_params(families=("macros",)), applications=["my_app"]
+            )
+        )
+
+    def test_every_empty_cell_is_explained_by_another_column(self):
+        rows = self._rows()
+        self.assertTrue(rows)
+        for row in rows:
+            for column, explainer in self.EXPLAINED.items():
+                if str(row[column]) != "":
+                    continue
+                with self.subTest(stanza=row["acl_stanza"], column=column):
+                    self.assertNotEqual(
+                        str(row[explainer]), "",
+                        "%s is empty and %s says nothing" % (column, explainer),
+                    )
+                    if explainer == "acl_effective_status":
+                        self.assertNotEqual(row[explainer], EFFECTIVE_OK)
+                    else:
+                        self.assertEqual(row[explainer], LAYER_NONE)
+
+    def test_an_empty_handler_is_always_explained_by_one_column_or_the_other(self):
+        """On a family row it is `acl_effective_status = no_handler`; on an application
+        row it is `acl_stanza_kind = app_default`, the `[]` URI needing no handler."""
+        for row in self._rows():
+            if str(row["acl_handler"]) != "":
+                continue
+            with self.subTest(stanza=row["acl_stanza"]):
+                if row["acl_stanza_kind"] == STANZA_KIND_APP:
+                    self.assertEqual(row["acl_effective_status"], EFFECTIVE_OK)
+                else:
+                    self.assertEqual(
+                        row["acl_effective_status"], EFFECTIVE_NO_HANDLER
+                    )
+
+    def test_the_columns_outside_that_map_are_never_empty(self):
+        always = [
+            f for f in INVENTORY_OUTPUT_FIELDS
+            if f not in self.EXPLAINED and f not in self.RUN_LEVEL
+            and f != "acl_handler"
+        ]
+        for row in self._rows():
+            for column in always:
+                with self.subTest(stanza=row["acl_stanza"], column=column):
+                    self.assertNotEqual(str(row[column]), "")
+
+    def test_the_member_is_filled_when_the_platform_gives_it(self):
+        """The exclusion above is about the fallback, not a licence: given a member name,
+        every row carries it."""
+        rows = list(
+            builder(member="member_two").rows(make_params(), applications=["my_app"])
+        )
+        for row in rows:
+            self.assertEqual(row["acl_member"], "member_two")
+
+    def test_a_family_outside_the_table_says_no_handler(self):
+        row = builder().family_row("my_app", "unknown_family", provenance())
+        self.assertEqual(row["acl_handler"], "")
+        self.assertEqual(row["acl_effective_status"], EFFECTIVE_NO_HANDLER)
+        self.assertEqual(row["eai:acl.perms.read"], "")
+
+    def test_a_failed_read_says_unreadable(self):
+        rest = FakeAppRest(default_get=RestFail())
+        row = builder(rest=rest, disabled=lambda app: False).app_default_row(
+            "my_app", provenance(local=GOVERNED_META)
+        )
+        self.assertEqual(row["acl_effective_status"], EFFECTIVE_UNREADABLE)
+        self.assertEqual(row["eai:acl.sharing"], "")
+        self.assertEqual(row["acl_file_perms_read"], "power")
+
+    def test_a_disabled_application_says_so_rather_than_unreadable(self):
+        """Three causes were indistinguishable on 26 rows out of 124. The most specific
+        one wins, and it costs one memoized call, only on a read that already failed."""
+        rest = FakeAppRest(default_get=RestFail())
+        row = builder(rest=rest, disabled=lambda app: True).app_default_row(
+            "my_app", provenance(local=GOVERNED_META)
+        )
+        self.assertEqual(row["acl_effective_status"], EFFECTIVE_APP_DISABLED)
+
+    def test_a_successful_read_says_ok(self):
+        row = builder().app_default_row("my_app", provenance(local=GOVERNED_META))
+        self.assertEqual(row["acl_effective_status"], EFFECTIVE_OK)
+
+
+class TheClosedDomainsTest(unittest.TestCase):
+    """Six columns carry a closed domain, and every emitted value belongs to it.
+
+    The domains are **derived from the core**, never recopied here: a value added to the
+    code and not to the contract fails on the contract, not on a duplicate list.
+    """
+
+    DOMAINS = {
+        "acl_stanza_kind": (STANZA_KIND_APP, STANZA_KIND_FAMILY),
+        "acl_row_reason": (ROW_REASON_APP, ROW_REASON_STANZA, ROW_REASON_OBJECTS,
+                           ROW_REASON_REQUESTED),
+        "acl_effective_status": (EFFECTIVE_OK, EFFECTIVE_NO_HANDLER,
+                                 EFFECTIVE_APP_DISABLED, EFFECTIVE_UNREADABLE),
+        "acl_stanza_layer": (LAYER_LOCAL, LAYER_DEFAULT, LAYER_NONE),
+        "acl_reach": (REACH_ALL, REACH_PARTIAL, REACH_UNKNOWN),
+    }
+
+    def test_every_emitted_value_belongs_to_its_domain(self):
+        rest = FakeAppRest(
+            get_responses={"/servicesNS/nobody/my_app/data/ui/views/_acl": RestFail()},
+            default_get=RestOk(app_acl_body()),
+        )
+        rows = list(
+            builder(rest=rest, prov=provenance(local=FROZEN_META, default=GOVERNED_META),
+                    disabled=lambda app: False).rows(
+                make_params(families=("macros",)), applications=["my_app"]
+            )
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            for column, domain in self.DOMAINS.items():
+                with self.subTest(stanza=row["acl_stanza"], column=column):
+                    self.assertIn(row[column], domain)
+
+    def test_the_file_read_domain_admits_its_three_shapes(self):
+        cases = (
+            (provenance(local=GOVERNED_META), FILE_READ_OK),
+            (provenance(local="[]\nthis line has no equals sign\n"),
+             FILE_READ_PARTIAL_PREFIX + "1"),
+            (provenance(local_error="PermissionError"), FILE_READ_UNREADABLE),
+        )
+        for prov, expected in cases:
+            with self.subTest(expected=expected):
+                row = builder().app_default_row("my_app", prov)
+                self.assertEqual(row["acl_file_read"], expected)
+
+
+# --------------------------------------------------------------------------- #
+# Section 7.4 - the file level, both layers
+# --------------------------------------------------------------------------- #
+
+class TheFileColumnsReadBothLayersTest(unittest.TestCase):
+    """**The measured defect of the v4.4 output**: `acl_file_*` read `local.meta` alone -
+    zero non-empty value on 124 rows, while 97 of them carried a filled stanza in
+    `default.meta`. It was never "the stanza does not exist"; it was "we read one layer out
+    of two".
+    """
+
+    def test_a_stanza_of_the_default_layer_is_quoted(self):
+        row = builder().family_row("my_app", "views", provenance(default=GOVERNED_META))
+        self.assertEqual(row["acl_stanza_layer"], LAYER_DEFAULT)
+        self.assertEqual(row["acl_file_perms_read"], "power")
+        self.assertEqual(row["acl_file_perms_write"], "admin")
+        self.assertEqual(row["acl_file_export"], "none")
+
+    def test_the_local_layer_wins_when_both_carry_it(self):
+        """At equal specificity the local layer is the one splunkd applies (HY-2), so it
+        is the one the literal columns quote."""
+        local = "[views]\naccess = read : [ local_role ], write : [ admin ]\n"
+        row = builder().family_row(
+            "my_app", "views", provenance(local=local, default=GOVERNED_META)
+        )
+        self.assertEqual(row["acl_stanza_layer"], LAYER_LOCAL)
+        self.assertEqual(row["acl_file_perms_read"], "local_role")
+
+    def test_an_absent_stanza_says_none_and_leaves_the_literals_empty(self):
+        row = builder().family_row("my_app", "views", provenance())
+        self.assertEqual(row["acl_stanza_layer"], LAYER_NONE)
+        self.assertEqual(row["acl_file_perms_read"], "")
+        self.assertEqual(row["acl_file_export"], "")
+
+    def test_the_layer_column_never_claims_to_explain_the_effective_value(self):
+        """The promise was **withdrawn, not repaired**. A `[commands]` stanza carrying only
+        `export` lives in `default.meta` while its permissions come from `[]`: saying
+        `default` about the layer is true, saying it about the value would not be."""
+        row = builder().family_row(
+            "my_app", "views", provenance(default=scoped_stanza("views"))
+        )
+        self.assertEqual(row["acl_stanza_layer"], LAYER_DEFAULT)
+        self.assertEqual(row["acl_file_perms_read"], "")
+        self.assertEqual(row["acl_file_export"], "system")
+
+
+# --------------------------------------------------------------------------- #
+# Section 7.5 - why a row is there
+# --------------------------------------------------------------------------- #
+
+class TheRowReasonTest(unittest.TestCase):
+    """**The column that closes the puzzle that opened the revision.**
+
+    A row emitted because of an object stanza described an **absent** header on three
+    columns and named nowhere the stanza that had triggered it.
+    """
+
+    def test_the_application_row_says_app_row(self):
+        row = builder().app_default_row("my_app", provenance())
+        self.assertEqual(row["acl_row_reason"], ROW_REASON_APP)
+
+    def test_a_header_says_stanza_exists(self):
+        self.assertEqual(
+            dict(families_to_emit(provenance(local=GOVERNED_META), ())),
+            {"views": ROW_REASON_STANZA},
+        )
+
+    def test_an_object_stanza_alone_says_objects_exist(self):
+        """The measured edge case: two `[macros/...]` stanzas carrying only `version` and
+        `modtime` are enough to emit the family, and the row then says exactly that."""
+        prov = provenance(
+            local=touched_stanza("macros/one") + touched_stanza("macros/two")
+        )
+        self.assertEqual(
+            dict(families_to_emit(prov, ())), {"macros": ROW_REASON_OBJECTS}
+        )
+        row = builder().family_row("my_app", "macros", prov, ROW_REASON_OBJECTS)
+        self.assertEqual(row["acl_row_reason"], ROW_REASON_OBJECTS)
+        self.assertEqual(row["acl_objects_with_own_perms"], 0)
+        self.assertEqual(row["acl_reach"], REACH_ALL)
+
+    def test_a_named_family_says_requested(self):
+        self.assertEqual(
+            dict(families_to_emit(provenance(), ("macros",))),
+            {"macros": ROW_REASON_REQUESTED},
+        )
+
+    def test_the_first_condition_met_names_the_reason(self):
+        """A family with both a header and object stanzas is there for the header: the
+        conditions are ordered, and the reason names the first one."""
+        prov = provenance(local=GOVERNED_META + touched_stanza("views/x"))
+        self.assertEqual(dict(families_to_emit(prov, ("views",)))["views"],
+                         ROW_REASON_STANZA)
+
+    def test_emission_is_presence_and_not_freezing(self):
+        """Section 7.5 condition 2, in its own words. Restricting it to the freeze
+        predicate would hide families that do exist - emission and governance answer two
+        different questions."""
+        prov = provenance(local=touched_stanza("views/edited"))
+        self.assertIn("views", dict(families_to_emit(prov, ())))
+
+    def test_every_emitted_row_carries_a_reason(self):
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(families=("macros",)), applications=["my_app"]
+            )
+        )
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertNotEqual(row["acl_row_reason"], "")
+
+    def test_the_order_is_stable(self):
+        """An inventory is compared with the one from another member (section 6.3): two
+        runs ordering their rows by whatever a set returned would diverge for nothing."""
+        emitted = [f for f, _r in families_to_emit(
+            provenance(local=FROZEN_META), ("macros", "nav"))]
+        self.assertEqual(emitted, sorted(emitted))
+
+
+# --------------------------------------------------------------------------- #
+# Section 7.4 - the verdict
+# --------------------------------------------------------------------------- #
+
+class TheReachVerdictTest(unittest.TestCase):
+    """`acl_reach` is a **derivation**, recomputable from the columns beside it."""
+
+    def test_a_family_nothing_escapes_is_reached_in_full(self):
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 0), REACH_ALL)
+
+    def test_one_object_with_its_own_permissions_makes_it_partial(self):
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 1, 0), REACH_PARTIAL)
+
+    def test_a_family_header_takes_a_family_out_of_the_reach_of_the_default(self):
+        self.assertEqual(reach_of(STANZA_KIND_APP, FILE_READ_OK, 0, 1), REACH_PARTIAL)
+
+    def test_a_family_header_does_not_affect_a_family_row(self):
+        """The count is an application fact, emitted everywhere; it only enters the
+        verdict of the application row."""
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 3), REACH_ALL)
+
+    def test_an_unreadable_file_yields_unknown_on_both_kinds(self):
+        for kind in (STANZA_KIND_APP, STANZA_KIND_FAMILY):
+            for status in (FILE_READ_UNREADABLE, FILE_READ_PARTIAL_PREFIX + "3"):
+                with self.subTest(kind=kind, status=status):
+                    self.assertEqual(reach_of(kind, status, 0, 0), REACH_UNKNOWN)
+
+    def test_the_domain_is_closed(self):
+        values = set()
+        for kind in (STANZA_KIND_APP, STANZA_KIND_FAMILY):
+            for status in (FILE_READ_OK, FILE_READ_UNREADABLE):
+                for objects in (0, 3):
+                    for families in (0, 3):
+                        values.add(reach_of(kind, status, objects, families))
+        self.assertEqual(values, {REACH_ALL, REACH_PARTIAL, REACH_UNKNOWN})
+
+    def test_the_verdict_recomputes_from_the_row(self):
+        """The property that matters is not the value but its recomputability."""
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(), applications=["my_app"]
+            )
+        )
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertEqual(
+                    row["acl_reach"],
+                    reach_of(row["acl_stanza_kind"], row["acl_file_read"],
+                             row["acl_objects_with_own_perms"],
+                             row["acl_families_with_own_perms"]),
+                )
+
+
+class TheDecisionCountersTest(unittest.TestCase):
+
+    def test_the_application_row_counts_the_whole_application(self):
+        row = builder().app_default_row("my_app", provenance(local=FROZEN_META))
+        self.assertEqual(row["acl_objects_with_own_perms"], 3)
+        self.assertEqual(row["acl_families_with_own_perms"], 1)
+        self.assertEqual(row["acl_reach"], REACH_PARTIAL)
+
+    def test_a_family_row_counts_its_own_family(self):
+        prov = provenance(local=FROZEN_META)
+        self.assertEqual(
+            builder().family_row("my_app", "views", prov)["acl_objects_with_own_perms"],
+            2,
+        )
+        self.assertEqual(
+            builder().family_row(
+                "my_app", "savedsearches", prov)["acl_objects_with_own_perms"],
+            1,
+        )
+
+    def test_the_family_count_is_emitted_on_every_row_of_the_application(self):
+        """It carries an **application** fact. Blanking it on family rows created one more
+        semantics of emptiness for nothing."""
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(), applications=["my_app"]
+            )
+        )
+        self.assertGreater(len(rows), 1)
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertEqual(row["acl_families_with_own_perms"], 1)
+
+    def test_only_what_really_freezes_is_counted(self):
+        """A stanza carrying only `owner`, `version` and `modtime` - what splunkd writes
+        for every object it touches - freezes nothing."""
+        prov = provenance(
+            local=touched_stanza("views/a") + touched_stanza("views/b")
+                  + frozen_stanza("views/c")
+        )
+        row = builder().family_row("my_app", "views", prov)
+        self.assertEqual(row["acl_objects_with_own_perms"], 1)
+
+
+# --------------------------------------------------------------------------- #
+# Sections 7.3, 6.2, 6.3 - unchanged ground, re-exercised
+# --------------------------------------------------------------------------- #
+
+class TheParametersTest(unittest.TestCase):
+    """Two parameters, and the allow list that guards them."""
+
+    def test_the_application_filter_defaults_to_everything(self):
+        for raw in (None, "", "   ", ",,,"):
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_app_filter(raw), ("*",))
+
+    def test_the_family_list_is_empty_by_default(self):
+        for raw in (None, "", " , "):
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_family_list(raw), ())
+
+    def test_a_regex_metacharacter_cannot_reach_the_matcher(self):
+        self.assertEqual(sanitize_filter("a|b;c`d$e"), "abcde")
+        self.assertEqual(parse_app_filter(".*"), ("*",))
+        self.assertFalse(app_matches("anything", parse_app_filter("a.c")))
+
+    def test_the_star_is_the_only_metacharacter(self):
+        for name, pattern, expected in (
+            ("my_app", "*", True), ("my_app", "my_*", True), ("my_app", "*_app", True),
+            ("my_long_app", "my_*_app", True), ("my_app", "*x*", False),
+            ("my_app", "other", False),
+        ):
+            with self.subTest(name=name, pattern=pattern):
+                self.assertEqual(app_matches(name, (pattern,)), expected)
+
+    def test_there_are_exactly_two_parameters(self):
+        """`count_objects` was withdrawn with the two columns it fed: +790 REST calls and
+        a factor 6,4 to 7,3 on 41 applications, for a lower bound that came out empty by
+        default."""
+        params = validate_inventory_params()
+        self.assertEqual(
+            sorted(params.__dataclass_fields__), ["apps", "families"]
+        )
+
+    def test_no_parameter_of_this_command_can_be_fatally_invalid(self):
+        """The honest shape for a command that only reads: both filters pass through the
+        allow list, so nothing rejects the run."""
+        params = validate_inventory_params(apps="a|b", families="x;y")
+        self.assertEqual(params.apps, ("ab",))
+        self.assertEqual(params.families, ("xy",))
+
+    def test_the_capability_is_the_one_the_contract_names(self):
+        self.assertEqual(REQUIRED_INVENTORY_CAPABILITY, "list_app_acl")
+
+
+class TheLiteralValuesTest(unittest.TestCase):
+    """`access` carries both permissions on ONE line, so the two columns come from
+    splitting it. Every case below is a shape the total reader must survive."""
+
+    def test_the_measured_shape_is_split_into_two_literals(self):
+        self.assertEqual(
+            split_access({"access": "read : [ power ], write : [ admin ]"}),
+            ("power", "admin"),
+        )
+
+    def test_several_roles_keep_their_literal_form(self):
+        self.assertEqual(
+            split_access({"access": "read : [ power, user ], write : [ admin ]"}),
+            ("power, user", "admin"),
+        )
+
+    def test_an_empty_permission_reads_back_as_the_empty_string(self):
+        self.assertEqual(
+            split_access({"access": "read : [  ], write : [ admin ]"}), ("", "admin")
+        )
+
+    def test_the_reader_survives_every_malformed_shape(self):
+        for raw in (None, {}, {"access": ""}, {"access": "garbage"},
+                    {"access": "read : [ power"}, {"access": "read power ]"}):
+            with self.subTest(raw=raw):
+                result = split_access(raw)
+                self.assertEqual(len(result), 2)
+                self.assertTrue(all(isinstance(part, str) for part in result))
+
+    def test_the_export_key_is_read_literally(self):
+        self.assertEqual(export_of({"export": "system"}), "system")
+        self.assertEqual(export_of(None), "")
+
+
+class TheOutputCarriesCountsAndNeverObjectNamesTest(unittest.TestCase):
+    """Bound 3 of section 6.2, and **the reason the capability exists**.
+
+    Reading the file short-circuits the capability filtering REST applies: a caller without
+    `admin_all_objects` would otherwise see object names the API refuses them.
+    """
+
+    OBJECT_NAMES = ("dashboard_one", "dashboard_two", "nightly_report")
+
+    def test_no_emitted_value_contains_an_object_name(self):
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(), applications=["my_app"]
+            )
+        )
+        self.assertTrue(rows)
+        rendered = " ".join("%s" % v for row in rows for v in row.values())
+        for name in self.OBJECT_NAMES:
+            with self.subTest(object=name):
+                self.assertNotIn(name, rendered)
+
+    def test_the_frozen_objects_are_nonetheless_counted(self):
+        """The negative control: without it, "no name leaked" would be true by vacuity."""
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(), applications=["my_app"]
+            )
+        )
+        self.assertEqual(
+            sum(int(row["acl_objects_with_own_perms"] or 0) for row in rows), 6
+        )
+
+
+class TheExecutionMemberTest(unittest.TestCase):
+    """HY-4: the `searchinfo` branch is measured negative, the cheap REST call positive."""
+
+    def test_it_is_read_from_the_cheap_rest_call(self):
+        rest = FakeAppRest(json_responses={SERVER_INFO_PATH: RestOk(
+            b'{"entry":[{"name":"server-info","content":{"serverName":"member_two"}}]}')})
+        self.assertEqual(resolve_member(rest), "member_two")
+
+    def test_it_falls_back_on_the_empty_string(self):
+        for response in (RestFail(), RestOk(b"{}"), RestOk(b"not json"),
+                         RestOk(b'{"entry":[{"content":{}}]}')):
+            with self.subTest(response=response):
+                rest = FakeAppRest(json_responses={SERVER_INFO_PATH: response})
+                self.assertEqual(resolve_member(rest), "")
+
+    def test_it_reaches_every_row(self):
+        rows = list(
+            builder(member="member_two").rows(make_params(), applications=["my_app"])
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["acl_member"], "member_two")
+
+    def test_the_environment_variable_named_by_the_measurement_is_never_read(self):
+        """**Named trap** of HY-4: `SPLUNK_SERVER_NAME` carries the name of the systemd
+        service, not the `serverName` of the instance."""
+        paths = [
+            os.path.join(BIN_DIR, "acltools", "appacl_inventory.py"),
+            os.path.join(BIN_DIR, "appaclinventory.py"),
+        ]
+        named_somewhere = False
+        for path in paths:
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+            named_somewhere = named_somewhere or "SPLUNK_SERVER_NAME" in source
+            with self.subTest(module=os.path.basename(path)):
+                self.assertNotIn("SPLUNK_SERVER_NAME", _executable_source(source))
+        self.assertTrue(named_somewhere, "the trap is no longer named anywhere")
+
+
+class TheReadPerimeterIsTheApplicationListTest(unittest.TestCase):
+
+    def test_the_applications_come_from_the_platform(self):
+        rest = FakeAppRest(json_responses={"/services/apps/local": RestOk(
+            b'{"entry":[{"name":"one"},{"name":"two"}]}')})
+        self.assertEqual(list_applications(rest), ["one", "two"])
+
+    def test_a_failed_listing_yields_no_application(self):
+        rest = FakeAppRest(json_responses={"/services/apps/local": RestFail()})
+        self.assertEqual(list_applications(rest), [])
+
+    def test_only_the_listed_applications_are_read(self):
+        """Bound 4: no `.meta` outside the applications the platform returns is opened."""
+        rest = FakeAppRest(json_responses={"/services/apps/local": RestOk(
+            b'{"entry":[{"name":"only_this_one"}]}')})
+        reader = FakeProvenanceReader(provenance())
+        build = InventoryBuilder(
+            rest=rest, provenance_reader=reader, table=FIXTURE_TABLE
+        )
+        list(build.rows(make_params()))
+        self.assertEqual(reader.reads, ["only_this_one"])
+
+    def test_the_applications_come_out_sorted(self):
+        rows = list(builder().rows(make_params(), applications=["zeta", "alpha", "mu"]))
+        self.assertEqual([r["eai:acl.app"] for r in rows], ["alpha", "mu", "zeta"])
+
+    def test_the_filter_selects_the_applications(self):
+        rows = list(builder().rows(
+            make_params(apps=("keep_*",)),
+            applications=["keep_one", "keep_two", "drop_me"]))
+        self.assertEqual([r["eai:acl.app"] for r in rows], ["keep_one", "keep_two"])
+
+
+class TheApplicationStanzaIsWrittenAsItIsWrittenTest(unittest.TestCase):
+    """`[]` rather than an empty cell. The empty string was accurate and unreadable: a cell
+    nobody can see is a cell an operator reads as a bug."""
+
+    def test_the_application_row_shows_the_bracket_pair(self):
+        row = builder().app_default_row("my_app", provenance())
+        self.assertEqual(row["acl_stanza"], APP_STANZA_LABEL)
+        self.assertEqual(row["acl_stanza"], "[]")
+
+    def test_a_family_row_shows_the_family_name(self):
+        row = builder().family_row("my_app", "views", provenance())
+        self.assertEqual(row["acl_stanza"], "views")
+
+    def test_the_kind_column_remains_the_discriminant(self):
+        """The write command reads `acl_stanza_kind`, never the stanza name alone."""
+        row = builder().app_default_row("my_app", provenance())
+        self.assertEqual(row["acl_stanza_kind"], STANZA_KIND_APP)
+
+
+# --------------------------------------------------------------------------- #
+# Section 7.2 - what the command declares
+# --------------------------------------------------------------------------- #
+
+class TheGeneratingCharacterIsCarriedByTheSdkTest(unittest.TestCase):
+    """HY-1, established from the vendored SDK and frozen from both ends."""
+
+    def _sdk_source(self, name):
+        path = os.path.join(BIN_DIR, "lib", "splunklib", "searchcommands", name)
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_sdk_pins_the_generating_setting(self):
+        self.assertRegex(
+            self._sdk_source("generating_command.py"),
+            r"generating\s*=\s*ConfigurationSetting\(\s*readonly=True,\s*value=True",
+        )
+
+    def test_the_sdk_leaves_the_type_setting_modifiable(self):
+        """`generating` says the command **opens** the pipeline; `type` says **which**. The
+        two are independent, and only the second is ours to set."""
+        source = self._sdk_source("generating_command.py")
+        marker = source.index("type = ConfigurationSetting(")
+        self.assertNotIn("readonly=True", source[marker:marker + 200])
+
+    def test_commands_conf_declares_no_generating_key(self):
+        conf = read_splunk_conf("default", "commands.conf")
+        for stanza, keys in conf.items():
+            with self.subTest(command=stanza):
+                self.assertNotIn("generating", keys)
+
+
+class TheReadmeFieldTableIsADeliverableTest(unittest.TestCase):
+    """**Deliverable 9, sixteenth statement** - and it is exigible, not decorative.
+
+    The contract required a document usable without it, and did not hold that promise: the
+    first operator to open the command in the interface reported that a good part of the
+    columns were obscure and that the documentation said nothing about the new ones. So the
+    table is now a **deliverable**, and a deliverable that nothing checks drifts on the
+    first rename.
+
+    What is checked here is what the contract asks for: **every** column present, grouped by
+    the four levels, each with the question it answers, and the emission rule stated in the
+    words of section 7.5 - **presence, not freezing**.
+
+    What is not checked, and cannot be: whether the prose is *good*. That is the reading
+    trial of integration scenario 14bis, which is a person, not an assertion.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from . import REPO_ROOT
+
+        with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as handle:
+            cls.readme = handle.read()
+        start = cls.readme.index("## What the inventory gives you, column by column")
+        cls.section = cls.readme[start:cls.readme.index("\n## ", start + 10)]
+
+    def test_the_section_exists_and_is_not_a_stub(self):
+        self.assertGreater(len(self.section.splitlines()), 40)
+
+    def test_every_column_appears_in_the_table(self):
+        """A column the operator receives and the README never names is a column they have
+        to guess."""
+        missing = [
+            field for field in INVENTORY_OUTPUT_FIELDS
+            if "`%s`" % field not in self.section
+        ]
+        self.assertEqual(
+            [], missing,
+            "column(s) emitted by the command and absent from the README table: %s"
+            % missing,
+        )
+
+    def test_no_withdrawn_column_lingers_in_the_table(self):
+        """The other direction. A README that still describes a column nobody emits sends
+        the operator looking for a cell that is not there."""
+        for gone in ("acl_write_path", "acl_present_local", "acl_present_default",
+                     "acl_objects_total", "acl_objects_inheriting", "acl_provenance",
+                     "acl_governable", "acl_frozen_stanzas", "acl_family_headers",
+                     "count_objects"):
+            with self.subTest(column=gone):
+                self.assertNotIn("`%s`" % gone, self.section)
+
+    def test_the_four_levels_are_named_as_headings(self):
+        """The levels are the reading key, not a classification for the archives: a table
+        of eighteen columns with nothing separating them is what produced the two most
+        serious findings."""
+        for level in ("Identification", "Platform", "File", "Decision"):
+            with self.subTest(level=level):
+                self.assertIn("### %s" % level, self.section)
+
+    def test_the_closed_domains_are_published(self):
+        """An operator filtering on a value needs to know which values exist."""
+        for value in (ROW_REASON_APP, ROW_REASON_STANZA, ROW_REASON_OBJECTS,
+                      ROW_REASON_REQUESTED, EFFECTIVE_OK, EFFECTIVE_NO_HANDLER,
+                      EFFECTIVE_APP_DISABLED, EFFECTIVE_UNREADABLE, LAYER_LOCAL,
+                      LAYER_DEFAULT, LAYER_NONE, REACH_ALL, REACH_PARTIAL,
+                      REACH_UNKNOWN, FILE_READ_OK, FILE_READ_UNREADABLE):
+            with self.subTest(value=value):
+                self.assertIn("`%s`" % value, self.section)
+
+    def test_the_rule_about_empty_cells_is_stated(self):
+        """It is the rule the whole table is built on, so it is the first thing to read."""
+        self.assertIn("No column is ever empty without another saying why", self.section)
+
+    def test_the_emission_rule_is_stated_as_presence_and_not_freezing(self):
+        """*Relevé* by the contract: the class docstring of the deliverable announced a row
+        per family carrying a header or a **frozen** object, which section 7.5 contradicts
+        explicitly. The README must not repeat the mistake."""
+        flat = " ".join(self.section.lower().split())
+        self.assertIn("presence, not freezing", flat)
+        self.assertIn("whether or not it freezes anything", flat)
+
+    def test_the_layer_column_does_not_promise_the_effective_value(self):
+        """The promise was withdrawn, not repaired. A README that reinstated it would be
+        the contradiction the revision removed."""
+        flat = " ".join(self.section.split())
+        self.assertIn("It does not say where the effective permissions come from",
+                      flat)
 
 
 if __name__ == "__main__":                                       # pragma: no cover

@@ -261,21 +261,20 @@ class AppParams:
 
 @dataclass(frozen=True)
 class AppInventoryParams:
-    """Validated parameters of `appaclinventory` (section 7.3).
+    """Validated parameters of `appaclinventory` (v4.5 section 7.3).
 
-    Three, and three only. Every column of the output either carries the governability
-    decision or feeds `editappacl`, so there is nothing else to switch on or off - and
-    `count_objects` is the one thing that is optional, because it is the one thing that
-    costs a REST call per (application, family) where the rest is read from a single
-    file.
+    **Two, and that is all.** `count_objects` was withdrawn with the two columns it fed:
+    measured at +790 REST calls and a factor 6,4 to 7,3 on 41 applications, for a lower
+    bound with three reservations that came out empty by default. Every column that carries
+    the governance decision is read from the two metadata files of the application, at no
+    call at all.
     """
 
     #: Patterns retained after the allow-list filter. Never empty: an absent parameter
     #: yields `("*",)`, which is the documented default.
     apps: Tuple[str, ...] = ("*",)
-    #: Families to emit unconditionally, even with no stanza and no frozen object.
+    #: Families to emit unconditionally, even with no stanza and no object stanza.
     families: Tuple[str, ...] = ()
-    count_objects: bool = False
 
 
 @dataclass(frozen=True)

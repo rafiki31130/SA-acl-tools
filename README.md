@@ -36,8 +36,8 @@ and a run monitoring view. Driving use case: decommissioning legacy roles, by
 >    only: rewrite them one by one with `editacl`, or accept that they stay out of reach
 >    of the generic.
 > 4. **`appaclinventory` is the instrument of the decision.** Run it **before** either
->    write tool: `acl_frozen_stanzas` and `acl_governable` say, per application and per
->    family, how much generic governance is still possible.
+>    write tool: `acl_objects_with_own_perms` and `acl_reach` say, per application and
+>    per family, how much generic governance is still possible.
 >
 > Setting **empty** permissions is not a removal: a stanza with empty permissions leaves
 > the object **unreachable**; a removed stanza makes it **inherit again**. Two opposite
@@ -298,8 +298,8 @@ so `default.meta` and `local.meta` are read as **one set of stanzas**.
 
 ```mermaid
 flowchart LR
-  INV["| appaclinventory<br/>reads REST AND the file"] --> DEC{"acl_governable"}
-  DEC -- "yes" --> GOV["govern the generic<br/>| editappacl"]
+  INV["| appaclinventory<br/>reads REST AND the file"] --> DEC{"acl_reach"}
+  DEC -- "all" --> GOV["govern the generic<br/>| editappacl"]
   DEC -- "partial" --> MIX["the frozen objects will not move:<br/>editacl one by one, or leave them"]
   DEC -- "unknown" --> READ["the metadata could not be read:<br/>no conclusion is emitted"]
   GOV --> WAL[["editappacl_journal_&lt;sid&gt;.log"]]
@@ -330,80 +330,128 @@ macro names, which resolve differently; they never appear in a command name here
 ## The inventory command
 
 ```
-| appaclinventory [apps=<string>] [families=<string>] [count_objects=<bool>]
+| appaclinventory [apps=<string>] [families=<string>]
 ```
 
 | Parameter | Default | Role |
 |---|---|---|
 | `apps` | `*` | Comma-separated applications, `*` patterns allowed. Characters outside `A-Za-z0-9_,*-` are dropped |
 | `families` | *(none)* | Families to emit **even** when they carry neither a stanza nor a frozen object |
-| `count_objects` | `false` | Enumerate the objects through REST. One REST call per application **and** family |
 
-**Which rows come out.** One `app_default` row per application, unconditionally, plus one
-`family_default` row per family that meets **at least one** of three conditions: its
-header exists in either metadata layer, at least one object of that family carries its
-own stanza, or the family is named in `families`. A family meeting none of them is not
-ungovernable - it is simply neither governed nor frozen today, and `families=<name>`
-answers *what would happen if I governed it?*
+## What the inventory gives you, column by column
 
-| Field | Content | Read from |
+**Read this table instead of the code.** Every column below answers one question, and the
+table says which. Eighteen columns, in the order they come out.
+
+**Four levels, and no column mixes two.** That is what makes the table readable: some
+columns say what the **file** carries, some what the **platform** applies, some what
+**stands between** the two, and some identify the row. Knowing which level you are looking
+at is most of the work.
+
+> **No column is ever empty without another saying why.** If the three `eai:acl.*` cells are
+> blank, `acl_effective_status` says what stopped the read. If the three `acl_file_*` cells
+> are blank, `acl_stanza_layer` says `none` - the stanza is simply not in either file. Every
+> other column is always filled, `acl_member` aside, which is empty only when the platform
+> would not give its own name.
+
+### Identification - which stanza is this row about, and why is it here
+
+| Column | The question it answers | Values |
 |---|---|---|
-| `eai:acl.app` | Application | REST |
-| `acl_stanza_kind` | `app_default` or `family_default` | derived |
-| `acl_stanza` | Literal stanza name. **Empty is legitimate**: it is the name of `[]` | derived |
-| `acl_handler` | Handler path of the family, empty for `app_default` | family table |
-| `acl_write_path` | `mapped` or `unmapped` - is there a known write path for this family | family table |
-| `eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing` | **Effective** permissions and scope | REST |
-| `acl_present_local`, `acl_present_default` | Does the stanza exist in that layer | the file |
-| `acl_file_perms_read`, `acl_file_perms_write`, `acl_file_export` | **Literal** values of the stanza in `local.meta`, empty when absent | the file |
-| `acl_frozen_stanzas` | Number of objects whose own stanza **carries the permissions**. Of the family on a family row, of the **whole application** on an `app_default` row | the file |
-| `acl_family_headers` | `app_default` row only: number of family headers that **carry the permissions** | the file |
-| `acl_objects_total`, `acl_objects_inheriting` | Object population and the part of it still inheriting. Empty unless `count_objects=true` | REST + the file |
-| `acl_governable` | `yes`, `partial` or `unknown` | derived |
-| `acl_provenance` | `local`, `default`, `inherited` or `unavailable` | the file |
-| `acl_provenance_error` | Reason of `unavailable`, or `parse_skipped:<n>` | the file |
-| `acl_member` | Name of the member the command ran on. Empty if the platform did not give it | REST |
+| `eai:acl.app` | Which application | a name |
+| `acl_stanza_kind` | Is this the application default, or one family | `app_default`, `family_default` |
+| `acl_stanza` | Which stanza, written as it is written in the file | `[]` on an application row, the family name otherwise |
+| `acl_handler` | Which REST path the tool reaches this family by | a path, or empty |
+| `acl_row_reason` | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
 
-The **first eight** fields are exactly the input contract of `editappacl`, so a pipeline
-built on this command needs no parameter at all.
+An empty `acl_handler` means one of two things, and the row says which: on an application
+row the `[]` address needs no handler, and `acl_stanza_kind` says so; on a family row the
+family is not in the tool's table, and `acl_effective_status` says `no_handler`.
 
-**`acl_governable` is a derivation and not an opinion.** Each of its values recomputes
-from the other columns of the same row:
+`acl_row_reason` is the column to read first when a row surprises you. `stanza_exists` means
+the stanza is written in a metadata file. **`objects_exist` means it is not** - the family is
+listed because some of its objects carry a stanza of their own, which is enough to make the
+family worth showing. `requested` means you asked for it with `families=`.
 
-| Row | `yes` | `partial` | `unknown` |
-|---|---|---|---|
-| `family_default` | `acl_frozen_stanzas = 0` | `acl_frozen_stanzas > 0` | `acl_provenance = "unavailable"` |
-| `app_default` | `acl_family_headers = 0` **and** `acl_frozen_stanzas = 0` | otherwise | `acl_provenance = "unavailable"` |
+### Platform - what splunkd applies right now
 
-`unknown` is not an empty cell: it says the metadata could not be read, and therefore
-that **no** provenance conclusion is emitted. `partial` says some objects escape the
-generic stanza; it does not pretend to say how many of them matter.
+| Column | The question it answers | Values |
+|---|---|---|
+| `eai:acl.perms.read` | Which roles read, today | roles, comma-separated |
+| `eai:acl.perms.write` | Which roles write, today | roles, comma-separated |
+| `eai:acl.sharing` | Which scope applies, today | `app`, `global`, `user` |
+| `acl_effective_status` | Were those three read, **and if not why** | `ok`, `no_handler`, `app_disabled`, `unreadable` |
 
-> ### What counts as frozen, and what only looks like it
->
-> splunkd writes a `[<family>/<object>]` stanza for **every object it creates or edits**,
-> carrying `owner`, `version` and `modtime` and nothing else. **Such an object still
-> inherits**: it is not frozen, and this inventory does not count it as one.
->
-> Measured on the reference platform, at the object level and at the family-header level
-> alike:
->
-> | The stanza carries | Its permissions | Its sharing scope |
-> |---|---|---|
-> | nothing (no stanza at all) | inherited | inherited |
-> | `owner` / `version` / `modtime` | inherited | inherited |
-> | `export` but no `access` | inherited | **its own** |
-> | `access` | **its own** | **its own** |
->
-> So `acl_frozen_stanzas` counts the objects carrying an `access` line, and nothing else.
-> An object whose stanza carries only `export` is counted as still governed - a generic
-> write does move its permissions - but that write will **not** move its scope. On that one
-> dimension the figures read high rather than low, which is the direction a volume guard
-> rail should err in.
+`no_handler` means the tool has no REST path for this family - it can report on it, not act
+on it. `app_disabled` and `unreadable` mean the read failed, for two different reasons.
 
-**Reading `acl_file_*` next to `eai:acl.*` is the point.** The first says what the local
-layer holds, the second what splunkd serves. When they differ, something else is
-deciding - the default layer, or a generic one level up.
+### File - what the metadata carries, literally
+
+| Column | The question it answers | Values |
+|---|---|---|
+| `acl_stanza_layer` | In which file the stanza is written - **so which layer the three cells below quote** | `local`, `default`, `none` |
+| `acl_file_perms_read` | What that stanza writes for reading | the text, as written |
+| `acl_file_perms_write` | What it writes for writing | the text, as written |
+| `acl_file_export` | What it writes for `export` | the text, as written |
+| `acl_file_read` | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
+
+**These columns quote the file; the `eai:acl.*` columns above show what splunkd applies.**
+When the two disagree, something else is deciding - the other layer, or a generic stanza one
+level up. That comparison is the reason both are here.
+
+`acl_stanza_layer` says **where the stanza is written**, and nothing more. It does not say
+where the effective permissions come from: a stanza can sit in `default.meta` carrying only
+`export` while its permissions are inherited. Answering that would mean replaying Splunk's
+own inheritance resolution, which this tool deliberately never does.
+
+`acl_file_read` is about the **files**, not the stanza. `partial:<n>` means `n` lines were
+skipped while parsing, so the counters below may understate; `unreadable` means no count on
+this row can be trusted.
+
+### Decision - what stands between this stanza and the objects
+
+| Column | The question it answers | Values |
+|---|---|---|
+| `acl_objects_with_own_perms` | How many objects carry **their own permissions** and therefore escape this stanza | a count |
+| `acl_families_with_own_perms` | How many families of this application carry their own permissions and therefore escape `[]` | a count |
+| `acl_reach` | **The verdict**: does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
+
+The scope of `acl_objects_with_own_perms` is the scope of the row: the family on a family
+row, the whole application on an application row. `acl_families_with_own_perms` is an
+application fact and is repeated on every row of that application - do not sum it.
+
+**An object only counts if its stanza actually carries permissions.** Splunk writes a stanza
+for every object you create or edit, carrying `owner`, `version` and `modtime` and nothing
+else; such an object still inherits, and is not counted.
+
+`acl_reach` recomputes from the two counts beside it, so you can check it: `all` when both
+are zero (only the object count matters on a family row), `partial` otherwise, `unknown`
+when `acl_file_read` is not `ok`.
+
+### Context
+
+| Column | The question it answers | Values |
+|---|---|---|
+| `acl_member` | Which member the metadata was read on | a name, or empty |
+
+Empty means the platform did not give its own name; discriminate on `splunk_server`
+instead.
+
+### Which rows come out
+
+One row per application, always. Then one row per family, when **any** of these is true -
+and `acl_row_reason` tells you which:
+
+1. the family header is written in one of the two metadata files (`stanza_exists`);
+2. at least one object of that family carries a stanza of its own - **it exists, whether or
+   not it freezes anything** (`objects_exist`);
+3. you named the family in `families=` (`requested`).
+
+Condition 2 is about **presence, not freezing**. A family whose objects were merely opened
+and saved in the interface will appear, with `acl_objects_with_own_perms = 0` and
+`acl_reach = all` - the row then says exactly that. A family matching none of the three does
+not appear, which does not mean it cannot be governed: only that today it is neither
+governed nor frozen.
 
 ---
 
@@ -602,7 +650,7 @@ never creates anything.
 **Two saved searches**, neither scheduled. `App ACL - irreversible writes` lists the
 creations per run with their target and estimated reach, and carries the
 `app_acl_irreversible` call for each. `App ACL - governability of the estate` ventilates
-the applications by `acl_governable`, per member.
+the applications by `acl_reach`, per member.
 
 **Redirecting both journal indexes takes FOUR overrides in all**, not two: `local/inputs.conf`
 and `local/macros.conf`, for **each** of the two journal sets. Applying one and not the
@@ -759,7 +807,7 @@ Limits proper to the application level:
   knows nothing about, so an application may be reported governable while somebody sees
   something else. Detecting those residues is out of scope.
 - **Writing a generic stanza changes nothing for an already frozen object**, and that is
-  the whole point of consulting `acl_frozen_stanzas` first.
+  the whole point of consulting `acl_objects_with_own_perms` first.
 - **Run one `editappacl` at a time on a given application.** Nothing enforces it: the
   duplicate refusal is within a single run, and two concurrent runs can each report a
   creation while one of them modified an existing value - whose prior state is then

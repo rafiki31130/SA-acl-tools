@@ -1,29 +1,35 @@
-"""Inventory of the application-level ACL stanzas (v4.3 section 7).
+"""Inventory of the application-level ACL stanzas (v4.5 section 7).
 
-**What this command exists to answer**, and nothing else has its place in the output
-(section 7.1): *is this application still governable through its generic stanzas, or is
-it already frozen object by object?*
+**What this command exists to answer** (section 7.1): *is this application still governed
+by its generic stanzas, or already frozen object by object?*
 
 That question has **no REST answer**. Measured (Q0-4): an object that inherits and an
 object carrying its own stanza of the same value return a **strictly identical** ACL
-block, and six alternative REST sources were probed, six negative. The provenance comes
-from the file, and only from the file - which is why `appaclinventory` is a
-**command** and not a macro, an SPL macro being unable to read one (section 6.1).
+block, and six alternative REST sources were probed, six negative. The answer comes from
+the file, and only from the file - which is why `appaclinventory` is a **command** and not
+a macro, an SPL macro being unable to read one (section 6.1).
 
-The division of labour inside this module follows the bounds of section 6.2 exactly:
+**The output is organised in four named levels, and no column mixes two of them.** That is
+the correction of the v4.5 revision, made after the command was first opened in the
+interface: the columns had been side by side with nothing separating them, and that is
+where the two most serious findings came from.
 
-    effective values      REST          eai:acl.perms.*, eai:acl.sharing
-    provenance            the file      acl_present_*, acl_file_*, acl_provenance
-    counts, never names   the file      acl_frozen_stanzas, acl_family_headers
-    object population     REST          acl_objects_total, acl_objects_inheriting
-    governability         derived       acl_governable, a mechanical function of the two
-                                        counters and of nothing else
+    identification   which stanza this row describes, and why it is here
+    platform         what splunkd applies right now          eai:acl.*
+    file             what the .meta carries, literally       acl_file_*
+    decision         what stands between this stanza and the objects
 
-`acl_governable` is **a derivation, not an appreciation** (section 7.4): every one of
-its values recomputes from the other columns of the same row, so an operator who
-distrusts it can redo the arithmetic in SPL. That is the same discipline as the
-`acl_status` enumeration - a figure whose provenance cannot be retraced is a figure
-nobody can contest.
+**One rule governs the whole table: no column is ever empty without another saying why.**
+`acl_effective_status` explains the three platform columns, `acl_stanza_layer` and
+`acl_file_read` explain the three file columns, and an empty `acl_handler` is explained by
+`acl_effective_status = no_handler`. Every other column is always filled. The version
+before this one carried **four** semantics of emptiness, and an empty cell that reads like
+a breakdown is a defect rather than a detail.
+
+`acl_reach` is **a derivation, not an appreciation** (section 7.4): each of its values
+recomputes from the columns beside it, so an operator who distrusts the verdict can redo
+the arithmetic in SPL. A figure whose provenance cannot be retraced is a figure nobody can
+contest.
 """
 
 import json
@@ -36,6 +42,8 @@ from .appacl_model import (
     AppAclState,
 )
 from .appacl_provenance import (
+    FILE_READ_OK,
+    LAYER_NONE,
     META_ACCESS_KEY,
     META_EXPORT_KEY,
     classify_stanza,
@@ -44,18 +52,42 @@ from .appacl_provenance import (
 from .appacl_target import build_app_default_path, build_family_default_path
 from .normalize import serialize_roles
 
-#: Values of `acl_write_path` (section 7.4): does the family have a **known write
-#: path**? It is the column that tells a family this tool could govern from one it can
-#: only report on. `unmapped` is not a defect - it is a family present on the platform
-#: and absent from the table of section 5.2, which the operator treats through the
-#: override CSV.
-WRITE_PATH_MAPPED = "mapped"
-WRITE_PATH_UNMAPPED = "unmapped"
+#: How the `[]` stanza is written **in the output**, and it is written as it is written in
+#: the file. The empty string was accurate and unreadable: a cell nobody can see is a cell
+#: an operator reads as a bug.
+APP_STANZA_LABEL = "[]"
 
-#: Closed domain of `acl_governable` (section 7.4).
-GOVERNABLE_YES = "yes"
-GOVERNABLE_PARTIAL = "partial"
-GOVERNABLE_UNKNOWN = "unknown"
+#: Closed domain of `acl_row_reason` (section 7.4) - *why is this row here?*
+#:
+#: A row emitted because of an object stanza used to describe an **absent** header on three
+#: columns and name nowhere the stanza that had triggered it. That was the puzzle which
+#: opened the revision of the output contract.
+ROW_REASON_APP = "app_row"
+ROW_REASON_STANZA = "stanza_exists"
+ROW_REASON_OBJECTS = "objects_exist"
+ROW_REASON_REQUESTED = "requested"
+
+#: Closed domain of `acl_effective_status` (section 7.4): were the three platform columns
+#: read, **and if not why**.
+#:
+#: They used to come out empty for **three indistinguishable causes** - family outside the
+#: table, failed call, disabled application - on 26 rows out of 124, that is 21 %. The
+#: previous contract forbade adding an error column; that prohibition was withdrawn once a
+#: fifth of the rows were mute.
+EFFECTIVE_OK = "ok"
+EFFECTIVE_NO_HANDLER = "no_handler"
+EFFECTIVE_APP_DISABLED = "app_disabled"
+EFFECTIVE_UNREADABLE = "unreadable"
+
+#: Closed domain of `acl_reach` (section 7.4) - **the verdict**.
+#:
+#: It replaces `acl_governable`, which promised something wider than its definition: a
+#: family absent from the output may be perfectly governable, and a family reported `all`
+#: may be out of the tool's reach when `acl_handler` is empty. `reach` says what is
+#: measured - does this stanza reach every object of its scope.
+REACH_ALL = "all"
+REACH_PARTIAL = "partial"
+REACH_UNKNOWN = "unknown"
 
 #: Path of the cheap REST call that names the execution member (section 6.3).
 #:
@@ -85,32 +117,34 @@ APPS_PATH = "/services/apps/local"
 #: absent from that record disappears from the whole output with no error and no warning.
 #: The constraint bites here exactly as it does on a streaming command - more so, in
 #: fact, since the first row of an inventory is an `app_default` row, which is the one
-#: row that never carries `acl_objects_*` when `count_objects` is off.
+#: row whose object count spans the whole application rather than one family.
 #:
 #: The order is that of the table of section 7.4, and the first eight fields are
 #: **exactly** the input contract of `editappacl`: a pipeline built on this command needs
 #: no parameter at all.
 INVENTORY_OUTPUT_FIELDS = (
+    # -- the input contract of `editappacl`, in order (section 7.4) ------------ #
     "eai:acl.app",
     "acl_stanza_kind",
     "acl_stanza",
     "acl_handler",
-    "acl_write_path",
     "eai:acl.perms.read",
     "eai:acl.perms.write",
     "eai:acl.sharing",
-    "acl_present_local",
-    "acl_present_default",
+    # -- why the columns above may be empty, and why this row exists ----------- #
+    "acl_effective_status",
+    "acl_row_reason",
+    # -- what the file carries, and from which layer --------------------------- #
+    "acl_stanza_layer",
     "acl_file_perms_read",
     "acl_file_perms_write",
     "acl_file_export",
-    "acl_frozen_stanzas",
-    "acl_family_headers",
-    "acl_objects_total",
-    "acl_objects_inheriting",
-    "acl_governable",
-    "acl_provenance",
-    "acl_provenance_error",
+    "acl_file_read",
+    # -- what stands between this stanza and the objects, and the verdict ------ #
+    "acl_objects_with_own_perms",
+    "acl_families_with_own_perms",
+    "acl_reach",
+    # -- context --------------------------------------------------------------- #
     "acl_member",
 )
 
@@ -326,35 +360,28 @@ def export_of(literal):
 # Governability - a derivation, never an appreciation
 # --------------------------------------------------------------------------- #
 
-def governable_of(stanza_kind, provenance_available, frozen_stanzas, family_headers):
-    """`acl_governable` (section 7.4), recomputable from the other columns.
+def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_perms):
+    """`acl_reach` (section 7.4) - **the verdict**, recomputable from its neighbours.
 
-    Its definition is closed, and deliberately blunt:
+        family_default   all   no object of the family carries its own permissions
+        app_default      all   no object AND no family carries its own permissions
+        both             unknown as soon as the metadata could not be read in full
 
-        family_default   yes if no object of the family carries its own stanza
-        app_default      yes if the application carries neither a family header nor a
-                         single object stanza - that is, if nothing yet stands between
-                         `[]` and the objects
-        both             unknown as soon as the provenance could not be read: a file
-                         nobody could open supports no conclusion, and `partial` would
-                         be one
+    `unknown` is not an empty cell: it says the file could not be read, so **no** verdict
+    is asserted. `partial` says some objects escape this stanza; it does not pretend to say
+    how many of them matter.
 
-    `partial` is the honest word: it says some objects escape the generic stanza, and it
-    does not pretend to say how many matter.
-
-    **What counts as escaping is measured, not assumed.** `frozen_stanzas` and
-    `family_headers` are fed by `materializes_permissions`: a stanza that carries only
-    `owner`, `version` and `modtime` - what splunkd writes for every object it touches -
-    freezes nothing and is not counted. Before the remediation of 2026-08-13 it was, and
-    every application whose objects had ever been edited came out `partial`.
+    **What counts as escaping is measured, not assumed** (`materializes_permissions`): a
+    stanza carrying only `owner`, `version` and `modtime` - what splunkd writes for every
+    object it touches - freezes nothing and is not counted.
     """
-    if not provenance_available:
-        return GOVERNABLE_UNKNOWN
-    if stanza_kind == STANZA_KIND_APP:
-        if int(frozen_stanzas or 0) == 0 and int(family_headers or 0) == 0:
-            return GOVERNABLE_YES
-        return GOVERNABLE_PARTIAL
-    return GOVERNABLE_YES if int(frozen_stanzas or 0) == 0 else GOVERNABLE_PARTIAL
+    if str(file_read or "") != FILE_READ_OK:
+        return REACH_UNKNOWN
+    if int(objects_with_own_perms or 0) > 0:
+        return REACH_PARTIAL
+    if stanza_kind == STANZA_KIND_APP and int(families_with_own_perms or 0) > 0:
+        return REACH_PARTIAL
+    return REACH_ALL
 
 
 # --------------------------------------------------------------------------- #
@@ -362,173 +389,176 @@ def governable_of(stanza_kind, provenance_available, frozen_stanzas, family_head
 # --------------------------------------------------------------------------- #
 
 def families_to_emit(provenance, requested):
-    """Which `family_default` rows an application produces (section 7.5).
+    """Which `family_default` rows an application produces, **and why** (section 7.5).
 
-    A family is emitted when **at least one** of the three conditions is met:
+    Returns `((family, reason), ...)`, sorted. The reason travels with the family rather
+    than being recomputed later: two answers to the same question drift, and this one ends
+    up in a column an operator reads.
 
-    1. its header exists in `local.meta` or in `default.meta`;
-    2. at least one `[<family>/<object>]` stanza of that family exists in either;
-    3. it is named in the `families` parameter.
+    A family is emitted when **at least one** of three conditions is met, and the reason
+    names the first one that is:
 
-    Condition 3 is what makes exhaustiveness available **on demand** - *what would happen
-    if I governed `[savedsearches]` on this app?* - without emitting nineteen mostly empty
-    rows per application, whose proportion of blank cells would hide the information.
+    1. `stanza_exists`  - its header exists in `local.meta` or in `default.meta`;
+    2. `objects_exist`  - at least one `[<family>/<object>]` stanza of that family
+       **exists** in either. **Presence, not freezing**: a family whose objects were merely
+       edited stays emitted, with `acl_objects_with_own_perms = 0` and `acl_reach = all`.
+       Restricting this to the freeze predicate would hide from the operator families that
+       do exist - the condition of **emission** and the verdict of **governance** answer two
+       different questions;
+    3. `requested`      - it is named in the `families` parameter.
+
+    Condition 3 makes exhaustiveness available on demand - *what would happen if I governed
+    `[savedsearches]` on this app?* - without emitting nineteen mostly empty rows per
+    application, whose proportion of blank cells would hide the information.
 
     Conditions 1 and 2 come from the **file**, so a family the shipped table does not know
-    still shows up: it is reported with an empty `acl_handler` and
-    `acl_write_path = "unmapped"` (section 6.4), which is a fact about the tool rather
-    than about the platform.
+    still shows up: its `acl_handler` is empty and `acl_effective_status` says
+    `no_handler`, which is a fact about the tool and not about the platform.
+
+    **The measured edge case is instructive**: two `[macros/...]` stanzas written by splunkd
+    and carrying only `version` and `modtime` are enough to emit the `macros` family, with
+    `acl_objects_with_own_perms = 0` and `acl_reach = all`. The row then says exactly what
+    is: this family is here because it carries object stanzas, none of which freezes
+    anything.
     """
-    names = set(str(name) for name in requested if str(name))
+    asked = set(str(name) for name in requested if str(name))
+    headers, objects = set(), set()
     for meta in (provenance.local, provenance.default):
         for stanza in meta.stanzas:
             kind = classify_stanza(stanza)
             if kind == STANZA_KIND_APP:
                 continue
+            if kind == STANZA_KIND_FAMILY:
+                headers.add(stanza)
+                continue
             family = family_of(stanza)
             if family:
-                names.add(family)
-    return tuple(sorted(names))
+                objects.add(family)
+
+    reasons = {}
+    for family in sorted(headers | objects | asked):
+        if family in headers:
+            reasons[family] = ROW_REASON_STANZA
+        elif family in objects:
+            reasons[family] = ROW_REASON_OBJECTS
+        else:
+            reasons[family] = ROW_REASON_REQUESTED
+    return tuple((family, reasons[family]) for family in sorted(reasons))
 
 
 class InventoryBuilder(object):
-    """Builds the inventory rows. Knows the SDK not at all, and the network only
-    through the REST port.
+    """Builds the inventory rows. Knows the SDK not at all, and the network only through
+    the REST port.
 
-    Everything that costs a REST call is behind a flag or memoized: the columns carrying
-    the decision - presence of a stanza, number of frozen ones - are read from **one
-    file**, and the object enumeration costs one call per (application, family), which is
-    why `count_objects` defaults to false (section 7.3).
+    **Nothing here costs a REST call per object.** The columns that carry the decision -
+    which stanzas exist, how many objects and families carry their own permissions - are
+    read from **two files per application**. The object enumeration that used to feed two
+    optional columns was withdrawn in v4.5: measured at **+790 REST calls** and a factor
+    **6,4 to 7,3** on 41 applications, for a lower bound with three reservations that came
+    out empty by default. The blast-radius question is answered where it engages - the
+    simulation of `editappacl`, per target.
     """
 
-    def __init__(self, rest, provenance_reader, table=None, impact=None, member=""):
+    def __init__(self, rest, provenance_reader, table=None, member="",
+                 app_disabled_fn=None):
         self._rest = rest
         self._provenance = provenance_reader
         self._table = table if table is not None else FamilyTable({})
-        self._impact = impact
         self._member = str(member or "")
+        #: Consulted **only** when a platform read has already failed, so that the row can
+        #: say `app_disabled` instead of the undifferentiated `unreadable`. Memoized by the
+        #: caller, and never called on the nominal path.
+        self._app_disabled_fn = app_disabled_fn
 
     # -- one row ------------------------------------------------------------ #
 
-    def _base_row(self, app, stanza_kind, stanza, handler):
-        endpoint = ""
+    def _platform_state(self, app, stanza_kind, handler):
+        """`(state, acl_effective_status)` - and the status explains the state when it is
+        empty, which is the rule the whole table is built on."""
         if stanza_kind == STANZA_KIND_APP:
             endpoint = build_app_default_path(app)
         elif handler:
             endpoint = build_family_default_path(app, handler)
+        else:
+            return AppAclState(), EFFECTIVE_NO_HANDLER
 
-        effective = read_effective_state(self._rest, endpoint) if endpoint else None
-        state = effective if effective is not None else AppAclState()
+        state = read_effective_state(self._rest, endpoint)
+        if state is not None:
+            return state, EFFECTIVE_OK
+        if self._app_disabled_fn is not None and self._app_disabled_fn(app):
+            return AppAclState(), EFFECTIVE_APP_DISABLED
+        return AppAclState(), EFFECTIVE_UNREADABLE
+
+    def _row(self, app, stanza_kind, stanza, handler, reason, provenance, scope):
+        """One row, built **in the declared order**.
+
+        The order is not cosmetic and a test freezes it: the SDK writer fixes the stream
+        header on the keys of the first record, so the order emitted is the order of this
+        dictionary. Measured before the revision: `acl_member` came out ninth instead of
+        last.
+
+        `scope` is the stanza name whose object stanzas count for this row - the family on
+        a family row, `None` for an application row, where the count spans the whole
+        application.
+        """
+        state, effective_status = self._platform_state(app, stanza_kind, handler)
+        literal = provenance.literal_any(stanza)
+        read_literal, write_literal = split_access(literal)
+        layer = provenance.stanza_layer(stanza)
+        file_read = provenance.read_status()
+        objects = provenance.frozen_count(scope)
+        families = provenance.family_header_count()
+
         return {
             "eai:acl.app": app,
             "acl_stanza_kind": stanza_kind,
-            "acl_stanza": stanza,
+            "acl_stanza": APP_STANZA_LABEL if stanza_kind == STANZA_KIND_APP else stanza,
             "acl_handler": handler,
-            "acl_write_path": (
-                WRITE_PATH_MAPPED
-                if (stanza_kind == STANZA_KIND_APP or handler)
-                else WRITE_PATH_UNMAPPED
-            ),
             "eai:acl.perms.read": serialize_roles(state.perms_read),
             "eai:acl.perms.write": serialize_roles(state.perms_write),
             "eai:acl.sharing": state.sharing,
+            "acl_effective_status": effective_status,
+            "acl_row_reason": reason,
+            "acl_stanza_layer": layer,
+            "acl_file_perms_read": read_literal,
+            "acl_file_perms_write": write_literal,
+            "acl_file_export": export_of(literal),
+            "acl_file_read": file_read,
+            "acl_objects_with_own_perms": objects,
+            "acl_families_with_own_perms": families,
+            "acl_reach": reach_of(stanza_kind, file_read, objects, families),
             "acl_member": self._member,
         }
 
-    def _object_counts(self, app, stanza_kind, family, handler, count_objects):
-        """`(total, inheriting)` as strings, both empty when they were not computed.
+    def app_default_row(self, app, provenance):
+        """The `[]` row, emitted **unconditionally** for every application the filter keeps
+        (section 7.5).
 
-        Empty and **not zero**: zero is an answer - the family is empty in this
-        application - and confusing the two would let a column nobody computed pass for a
-        family nobody uses.
+        `acl_objects_with_own_perms` counts over the **whole application** here, which is
+        what makes the `app_default` line of the `acl_reach` table recomputable from the
+        columns of its own row.
         """
-        if not count_objects or self._impact is None:
-            return "", ""
-        if stanza_kind == STANZA_KIND_APP:
-            total, inheriting = self._impact.app_default_counts(app)
-            return total, inheriting
-        if not handler:
-            return "", ""
-        return (
-            self._impact.shared_object_count(app, handler),
-            self._impact.inheriting_count(app, family, handler),
-        )
+        return self._row(app, STANZA_KIND_APP, "", "", ROW_REASON_APP, provenance, None)
 
-    def app_default_row(self, app, provenance, count_objects=False):
-        """The `app_default` row, emitted **unconditionally** for every application
-        retained by the filter (section 7.5).
+    def family_row(self, app, family, provenance, reason=ROW_REASON_STANZA):
+        """One family row.
 
-        `acl_frozen_stanzas` counts the object stanzas of the **whole application** here,
-        not those of a family: that is what makes the `app_default` line of the
-        `acl_governable` table recomputable from the columns of its own row.
-        """
-        row = self._base_row(app, STANZA_KIND_APP, "", "")
-        literal = provenance.literal("")
-        read_literal, write_literal = split_access(literal)
-        frozen = provenance.frozen_count()
-        headers = provenance.family_header_count()
-        total, inheriting = self._object_counts(
-            app, STANZA_KIND_APP, "", "", count_objects
-        )
-        row.update({
-            "acl_present_local": _boolean(provenance.present_local("")),
-            "acl_present_default": _boolean(provenance.present_default("")),
-            "acl_file_perms_read": read_literal,
-            "acl_file_perms_write": write_literal,
-            "acl_file_export": export_of(literal),
-            "acl_frozen_stanzas": frozen,
-            "acl_family_headers": headers,
-            "acl_objects_total": total,
-            "acl_objects_inheriting": inheriting,
-            "acl_governable": governable_of(
-                STANZA_KIND_APP, provenance.available, frozen, headers
-            ),
-            "acl_provenance": provenance.provenance_of(""),
-            "acl_provenance_error": provenance.error,
-        })
-        return row
-
-    def family_row(self, app, family, provenance, count_objects=False):
-        """One `family_default` row.
-
-        `acl_family_headers` stays **empty** here: section 7.4 confines it to the
-        `app_default` line, and repeating an application-wide figure on every family row
-        would invite a `stats sum()` that counts it once per family.
+        `acl_families_with_own_perms` is **emitted here too**, and that is a change: it
+        carries an **application** fact, so blanking it on family rows created one more
+        semantics of emptiness for nothing.
         """
         handler = self._table.resolve(family) or ""
-        row = self._base_row(app, STANZA_KIND_FAMILY, family, handler)
-        literal = provenance.literal(family)
-        read_literal, write_literal = split_access(literal)
-        frozen = provenance.frozen_count(family)
-        total, inheriting = self._object_counts(
-            app, STANZA_KIND_FAMILY, family, handler, count_objects
-        )
-        row.update({
-            "acl_present_local": _boolean(provenance.present_local(family)),
-            "acl_present_default": _boolean(provenance.present_default(family)),
-            "acl_file_perms_read": read_literal,
-            "acl_file_perms_write": write_literal,
-            "acl_file_export": export_of(literal),
-            "acl_frozen_stanzas": frozen,
-            "acl_family_headers": "",
-            "acl_objects_total": total,
-            "acl_objects_inheriting": inheriting,
-            "acl_governable": governable_of(
-                STANZA_KIND_FAMILY, provenance.available, frozen, 0
-            ),
-            "acl_provenance": provenance.provenance_of(family),
-            "acl_provenance_error": provenance.error,
-        })
-        return row
+        return self._row(app, STANZA_KIND_FAMILY, family, handler, reason, provenance,
+                         family)
 
     # -- the run ------------------------------------------------------------ #
 
     def rows(self, params, applications=None):
         """Every row of the run, application by application, in a stable order.
 
-        The order is not decorative: an inventory is read as a table and compared with
-        the one from another member (section 6.3), and two runs that ordered their rows
-        by whatever the platform returned would diverge for no reason at all.
+        The order is not decorative: an inventory is read as a table and compared with the
+        one from another member (section 6.3), and two runs ordering their rows by whatever
+        the platform returned would diverge for no reason at all.
         """
         names = applications
         if names is None:
@@ -537,16 +567,6 @@ class InventoryBuilder(object):
             if not app_matches(app, params.apps):
                 continue
             provenance = self._provenance.provenance_of_app(app)
-            yield self.app_default_row(app, provenance, params.count_objects)
-            for family in families_to_emit(provenance, params.families):
-                yield self.family_row(app, family, provenance, params.count_objects)
-
-
-def _boolean(value):
-    """`true` / `false`, as a string.
-
-    The output of a search command is text: a Python `True` would reach SPL as the string
-    `True`, capital included, and every comparison an operator writes uses the lower-case
-    form the platform itself emits.
-    """
-    return "true" if value else "false"
+            yield self.app_default_row(app, provenance)
+            for family, reason in families_to_emit(provenance, params.families):
+                yield self.family_row(app, family, provenance, reason)
