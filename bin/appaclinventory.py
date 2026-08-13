@@ -93,9 +93,10 @@ MESSAGE_PREFIX = "appaclinventory: "
 #: `unmapped` - degraded, stated, and still useful.
 TABLE_UNREADABLE_WARNING = (
     "family table unreadable: the inventory carries on, every family coming out with an "
-    "empty acl_handler and acl_write_effect=no_route. The file columns are unaffected "
-    "- they are read from the metadata files, not from the table - but acl_reach then "
-    "reads unknown, no route existing."
+    "empty acl_handler and acl_effective_status=unreadable. The file columns are "
+    "unaffected - they are read from the metadata files, not from the table - so "
+    "acl_write_effect and acl_reach keep answering, and writing stays possible by passing "
+    "an explicit acl_handler."
 )
 
 

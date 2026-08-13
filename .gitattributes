@@ -12,7 +12,32 @@ bin/lib/** -text
 # and the exhaustive operator reference. It is written for whoever changes this code, not
 # for whoever runs it, and the operator README is self-sufficient without it.
 tests/         export-ignore
-tools/         export-ignore
 DEVNOTES.md    export-ignore
 .gitattributes export-ignore
 .gitignore     export-ignore
+
+# tools/ is excluded file by file rather than as a directory, because the two
+# re-validation procedures ship (spec section 14.1, deliverable 4). The contract declares
+# them a prerequisite to any real use - `revalidate_app_acl_mapping.py` for the family
+# table of `editappacl`, `revalidate_mapping.py` for the endpoint table of `editacl` - and
+# the installation section names both. A prerequisite the operator cannot reach from the
+# installed app is a prerequisite in name only, and the README's pointer at it would fall
+# under the no-dangling-reference clause of deliverable 9: the clause would be contradicted
+# by its own document. Of the two ways out, dropping the pointer or shipping the artefact,
+# only the second keeps the requirement.
+#
+# The criterion is the contract's own - what it declares a prerequisite, and nothing else -
+# and the exception does not generalize beyond it. Every other file here is development
+# tooling and stays out. Both procedures read and neither writes; both import only
+# `bin/acltools`, which ships, so they run from the installed app.
+#
+# A directory-wide `export-ignore` is not used, since git prunes the whole tree and no
+# per-file exception can be carved back out of it. A test therefore sweeps `tools/` file by
+# file, so that a new file added there cannot ship by omission.
+tools/__pycache__/           export-ignore
+tools/acl_probe_bootstrap.sh export-ignore
+tools/acl_probe_bootstrap_rest.py export-ignore
+tools/hash_manifest.py       export-ignore
+tools/requirements-vendor.txt export-ignore
+tools/vendor.sh              export-ignore
+tools/verify_vendor.sh       export-ignore

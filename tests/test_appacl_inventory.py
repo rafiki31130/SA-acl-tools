@@ -27,6 +27,7 @@ from acltools.appacl_inventory import (
     EFFECTIVE_OK,
     EFFECTIVE_UNREADABLE,
     MEMBER_UNKNOWN,
+    FILE_VALUE_ABSENT,
     INVENTORY_OUTPUT_FIELDS,
     REACH_ALL,
     REACH_PARTIAL,
@@ -44,7 +45,6 @@ from acltools.appacl_inventory import (
     parse_app_filter,
     parse_family_list,
     WRITE_EFFECT_CREATE,
-    WRITE_EFFECT_NO_ROUTE,
     WRITE_EFFECT_OVERWRITE,
     reach_of,
     resolve_member,
@@ -69,7 +69,7 @@ from acltools.appacl_provenance import (
     FILE_READ_UNREADABLE,
     LAYER_DEFAULT,
     LAYER_LOCAL,
-    LAYER_NONE,
+    LAYER_NOWHERE,
 )
 
 from . import BIN_DIR
@@ -229,10 +229,13 @@ class NoColumnIsEmptyWithoutAnotherSayingWhyTest(unittest.TestCase):
         "eai:acl.perms.read": "acl_effective_status",
         "eai:acl.perms.write": "acl_effective_status",
         "eai:acl.sharing": "acl_effective_status",
-        "acl_file_perms_read": "acl_perms_source",
-        "acl_file_perms_write": "acl_perms_source",
-        "acl_file_export": "acl_perms_source",
     }
+
+    #: The three file columns are **not** in the map above since v4.7, and that is the
+    #: correction: they no longer need a neighbour to qualify their emptiness. A key that
+    #: is not written comes out as `(absent)`, so an empty cell there carries a single
+    #: meaning - the key is written and holds no value.
+    FILE_COLUMNS = ("acl_file_perms_read", "acl_file_perms_write", "acl_file_export")
 
     #: Excluded from the "always filled" sweep, with the reason above.
     RUN_LEVEL = ("acl_member",)
@@ -263,22 +266,38 @@ class NoColumnIsEmptyWithoutAnotherSayingWhyTest(unittest.TestCase):
                         str(row[explainer]), "",
                         "%s is empty and %s says nothing" % (column, explainer),
                     )
-                    if explainer == "acl_effective_status":
-                        self.assertNotEqual(row[explainer], EFFECTIVE_OK)
-                    else:
-                        self.assertEqual(row[explainer], LAYER_NONE)
+                    self.assertNotEqual(row[explainer], EFFECTIVE_OK)
 
-    def test_an_empty_handler_is_always_explained_by_one_column_or_the_other(self):
-        """On a family row it is `acl_effective_status = no_handler`; on an application
-        row it is `acl_stanza_kind = app_default`, the `[]` URI needing no handler."""
+    def test_an_empty_file_column_never_means_an_absent_key(self):
+        """**The v4.7 completion of the rule.** An empty cell in those three columns means
+        one thing: the key is written and carries no value. The absent key is published as
+        `(absent)`, which no role name and no platform `export` value can imitate."""
         for row in self._rows():
-            if str(row["acl_handler"]) != "":
+            for column in self.FILE_COLUMNS:
+                if str(row[column]) != "":
+                    continue
+                with self.subTest(stanza=row["acl_stanza"], column=column):
+                    self.assertNotEqual(
+                        row["acl_perms_source"], LAYER_NOWHERE,
+                        "%s is empty while nothing writes the key - it should read %s"
+                        % (column, FILE_VALUE_ABSENT),
+                    )
+
+    def test_the_handler_has_one_definition_and_only_one(self):
+        """**v4.7.** An empty `acl_handler` on a family row says one thing and nothing
+        else: this family is not in the table shipped with the tool. No other column is
+        made to carry a second meaning for it, and writing there stays possible through an
+        explicit handler (section 8.3)."""
+        table = FIXTURE_TABLE
+        for row in self._rows():
+            if row["acl_stanza_kind"] == STANZA_KIND_APP:
                 continue
+            family = row["acl_stanza"].strip("[]")
             with self.subTest(stanza=row["acl_stanza"]):
-                if row["acl_stanza_kind"] == STANZA_KIND_APP:
-                    self.assertEqual(row["acl_effective_status"], EFFECTIVE_OK)
-                else:
-                    self.assertEqual(row["acl_write_effect"], WRITE_EFFECT_NO_ROUTE)
+                self.assertEqual(
+                    str(row["acl_handler"]), str(table.resolve(family) or ""),
+                    "the handler column says something other than what the table holds",
+                )
 
     def test_the_columns_outside_that_map_are_never_empty(self):
         always = [
@@ -300,13 +319,17 @@ class NoColumnIsEmptyWithoutAnotherSayingWhyTest(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["acl_member"], "member_two")
 
-    def test_a_family_outside_the_table_says_no_handler(self):
+    def test_a_family_outside_the_table_reads_unreadable_with_an_empty_handler(self):
+        """**v4.7**: the pair says the cause. `unreadable` with an **empty** handler means
+        there is no route by name; with a **filled** one it would mean the call failed.
+        And the decision columns keep answering: the row still says what a write would do
+        and how far the stanza reaches."""
         row = builder().family_row("my_app", "unknown_family", provenance())
         self.assertEqual(row["acl_handler"], "")
-        self.assertEqual(row["acl_write_effect"], WRITE_EFFECT_NO_ROUTE)
         self.assertEqual(row["acl_effective_status"], EFFECTIVE_UNREADABLE)
         self.assertEqual(row["eai:acl.perms.read"], "")
-        self.assertEqual(row["acl_reach"], REACH_UNKNOWN)
+        self.assertEqual(row["acl_write_effect"], WRITE_EFFECT_CREATE)
+        self.assertEqual(row["acl_reach"], REACH_ALL)
 
     def test_a_failed_read_says_unreadable(self):
         rest = FakeAppRest(default_get=RestFail())
@@ -344,9 +367,8 @@ class TheClosedDomainsTest(unittest.TestCase):
                            ROW_REASON_REQUESTED),
         "acl_effective_status": (EFFECTIVE_OK, EFFECTIVE_APP_DISABLED,
                                  EFFECTIVE_UNREADABLE),
-        "acl_write_effect": (WRITE_EFFECT_OVERWRITE, WRITE_EFFECT_CREATE,
-                             WRITE_EFFECT_NO_ROUTE),
-        "acl_perms_source": (LAYER_LOCAL, LAYER_DEFAULT, LAYER_NONE),
+        "acl_write_effect": (WRITE_EFFECT_OVERWRITE, WRITE_EFFECT_CREATE),
+        "acl_perms_source": (LAYER_LOCAL, LAYER_DEFAULT, LAYER_NOWHERE),
         "acl_reach": (REACH_ALL, REACH_PARTIAL, REACH_UNKNOWN),
     }
 
@@ -366,6 +388,13 @@ class TheClosedDomainsTest(unittest.TestCase):
             for column, domain in self.DOMAINS.items():
                 with self.subTest(stanza=row["acl_stanza"], column=column):
                     self.assertIn(row[column], domain)
+
+    def test_the_write_effect_domain_holds_exactly_two_values(self):
+        """**v4.7.** `no_route` left the domain: it spoke of the route in the column that
+        must speak of reversibility, and it fell silent exactly where the tool guides
+        least."""
+        self.assertEqual(len(self.DOMAINS["acl_write_effect"]), 2)
+        self.assertNotIn("no_route", self.DOMAINS["acl_write_effect"])
 
     def test_the_file_read_domain_admits_its_three_shapes(self):
         cases = (
@@ -408,18 +437,19 @@ class TheFileColumnsReadBothLayersTest(unittest.TestCase):
         self.assertEqual(row["acl_perms_source"], LAYER_LOCAL)
         self.assertEqual(row["acl_file_perms_read"], "local_role")
 
-    def test_an_absent_stanza_says_none_and_leaves_the_literals_empty(self):
+    def test_an_absent_stanza_says_nowhere_and_marks_the_literals_absent(self):
         row = builder().family_row("my_app", "views", provenance())
-        self.assertEqual(row["acl_perms_source"], LAYER_NONE)
-        self.assertEqual(row["acl_file_perms_read"], "")
-        self.assertEqual(row["acl_file_export"], "")
+        self.assertEqual(row["acl_perms_source"], LAYER_NOWHERE)
+        self.assertEqual(row["acl_file_perms_read"], FILE_VALUE_ABSENT)
+        self.assertEqual(row["acl_file_perms_write"], FILE_VALUE_ABSENT)
+        self.assertEqual(row["acl_file_export"], FILE_VALUE_ABSENT)
 
     def test_a_stanza_carrying_only_export_sources_its_permissions_nowhere(self):
         """**The `[commands]` case, and the v4.6 redefinition.**
 
         A stanza can exist in a layer and carry no `access` key at all - `[commands]` of
         this very app carries only `export = system`. Its permissions come from `[]`, that
-        is they are inherited, so `acl_perms_source` says `none` while `acl_file_export`
+        is they are inherited, so `acl_perms_source` says `nowhere` while `acl_file_export`
         still shows what the stanza does write. Under v4.5 the column said `default`, which
         was true about the stanza and false about the permissions - and that is the promise
         v4.6 stops making.
@@ -427,9 +457,33 @@ class TheFileColumnsReadBothLayersTest(unittest.TestCase):
         row = builder().family_row(
             "my_app", "views", provenance(default=scoped_stanza("views"))
         )
-        self.assertEqual(row["acl_perms_source"], LAYER_NONE)
-        self.assertEqual(row["acl_file_perms_read"], "")
+        self.assertEqual(row["acl_perms_source"], LAYER_NOWHERE)
+        self.assertEqual(row["acl_file_perms_read"], FILE_VALUE_ABSENT)
         self.assertEqual(row["acl_file_export"], "system")
+
+    def test_no_token_of_ours_can_be_read_as_a_value_of_the_platform(self):
+        """**v4.7, and it is why the word changed.** `none` is a literal `export` value on
+        the Splunk side - the fixture below publishes it two columns from
+        `acl_perms_source`. The same token carrying *written nowhere* here and *exported to
+        nobody* there put two opposite meanings on one row. The platform's vocabulary wins.
+
+        The control is on the **disjunction**, not on the wording: any token our column
+        reintroduces that `acl_file_export` can emit fails this test, whatever it is named.
+        """
+        rows = [
+            builder().family_row("my_app", "views",
+                                 provenance(local=frozen_stanza("views"))),
+            builder().family_row("my_app", "views",
+                                 provenance(default=scoped_stanza("views"))),
+        ]
+        published = {str(row["acl_file_export"]) for row in rows}
+        self.assertIn("none", published, "the fixture no longer covers the collision")
+        ours = {LAYER_LOCAL, LAYER_DEFAULT, LAYER_NOWHERE}
+        self.assertEqual(
+            set(), ours & published,
+            "a value of acl_perms_source is also a literal export value of the "
+            "platform: the same token would carry two opposite meanings on one row",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -513,34 +567,25 @@ class TheReachVerdictTest(unittest.TestCase):
     """`acl_reach` is a **derivation**, recomputable from the columns beside it."""
 
     def test_a_family_nothing_escapes_is_reached_in_full(self):
-        self.assertEqual(
-            reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 0,
-                     WRITE_EFFECT_OVERWRITE), REACH_ALL)
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 0), REACH_ALL)
 
     def test_one_object_with_its_own_permissions_makes_it_partial(self):
-        self.assertEqual(
-            reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 1, 0,
-                     WRITE_EFFECT_CREATE), REACH_PARTIAL)
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 1, 0),
+                         REACH_PARTIAL)
 
     def test_a_family_header_takes_a_family_out_of_the_reach_of_the_default(self):
-        self.assertEqual(
-            reach_of(STANZA_KIND_APP, FILE_READ_OK, 0, 1,
-                     WRITE_EFFECT_CREATE), REACH_PARTIAL)
+        self.assertEqual(reach_of(STANZA_KIND_APP, FILE_READ_OK, 0, 1), REACH_PARTIAL)
 
     def test_a_family_header_does_not_affect_a_family_row(self):
         """The count is an application fact, emitted everywhere; it only enters the
         verdict of the application row."""
-        self.assertEqual(
-            reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 3,
-                     WRITE_EFFECT_OVERWRITE), REACH_ALL)
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 3), REACH_ALL)
 
     def test_an_unreadable_file_yields_unknown_on_both_kinds(self):
         for kind in (STANZA_KIND_APP, STANZA_KIND_FAMILY):
             for status in (FILE_READ_UNREADABLE, FILE_READ_PARTIAL_PREFIX + "3"):
                 with self.subTest(kind=kind, status=status):
-                    self.assertEqual(
-                        reach_of(kind, status, 0, 0, WRITE_EFFECT_CREATE),
-                        REACH_UNKNOWN)
+                    self.assertEqual(reach_of(kind, status, 0, 0), REACH_UNKNOWN)
 
     def test_the_domain_is_closed(self):
         values = set()
@@ -548,10 +593,7 @@ class TheReachVerdictTest(unittest.TestCase):
             for status in (FILE_READ_OK, FILE_READ_UNREADABLE):
                 for objects in (0, 3):
                     for families in (0, 3):
-                        for effect in (WRITE_EFFECT_OVERWRITE,
-                                       WRITE_EFFECT_NO_ROUTE):
-                            values.add(reach_of(kind, status, objects,
-                                                families, effect))
+                        values.add(reach_of(kind, status, objects, families))
         self.assertEqual(values, {REACH_ALL, REACH_PARTIAL, REACH_UNKNOWN})
 
     def test_the_verdict_recomputes_from_the_row(self):
@@ -567,8 +609,7 @@ class TheReachVerdictTest(unittest.TestCase):
                     row["acl_reach"],
                     reach_of(row["acl_stanza_kind"], row["acl_file_read"],
                              row["acl_objects_with_own_perms"],
-                             row["acl_families_with_own_perms"],
-                             row["acl_write_effect"]),
+                             row["acl_families_with_own_perms"]),
                 )
 
 
@@ -698,7 +739,19 @@ class TheLiteralValuesTest(unittest.TestCase):
 
     def test_the_export_key_is_read_literally(self):
         self.assertEqual(export_of({"export": "system"}), "system")
-        self.assertEqual(export_of(None), "")
+
+    def test_an_unwritten_key_is_marked_absent_and_an_empty_one_stays_empty(self):
+        """**v4.7.** The three file columns say their own absence. The token cannot be
+        confused with a value: no role name and no platform `export` value is written
+        between parentheses."""
+        self.assertEqual(export_of(None), FILE_VALUE_ABSENT)
+        self.assertEqual(export_of({}), FILE_VALUE_ABSENT)
+        self.assertEqual(export_of({"owner": "nobody"}), FILE_VALUE_ABSENT)
+        self.assertEqual(export_of({"export": ""}), "")
+        self.assertEqual(split_access({"owner": "nobody"}),
+                         (FILE_VALUE_ABSENT, FILE_VALUE_ABSENT))
+        self.assertEqual(split_access({"access": "read : [ power ]"}),
+                         ("power", FILE_VALUE_ABSENT))
 
 
 class TheOutputCarriesCountsAndNeverObjectNamesTest(unittest.TestCase):
@@ -908,6 +961,13 @@ class TheReadmeFieldTableIsADeliverableTest(unittest.TestCase):
             % missing,
         )
 
+    def test_no_withdrawn_value_lingers_in_the_table(self):
+        """A domain value the command cannot emit is a filter that returns nothing - and
+        `no_route` left the domain in v4.7."""
+        for gone in ("no_route", "no_handler"):
+            with self.subTest(value=gone):
+                self.assertNotIn("`%s`" % gone, self.section)
+
     def test_no_withdrawn_column_lingers_in_the_table(self):
         """The other direction. A README that still describes a column nobody emits sends
         the operator looking for a cell that is not there."""
@@ -931,9 +991,9 @@ class TheReadmeFieldTableIsADeliverableTest(unittest.TestCase):
         for value in (ROW_REASON_APP, ROW_REASON_STANZA, ROW_REASON_OBJECTS,
                       ROW_REASON_REQUESTED, EFFECTIVE_OK, EFFECTIVE_APP_DISABLED,
                       EFFECTIVE_UNREADABLE, WRITE_EFFECT_OVERWRITE, WRITE_EFFECT_CREATE,
-                      WRITE_EFFECT_NO_ROUTE, LAYER_LOCAL, LAYER_DEFAULT, LAYER_NONE,
+                      LAYER_LOCAL, LAYER_DEFAULT, LAYER_NOWHERE,
                       REACH_ALL, REACH_PARTIAL, REACH_UNKNOWN, FILE_READ_OK,
-                      FILE_READ_UNREADABLE, MEMBER_UNKNOWN):
+                      FILE_READ_UNREADABLE, MEMBER_UNKNOWN, FILE_VALUE_ABSENT):
             with self.subTest(value=value):
                 self.assertIn("`%s`" % value, self.section)
 
@@ -1024,18 +1084,53 @@ class TheWriteEffectUsesTheSamePredicateAsTheWriteCommandTest(unittest.TestCase)
                     "the inventory and the write command disagree on %s" % label,
                 )
 
-    def test_no_route_wins_over_the_reversibility_question(self):
-        """With no handler there is nothing to say about reversibility: the tool cannot
-        write to that family by name at all."""
-        row = builder().family_row(
-            "my_app", "unknown_family", provenance(local=frozen_stanza("unknown_family"))
+    def test_a_family_outside_the_table_answers_like_any_other(self):
+        """**The v4.7 correction, and the hole it closes.** With no handler the v4.6 column
+        said `no_route` and fell silent on reversibility - while the door of section 8.3
+        stays open: an explicit handler addresses any family. An operator taking that door
+        created an irreversible stanza with no warning from the table, on the very rows
+        where the tool guides least. The predicate does not consult the route."""
+        cases = (
+            (frozen_stanza("unknown_family"), WRITE_EFFECT_OVERWRITE),
+            (scoped_stanza("unknown_family"), WRITE_EFFECT_CREATE),
+            (None, WRITE_EFFECT_CREATE),
         )
-        self.assertEqual(row["acl_write_effect"], WRITE_EFFECT_NO_ROUTE)
+        for local, expected in cases:
+            with self.subTest(local=(local or "no stanza").splitlines()[0]):
+                row = builder().family_row(
+                    "my_app", "unknown_family", provenance(local=local))
+                self.assertEqual(row["acl_handler"], "")
+                self.assertEqual(row["acl_write_effect"], expected)
 
-    def test_an_application_row_always_has_a_route(self):
-        """A `[]` address is determined by the application alone."""
-        row = builder().app_default_row("my_app", provenance())
-        self.assertNotEqual(row["acl_write_effect"], WRITE_EFFECT_NO_ROUTE)
+    def test_every_emitted_row_carries_an_answer(self):
+        """The domain is exhaustive: no row, of any shape, leaves the column mute."""
+        prov = provenance(
+            local=FROZEN_META + touched_stanza("unknown_family/x")
+                  + touched_stanza("searchbnf/y")
+        )
+        rows = list(
+            builder(prov=prov).rows(
+                make_params(families=("macros", "another_unknown")),
+                applications=["my_app"],
+            )
+        )
+        self.assertTrue(rows)
+        self.assertTrue(any(str(row["acl_handler"]) == "" for row in rows),
+                        "the fixture no longer covers a row with no route")
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertIn(row["acl_write_effect"],
+                              (WRITE_EFFECT_OVERWRITE, WRITE_EFFECT_CREATE))
+
+    def test_the_predicate_takes_no_argument_about_the_route(self):
+        """Read on the source, so that the route cannot creep back in: the function that
+        decides reversibility sees the permission source and nothing else."""
+        import inspect
+
+        from acltools.appacl_inventory import write_effect_of
+
+        self.assertEqual(
+            list(inspect.signature(write_effect_of).parameters), ["perms_source"])
 
     def test_the_function_is_the_only_implementation(self):
         """Read on the source: the inventory computes the effect in one place, and that
@@ -1055,50 +1150,57 @@ class TheWriteEffectUsesTheSamePredicateAsTheWriteCommandTest(unittest.TestCase)
         self.assertIn("provenance.perms_source(stanza)", source)
 
 
-class TheForbiddenStateTest(unittest.TestCase):
-    """**`acl_reach = all` together with `acl_write_effect = no_route` is forbidden.**
+class TheRouteDoesNotDecideTheReachTest(unittest.TestCase):
+    """**The v4.6 rule "no route, therefore `unknown`" is withdrawn, and this test freezes
+    its withdrawal.**
 
-    Found at the reading trial: `searchbnf` came out `all` - announced reached in full -
-    and `no_handler`, that is unreachable by the tool. An operator sorting on
-    `acl_reach = all` was picking up a target the write fails on.
+    It rested on a false premise: it held a family outside the shipped table to be
+    unreachable, while section 8.3 has posed since v4.3 that the table bounds **resolution
+    by name**, never the write perimeter. Nothing stands between `[searchbnf]` and its
+    objects - `all` is the right answer, and correcting it made the verdict lie to
+    compensate for another column.
+
+    What v4.6 sought to avoid - an operator sorting on `acl_reach` picking up a target he
+    misreads - is handled where it belongs: `acl_write_effect` answers on every row.
     """
 
-    def test_the_pair_never_occurs_on_a_real_run(self):
+    def test_a_family_with_no_route_and_nothing_escaping_it_reads_all(self):
+        row = builder().family_row("my_app", "searchbnf", provenance())
+        self.assertEqual(row["acl_handler"], "")
+        self.assertEqual(row["acl_reach"], REACH_ALL)
+
+    def test_the_verdict_stays_recomputable_without_the_route(self):
+        """The derivation is mechanical, and its inputs are the four columns of the
+        table of section 7.4 - the route is not one of them."""
+        self.assertEqual(reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 0), REACH_ALL)
+
+    def test_the_derivation_takes_no_argument_about_the_route(self):
+        import inspect
+
+        self.assertEqual(
+            list(inspect.signature(reach_of).parameters),
+            ["stanza_kind", "file_read", "objects_with_own_perms",
+             "families_with_own_perms"],
+        )
+
+    def test_the_row_that_used_to_be_forbidden_now_carries_its_warning(self):
+        """The pair `all` + no route is no longer a defect - provided the row says what a
+        write there would do, which is the trade the withdrawal rests on."""
         prov = provenance(
             local=FROZEN_META + touched_stanza("unknown_family/x")
                   + touched_stanza("searchbnf/y")
         )
-        rows = list(
-            builder(prov=prov).rows(
-                make_params(families=("macros", "another_unknown")),
-                applications=["my_app"],
-            )
-        )
-        self.assertTrue(rows)
-        offenders = [
-            row["acl_stanza"] for row in rows
-            if row["acl_reach"] == REACH_ALL
-            and row["acl_write_effect"] == WRITE_EFFECT_NO_ROUTE
+        rows = [
+            row for row in builder(prov=prov).rows(
+                make_params(), applications=["my_app"])
+            if str(row["acl_handler"]) == ""
+            and row["acl_stanza_kind"] != STANZA_KIND_APP
         ]
-        self.assertEqual([], offenders,
-                         "row(s) announced reached in full with no route: %s" % offenders)
-
-    def test_the_negative_control_shows_the_fixture_reaches_that_case(self):
-        """Without a row that has no route, the sweep above would pass by vacuity."""
-        rows = list(
-            builder(prov=provenance(local=touched_stanza("searchbnf/y"))).rows(
-                make_params(), applications=["my_app"]
-            )
-        )
-        self.assertTrue(
-            any(row["acl_write_effect"] == WRITE_EFFECT_NO_ROUTE for row in rows)
-        )
-
-    def test_the_derivation_itself_refuses_the_pair(self):
-        self.assertEqual(
-            reach_of(STANZA_KIND_FAMILY, FILE_READ_OK, 0, 0, WRITE_EFFECT_NO_ROUTE),
-            REACH_UNKNOWN,
-        )
+        self.assertTrue(rows, "the fixture no longer covers a family with no route")
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertIn(row["acl_write_effect"],
+                              (WRITE_EFFECT_OVERWRITE, WRITE_EFFECT_CREATE))
 
 
 class TheEmptyCellSaysWhichKindOfEmptyTest(unittest.TestCase):
@@ -1111,26 +1213,42 @@ class TheEmptyCellSaysWhichKindOfEmptyTest(unittest.TestCase):
     decide `updated` against `created` on a write.
     """
 
-    def test_an_absent_key_reads_as_none(self):
+    def test_an_absent_key_says_so_in_the_cell_itself(self):
+        """**v4.7**: the column answers alone, instead of sending the reader to a
+        neighbour. `acl_perms_source` still says where the permissions live, and it says
+        `nowhere` here, but the file column no longer depends on it to be read."""
         row = builder().family_row("my_app", "views", provenance())
-        self.assertEqual(row["acl_file_perms_read"], "")
-        self.assertEqual(row["acl_perms_source"], LAYER_NONE)
+        self.assertEqual(row["acl_file_perms_read"], FILE_VALUE_ABSENT)
+        self.assertEqual(row["acl_perms_source"], LAYER_NOWHERE)
 
-    def test_a_present_key_with_an_empty_permission_names_its_layer(self):
-        """Same empty cell, opposite meaning - and now distinguishable."""
+    def test_a_present_key_with_an_empty_permission_stays_empty(self):
+        """Same key, opposite meaning - and the two cells no longer look alike."""
         empty = "[views]\naccess = read : [  ], write : [ admin ]\n"
         row = builder().family_row("my_app", "views", provenance(local=empty))
         self.assertEqual(row["acl_file_perms_read"], "")
         self.assertEqual(row["acl_perms_source"], LAYER_LOCAL)
         self.assertEqual(row["acl_file_perms_write"], "admin")
 
-    def test_the_two_cases_differ_only_by_the_column_that_explains_them(self):
+    def test_the_two_cases_no_longer_share_a_cell(self):
         absent = builder().family_row("my_app", "views", provenance())
         empty = builder().family_row(
             "my_app", "views",
             provenance(local="[views]\naccess = read : [  ], write : [  ]\n"))
-        self.assertEqual(absent["acl_file_perms_read"], empty["acl_file_perms_read"])
-        self.assertNotEqual(absent["acl_perms_source"], empty["acl_perms_source"])
+        self.assertNotEqual(absent["acl_file_perms_read"], empty["acl_file_perms_read"])
+        self.assertEqual(absent["acl_file_perms_read"], FILE_VALUE_ABSENT)
+        self.assertEqual(empty["acl_file_perms_read"], "")
+
+    def test_the_scope_is_decidable_too_and_that_is_what_v46_left_open(self):
+        """The v4.6 arrangement made `acl_perms_source` carry the distinction; it worked
+        for the permissions and left `acl_file_export` undecidable, which the second
+        reading trial raised. A stanza with no `export` key and a stanza exported to
+        nobody are now two different cells."""
+        no_key = builder().family_row(
+            "my_app", "views", provenance(local=touched_stanza("views")))
+        exported_to_nobody = builder().family_row(
+            "my_app", "views", provenance(local=frozen_stanza("views")))
+        self.assertEqual(no_key["acl_file_export"], FILE_VALUE_ABSENT)
+        self.assertEqual(exported_to_nobody["acl_file_export"], "none")
 
     def test_and_they_decide_opposite_write_effects(self):
         """Which is why the distinction is not presentation: it changes the act."""
@@ -1216,10 +1334,51 @@ class TheDocumentationNeverPointsOutsideTheArchiveTest(unittest.TestCase):
                 names.append(line.split()[0].rstrip("/"))
         return names
 
+    #: The one class of file `tools/` ships (v4.7 section 14.1, deliverable 4): the
+    #: re-validation procedures, which the contract declares a **prerequisite to any real
+    #: use** and which the installation section of the README names. A prerequisite the
+    #: operator cannot reach from the installed app is a prerequisite in name only.
+    SHIPPED_TOOLS = ("tools/revalidate_app_acl_mapping.py", "tools/revalidate_mapping.py")
+
     def test_the_exclusions_are_read_and_not_assumed(self):
         excluded = self._excluded()
         self.assertIn("DEVNOTES.md", excluded)
         self.assertIn("tests", excluded)
+
+    def test_the_re_validation_procedures_are_in_the_archive(self):
+        """**The named exception of v4.7**, and it is the deliverable that lifts the
+        clause rather than the clause that excuses itself. The README pointed at a
+        procedure the archive did not carry: the clause stood contradicted by its own
+        document, and a clause its document contradicts is worse than no clause. The fact
+        is corrected, not the rule."""
+        excluded = self._excluded()
+        for shipped in self.SHIPPED_TOOLS:
+            with self.subTest(path=shipped):
+                self.assertNotIn(shipped, excluded)
+                self.assertNotIn("tools", excluded,
+                                 "a directory-wide exclusion would prune the whole tree "
+                                 "and no per-file exception could be carved out of it")
+
+    def test_no_other_file_of_tools_ships_by_omission(self):
+        """The exception does not generalize, and it must not widen by inattention: a file
+        added to `tools/` and forgotten here would ship. The sweep reads the **directory**,
+        not a list written by hand."""
+        import os
+
+        from . import REPO_ROOT
+
+        excluded = set(self._excluded())
+        offenders = []
+        for name in sorted(os.listdir(os.path.join(REPO_ROOT, "tools"))):
+            path = "tools/%s" % name
+            if path in self.SHIPPED_TOOLS or path in excluded:
+                continue
+            offenders.append(path)
+        self.assertEqual(
+            [], offenders,
+            "file(s) of tools/ that would ship without being a declared prerequisite: %s"
+            % offenders,
+        )
 
     def test_no_markdown_link_points_at_an_excluded_document(self):
         targets = self.re.findall(r"\]\(([^)#]+)\)", self.readme)
@@ -1254,6 +1413,104 @@ class TheDocumentationNeverPointsOutsideTheArchiveTest(unittest.TestCase):
         for command in ("editacl", "appaclinventory", "editappacl"):
             with self.subTest(command=command):
                 self.assertIn("`%s`" % command, flat)
+
+
+class ReversibilitySpeaksWithOneVoiceTest(unittest.TestCase):
+    """**v4.7, deliverable 9 statement 3.** Every sentence of the README that speaks of
+    reversibility names the **command** and the **operation** it speaks of.
+
+    *Raised* at the second reading trial: the document asserted "the operation is
+    irreversible", then two paragraphs down "which is what makes the operation reversible".
+    Both were true of something and neither said of what - the second was a formulation
+    inherited from `editacl`, and it was about the **journal**. A reader deciding whether
+    to run a write had two contradictory answers and no way to tell which one applied.
+
+    The control is on the application-level sections, `editacl`'s own formulations staying
+    valid in `editacl`'s own sections.
+    """
+
+    #: What a sentence about reversibility must name. A bare "the operation" names nothing.
+    NAMES = ("editappacl", "appaclinventory", "app_acl_rollback", "app_acl_irreversible",
+             "acl_write_effect", "acl_reversible", "allow_create", "editacl")
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        import re
+
+        from . import REPO_ROOT
+
+        cls.re = re
+        cls.words = re.compile(r"reversib|irreversib|undo|undone|rolled back", re.I)
+        with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as handle:
+            cls.readme = handle.read()
+
+    def _blocks(self, body):
+        """Paragraphs, list items and table rows, wrapped lines joined."""
+        out, current = [], []
+        for line in body.splitlines():
+            stripped = line.strip().lstrip("> ").rstrip()
+            opens = (not stripped
+                     or stripped.startswith(("- ", "* ", "| ", "#", "```"))
+                     or self.re.match(r"^\d+\. ", stripped))
+            if opens:
+                if current:
+                    out.append(" ".join(current))
+                    current = []
+                if stripped:
+                    current = [stripped]
+                continue
+            current.append(stripped)
+        if current:
+            out.append(" ".join(current))
+        return out
+
+    def _application_level_sections(self):
+        parts = self.re.split(r"^## ", self.readme, flags=self.re.M)
+        sections = [("(opening)", parts[0])]
+        for chunk in parts[1:]:
+            title = chunk.splitlines()[0]
+            if "application" in title.lower() or "inventory" in title.lower():
+                sections.append((title, chunk))
+        return sections
+
+    def test_the_scope_of_the_control_is_not_empty(self):
+        """A sweep over nothing passes for the wrong reason."""
+        sections = self._application_level_sections()
+        self.assertGreaterEqual(len(sections), 4)
+
+    def test_every_sentence_about_reversibility_names_its_command(self):
+        offenders = []
+        for title, body in self._application_level_sections():
+            for block in self._blocks(body):
+                if not self.words.search(block):
+                    continue
+                if any(name in block for name in self.NAMES):
+                    continue
+                offenders.append("[%s] %s" % (title[:40], block[:120]))
+        self.assertEqual(
+            [], offenders,
+            "passage(s) speaking of reversibility without naming the command and the "
+            "operation:\n%s" % "\n".join(offenders),
+        )
+
+    def test_the_sweep_would_catch_the_sentence_that_was_found(self):
+        """Negative control, on the exact wording the reading trial raised."""
+        inherited = ("The intent line precedes the POST and is synchronised to disk: if it "
+                     "cannot be written, the POST is cancelled, which is what makes the "
+                     "operation reversible.")
+        self.assertTrue(self.words.search(inherited))
+        self.assertFalse(any(name in inherited for name in self.NAMES))
+
+    def test_no_application_level_creation_is_ever_called_reversible(self):
+        """The one contradiction that would survive the naming rule: a sentence naming
+        `editappacl` and calling a **creation** undoable."""
+        flat = " ".join(self.readme.split()).lower()
+        for wrong in ("creating one is reversible",
+                      "a creation can be undone",
+                      "creating a stanza is reversible"):
+            with self.subTest(sentence=wrong):
+                self.assertNotIn(wrong, flat)
 
 
 if __name__ == "__main__":                                       # pragma: no cover

@@ -168,7 +168,22 @@ class DeployableArchiveTest(unittest.TestCase):
     written `DEVNOTES` or `docs` without its trailing marker would silently stop matching.
     """
 
-    EXPORT_IGNORED = ("tests/", "tools/", "DEVNOTES.md", ".gitattributes", ".gitignore")
+    #: `tools/` is no longer excluded as a directory, and that is deliberate (v4.7
+    #: section 14.1, deliverable 4): the two re-validation procedures ship, the contract
+    #: declaring them a prerequisite to any real use and the README naming them in its
+    #: installation section. A directory-wide `export-ignore` prunes the whole tree, so no
+    #: per-file exception can be carved back out of it - hence the file-by-file form, and
+    #: hence the sweep of `tools/` in `test_appacl_inventory.py` that makes a file added
+    #: there and forgotten fail instead of ship.
+    EXPORT_IGNORED = (
+        "tests/", "DEVNOTES.md", ".gitattributes", ".gitignore",
+        "tools/__pycache__/", "tools/acl_probe_bootstrap.sh",
+        "tools/acl_probe_bootstrap_rest.py", "tools/hash_manifest.py",
+        "tools/requirements-vendor.txt", "tools/vendor.sh", "tools/verify_vendor.sh",
+    )
+
+    #: What `tools/` ships, and it is the whole of the exception.
+    EXPORTED_TOOLS = ("tools/revalidate_app_acl_mapping.py", "tools/revalidate_mapping.py")
 
     def setUp(self):
         with open(os.path.join(REPO_ROOT, ".gitattributes"), encoding="utf-8") as f:
@@ -180,6 +195,18 @@ class DeployableArchiveTest(unittest.TestCase):
             line.split()[0] for line in self.lines if "export-ignore" in line
         }
         self.assertEqual(ignored, set(self.EXPORT_IGNORED))
+
+    def test_the_declared_prerequisites_are_not_excluded(self):
+        """A prerequisite the operator cannot reach from the installed app is a
+        prerequisite in name only, and the README pointer at it would dangle."""
+        ignored = {line.split()[0] for line in self.lines if "export-ignore" in line}
+        for shipped in self.EXPORTED_TOOLS:
+            with self.subTest(path=shipped):
+                self.assertNotIn(shipped, ignored)
+                self.assertTrue(
+                    os.path.exists(os.path.join(REPO_ROOT, shipped)),
+                    "the archive would carry a path that does not exist",
+                )
 
     def test_the_vendored_dependencies_are_stored_verbatim(self):
         # A line-ending conversion would invalidate bin/lib/MANIFEST.sha256 at clone

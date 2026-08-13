@@ -109,9 +109,16 @@ META_EXPORT_KEY = "export"
 #: holds to be **opposite** everywhere else (Q0-3: an empty permission leaves the object
 #: unreachable, an absent stanza makes it inherit), and the two states that decide
 #: `updated` against `created` on a write.
+#:
+#: **`nowhere`, and not `none`** (v4.7). `none` is a **literal `export` value** on the
+#: Splunk side, and `acl_file_export` publishes it verbatim two columns away. The same
+#: token carried two opposite meanings on the same row - *written nowhere* here, *exported
+#: to nobody* there - which the second reading trial flagged. The platform's vocabulary
+#: wins; it is our column that changes word. A test freezes the disjunction rather than
+#: the wording, so the trap cannot be reintroduced under another name.
 LAYER_LOCAL = "local"
 LAYER_DEFAULT = "default"
-LAYER_NONE = "none"
+LAYER_NOWHERE = "nowhere"
 
 #: Closed domain of `acl_file_read` (v4.5 section 7.4). It separates *the stanza is not in
 #: this file* from *the file could not be read in full* - the second invalidates the
@@ -543,9 +550,11 @@ class AppProvenance(object):
         `local` wins when both layers carry the key, and that is not a preference: at equal
         specificity the local layer is the one splunkd applies (measured, HY-2).
 
-        `none` means **no `access` key anywhere** - not "no stanza". A stanza can exist and
-        carry only `export`, which is the `[commands]` case, and the reading trial could
-        not tell that from a stanza carrying an empty permission.
+        `nowhere` means **no `access` key anywhere** - not "no stanza". A stanza can exist
+        and carry only `export`, which is the `[commands]` case, and the reading trial
+        could not tell that from a stanza carrying an empty permission. The word is
+        `nowhere` and not `none` because `none` is a literal `export` value of the
+        platform, published verbatim by a neighbouring column of the same row.
 
         **It does not say where the effective value comes from.** That promise was withdrawn
         in v4.5 rather than repaired: answering it would mean replaying the platform's
@@ -555,14 +564,14 @@ class AppProvenance(object):
             return LAYER_LOCAL
         if materializes_permissions(self.default.get(stanza)):
             return LAYER_DEFAULT
-        return LAYER_NONE
+        return LAYER_NOWHERE
 
     def access_literal(self, stanza):
         """The literal keys carrying the permissions, from the layer `perms_source` names.
 
-        Empty mapping when no layer carries an `access` key - which the column beside it
-        reports as `none`, so an empty cell is never mute about which of the two states it
-        is in.
+        Empty mapping when no layer carries an `access` key - which `acl_perms_source`
+        reports as `nowhere`, and which the file columns themselves publish as the
+        `(absent)` token, so a value is never mute about which of the two states it is in.
         """
         source = self.perms_source(stanza)
         if source == LAYER_LOCAL:

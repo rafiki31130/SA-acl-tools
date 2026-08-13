@@ -19,12 +19,14 @@ where the two most serious findings came from.
     file             what the .meta carries, literally       acl_file_*
     decision         what stands between this stanza and the objects
 
-**One rule governs the whole table: no column is ever empty without another saying why.**
-`acl_effective_status` explains the three platform columns, `acl_stanza_layer` and
-`acl_file_read` explain the three file columns, and an empty `acl_handler` is explained by
-`acl_effective_status = no_handler`. Every other column is always filled. The version
-before this one carried **four** semantics of emptiness, and an empty cell that reads like
-a breakdown is a defect rather than a detail.
+**One rule governs the whole table, and v4.7 completes it: no column is ever empty without
+another saying why - nor without something saying whether that emptiness is an absence or
+an empty set.** `acl_effective_status` explains the three platform columns; the three
+`acl_file_*` columns say their own absence with the `(absent)` token, so an empty cell
+there means one thing only, *the key is written and carries no value*; `acl_file_read` says
+when the file-level values are suspect; and an empty `acl_handler` has **one definition and
+only one** - the family is not in the table shipped with the tool. Writing there remains
+possible through an explicit handler (section 8.3).
 
 `acl_reach` is **a derivation, not an appreciation** (section 7.4): each of its values
 recomputes from the columns beside it, so an operator who distrusts the verdict can redo
@@ -44,7 +46,7 @@ from .appacl_model import (
 from .appacl_provenance import (
     FILE_READ_OK,
     LAYER_LOCAL,
-    LAYER_NONE,
+    LAYER_NOWHERE,
     META_ACCESS_KEY,
     META_EXPORT_KEY,
     classify_stanza,
@@ -80,9 +82,37 @@ def stanza_label(name):
 #: applied to reading instead of writing. It is not reimplemented here: it comes from
 #: `AppProvenance.perms_source`, which calls the same `materializes_permissions` the write
 #: command calls through `materialized_local`.
+#:
+#: **Two values, and the domain is exhaustive** (v4.7): every target falls into one or the
+#: other, on **every** row. The v4.6 third value `no_route` is withdrawn, and it was a
+#: design defect rather than a wording one. It monopolized the column: on a family outside
+#: the shipped table, this column spoke of the **route** and said nothing of
+#: reversibility - while the route is not closed at all (section 8.3, deliberate since
+#: v4.3: an explicit `acl_handler` addresses any handler). An operator taking that door on
+#: an out-of-table family **created an irreversible stanza with no warning from the
+#: table** - exactly the hole this column exists to close, reopened by the column itself on
+#: the rows where the tool guides least.
+#:
+#: Reachability and reversibility are two questions, and one column carries one. The route
+#: is said by `acl_handler` - empty or not, with a single definition - and its consequence
+#: for reading by `acl_effective_status`.
 WRITE_EFFECT_OVERWRITE = "overwrite_reversible"
 WRITE_EFFECT_CREATE = "create_irreversible"
-WRITE_EFFECT_NO_ROUTE = "no_route"
+
+#: The token the three `acl_file_*` columns publish when **the key is not written** (v4.7
+#: section 7.4).
+#:
+#: The v4.6 arrangement made `acl_perms_source` carry the *absence / empty set* distinction
+#: for the permissions. It worked there and **left the scope unanswered**: an empty
+#: `acl_file_export` stayed undecidable, which the second reading trial raised. Rather than
+#: adding a second source column for `export`, the three file columns **say the absence
+#: themselves**. A column that answers alone beats a pair that has to be interpreted, and
+#: this removes a rule instead of adding one.
+#:
+#: The token cannot be confused with a real value: neither a role name nor a platform
+#: `export` value is written between parentheses. An empty cell in those three columns
+#: therefore means **one thing only** - the key is written and carries no value.
+FILE_VALUE_ABSENT = "(absent)"
 
 #: Closed domain of `acl_row_reason` (section 7.4) - *why is this row here?*
 #:
@@ -103,9 +133,9 @@ ROW_REASON_REQUESTED = "requested"
 #: fifth of the rows were mute.
 #: **One nature only, since v4.6.** `no_handler` used to live here and said a fact about
 #: the **tool** in a column that answers *could the platform be read*. The reading trial
-#: classified the column as `guessed` for that single reason. The route moved to
-#: `acl_write_effect`; a family with no route reads as `unreadable`, and the neighbouring
-#: column says why.
+#: classified the column as `guessed` for that single reason. A family the tool cannot
+#: reach by name reads as `unreadable`, and `acl_handler` - empty - says which of the two
+#: causes it is: **empty** means no route by name, **filled** means the call failed.
 EFFECTIVE_OK = "ok"
 EFFECTIVE_APP_DISABLED = "app_disabled"
 EFFECTIVE_UNREADABLE = "unreadable"
@@ -156,7 +186,7 @@ APPS_PATH = "/services/apps/local"
 #: fact, since the first row of an inventory is an `app_default` row, which is the one
 #: row whose object count spans the whole application rather than one family.
 #:
-#: The order is that of the table of section 7.4, and the first eight fields are
+#: The order is that of the table of section 7.4, and the first seven fields are
 #: **exactly** the input contract of `editappacl`: a pipeline built on this command needs
 #: no parameter at all.
 INVENTORY_OUTPUT_FIELDS = (
@@ -343,10 +373,20 @@ def split_access(literal):
     reformatting them would blur the very comparison they exist to allow - what the file
     says next to what splunkd serves.
 
-    Total, like every reader of section 6.4: an absent key, a missing bracket, an
-    unexpected order all yield empty strings rather than an exception.
+    **What is not written comes back as `(absent)`** (v4.7): no `access` key at all, or an
+    `access` key with no clause for that side. What is written and carries no role comes
+    back **empty**. The two states are opposite everywhere else in this contract - an empty
+    permission leaves the object unreachable, an absent stanza makes it inherit - and they
+    are the two states that decide `updated` against `created` on a write. A table that
+    renders them identically hides the one thing it exists to let an operator decide.
+
+    Total, like every reader of section 6.4: a missing bracket or an unexpected order
+    yields the absent token rather than an exception.
     """
-    text = str((literal or {}).get(META_ACCESS_KEY) or "")
+    keys = literal or {}
+    if META_ACCESS_KEY not in keys:
+        return FILE_VALUE_ABSENT, FILE_VALUE_ABSENT
+    text = str(keys.get(META_ACCESS_KEY) or "")
     found = {}
     for chunk in _split_top_level(text):
         if ":" not in chunk:
@@ -355,7 +395,8 @@ def split_access(literal):
         key = key.strip().lower()
         if key in ("read", "write"):
             found[key] = _strip_brackets(value)
-    return found.get("read", ""), found.get("write", "")
+    return (found.get("read", FILE_VALUE_ABSENT),
+            found.get("write", FILE_VALUE_ABSENT))
 
 
 def _split_top_level(text):
@@ -391,24 +432,31 @@ def _strip_brackets(value):
 
 
 def export_of(literal):
-    """Literal `export` key of the stanza, empty when absent."""
-    return str((literal or {}).get(META_EXPORT_KEY) or "").strip()
+    """Literal `export` key of the stanza, `(absent)` when the key is not written.
+
+    Same rule as `split_access`, and for the same reason: an empty cell here means the key
+    is written and carries nothing. The distinction matters on `export` as much as on the
+    permissions - the second reading trial could not tell an unexported stanza from a
+    stanza with no `export` key at all, and only the first is a decision.
+    """
+    keys = literal or {}
+    if META_EXPORT_KEY not in keys:
+        return FILE_VALUE_ABSENT
+    return str(keys.get(META_EXPORT_KEY) or "").strip()
 
 
 # --------------------------------------------------------------------------- #
 # Governability - a derivation, never an appreciation
 # --------------------------------------------------------------------------- #
 
-def write_effect_of(has_route, perms_source):
-    """`acl_write_effect` (v4.6 section 7.4) - **what a write would do to this target.**
+def write_effect_of(perms_source):
+    """`acl_write_effect` (v4.7 section 7.4) - **what a write would do to this target.**
 
         overwrite_reversible   the target already carries its permissions in `local.meta`:
                                a write replaces them, and `app_acl_rollback` can undo it
         create_irreversible    a write would MATERIALIZE permissions in `local.meta` where
                                there are none - nothing removes them afterwards, and
                                `editappacl` refuses without `allow_create=true`
-        no_route               the tool has no handler for this family and cannot write to
-                               it by name at all
 
     **The predicate is exactly the one of section 9.2**, applied to reading instead of
     writing: `perms_source` comes from `AppProvenance.perms_source`, which calls the same
@@ -416,38 +464,37 @@ def write_effect_of(has_route, perms_source):
     two commands answer the same question with the same rule, and the inventory stops
     obliging the operator to reconstitute it.
 
-    The order matters: with no route there is nothing to say about reversibility, so
-    `no_route` wins.
+    **The domain is exhaustive and the column answers on every row**, out-of-table families
+    included - it takes no argument about the route, and that is the v4.7 correction: the
+    row where the tool guides least is the row that most needs to be told a write there
+    cannot be undone.
     """
-    if not has_route:
-        return WRITE_EFFECT_NO_ROUTE
     if perms_source == LAYER_LOCAL:
         return WRITE_EFFECT_OVERWRITE
     return WRITE_EFFECT_CREATE
 
 
-def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_perms,
-             write_effect=None):
+def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_perms):
     """`acl_reach` (section 7.4) - **the verdict of scope**, recomputable from its
     neighbours.
 
         family_default   all   no object of the family carries its own permissions
         app_default      all   no object AND no family carries its own permissions
         both             unknown as soon as the metadata could not be read in full
-        family_default   unknown as soon as there is no route
 
-    **`all` together with `no_route` is a forbidden state, and v4.6 forbids it.** The
-    reading trial found `searchbnf` reported `all` - so announced reached in full - while
-    also `no_handler`, that is unreachable by the tool. An operator sorting on
-    `acl_reach = all` was picking up a target the write fails on. The scope of an action the
-    tool cannot carry out is not `all`; it is not known.
+    **The v4.6 rule "no route, therefore `unknown`" is withdrawn** (v4.7): it rested on a
+    false premise. It held a family outside the shipped table to be unreachable, while
+    section 8.3 has posed since v4.3 that the table bounds **resolution by name**, never
+    the write perimeter. Nothing stands between `[searchbnf]` and its objects: `all` is the
+    **right** answer, and correcting it made the verdict lie to compensate for another
+    column. What v4.6 sought to avoid - an operator sorting on `acl_reach` picking up a
+    target he misreads - is handled where it belongs: `acl_write_effect` now says on
+    **every** row what a write would do, out-of-table families included.
 
-    Both causes of `unknown` are named by a neighbouring column - `acl_file_read` for the
-    read, `acl_write_effect` for the route - as the rule of the empty cell requires.
+    The one cause of `unknown` is named by a neighbouring column, `acl_file_read`, as the
+    rule of the empty cell requires.
     """
     if str(file_read or "") != FILE_READ_OK:
-        return REACH_UNKNOWN
-    if write_effect == WRITE_EFFECT_NO_ROUTE:
         return REACH_UNKNOWN
     if int(objects_with_own_perms or 0) > 0:
         return REACH_PARTIAL
@@ -480,8 +527,8 @@ def families_to_emit(provenance, requested):
     application, whose proportion of blank cells would hide the information.
 
     Conditions 1 and 2 come from the **file**, so a family the shipped table does not know
-    still shows up: its `acl_handler` is empty and `acl_effective_status` says
-    `no_handler`, which is a fact about the tool and not about the platform.
+    still shows up: its `acl_handler` is empty, which is a fact about the tool and not
+    about the platform, and `acl_write_effect` still says what a write there would do.
 
     **The measured edge case is instructive**: two `[macros/...]` stanzas written by splunkd
     and carrying only `version` and `modtime` are enough to emit the `macros` family, with
@@ -544,9 +591,9 @@ class InventoryBuilder(object):
         """`(state, acl_effective_status)`.
 
         **One nature only since v4.6**: this answers *could the platform be read*. With no
-        route there is nothing to read, so the answer is `unreadable` and the reason lives
-        in `acl_write_effect` - a fact about the tool, in the column that carries facts
-        about the tool.
+        route by name there is nothing to read, so the answer is `unreadable`, and the pair
+        with `acl_handler` tells the two causes apart - empty handler, no route; filled
+        handler, the call failed.
         """
         if stanza_kind == STANZA_KIND_APP:
             endpoint = build_app_default_path(app)
@@ -579,8 +626,7 @@ class InventoryBuilder(object):
         file_read = provenance.read_status()
         objects = provenance.frozen_count(scope)
         families = provenance.family_header_count()
-        has_route = stanza_kind == STANZA_KIND_APP or bool(handler)
-        write_effect = write_effect_of(has_route, perms_source)
+        write_effect = write_effect_of(perms_source)
 
         return {
             "eai:acl.app": app,
@@ -600,8 +646,7 @@ class InventoryBuilder(object):
             "acl_file_read": file_read,
             "acl_objects_with_own_perms": objects,
             "acl_families_with_own_perms": families,
-            "acl_reach": reach_of(stanza_kind, file_read, objects, families,
-                                  write_effect),
+            "acl_reach": reach_of(stanza_kind, file_read, objects, families),
             "acl_member": self._member,
         }
 

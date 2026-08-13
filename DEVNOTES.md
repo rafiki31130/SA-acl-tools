@@ -2951,6 +2951,62 @@ this, because none of it is a property of the code. It is a property of what a h
 Integration scenario 14bis exists for that: a real output, a reader who has read nothing, and
 a column they cannot name is a defect of the output rather than of their attention.
 
+**Two column names in that account are historical.** `acl_stanza_layer` became
+`acl_perms_source` in v4.6 - the question moved from *which layer holds the stanza* to *which
+layer holds the permissions* - and the passage above is kept as the record of the v4.5
+episode, not as a description of the current output.
+
+### 27.12 The second reading trial, and the three corrections it bought
+
+The same protocol, run again on the v4.6 output: **16 columns clear, 3 guessed, 0 opaque**,
+against 10 / 7 / 1 the first time. The exit criterion is not the score but its shape - **no
+guessed column among those that carry a decision**, and **no contradiction inside the README**.
+Three things stood between the output and that criterion, and none of them was a missing
+column: the count stayed at nineteen, and every correction bore on a **value domain**, a
+**writing convention**, or a **documentation clause**.
+
+**`acl_write_effect` was monopolized by the route.** On a family outside the shipped table it
+answered `no_route` and said nothing at all about reversibility - on the very rows where the
+tool guides least. The route is not closed: section 8.3 has posed since v4.3 that an explicit
+`acl_handler` addresses any handler, so an operator taking that door **created an irreversible
+stanza with no warning from the table**. That is the hole the column exists to close, reopened
+by the column itself. Two questions, two columns: the route is said by `acl_handler` - empty
+or not, with one definition - and the decision column now answers on every row, two values, no
+third.
+
+**The empty cell had a second meaning nobody could resolve.** v4.6 made `acl_perms_source`
+carry the *absence / empty set* distinction. It worked for the permissions and left the scope
+undecidable: an empty `acl_file_export` could be an unwritten key or a key written to nothing,
+and those are opposite states. Rather than a second source column for `export`, the three file
+columns now **say their own absence** with the `(absent)` token. A column that answers alone
+beats a pair to interpret, and this removed a rule instead of adding one.
+
+**`none` carried two opposite meanings on one row.** It is a literal `export` value on the
+Splunk side, and `acl_perms_source` was also using it for *written nowhere*. The platform's
+vocabulary wins; our column says `nowhere`. The test freezes the **disjunction** rather than
+the word, so the trap cannot come back under another name.
+
+**And a rule was withdrawn rather than replaced.** v4.6 made `acl_reach` read `unknown` when
+there was no route. The premise was false - the table bounds resolution **by name**, never the
+write perimeter - so nothing stands between `[searchbnf]` and its objects and `all` is the
+right answer. Correcting the verdict to compensate for another column made it lie. What v4.6
+feared is now handled where it belongs, by a decision column that answers everywhere.
+
+**The re-validation procedures entered the archive**, which is the one deliverable change. The
+README pointed at an artefact the contract calls a prerequisite to any real use and the
+archive did not carry: the no-dangling-reference clause stood **contradicted by its own
+document**. Of the two ways out - drop the pointer or ship the artefact - only the second keeps
+the requirement. `tools/` is therefore excluded file by file: a directory-wide `export-ignore`
+prunes the tree and no exception can be carved back out of it, and a test sweeps the directory
+so that a file added there cannot ship by omission.
+
+**What this second episode says.** Every correction above came from a reader, none from the
+suite, and the suite was not weak - it was answering questions about the code while these were
+questions about what the output *means*. The tests written since do not re-check the values;
+they freeze the **properties** that made the values wrong: one definition per column, one
+meaning per token, domains disjoint from the platform's vocabulary, and a document that never
+sends the operator somewhere it did not ship.
+
 ---
 
 ## Reading order for a cold start

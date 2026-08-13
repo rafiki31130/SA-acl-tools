@@ -19,9 +19,16 @@ and a run monitoring view. Driving use case: decommissioning legacy roles, by
 **substitution** with the roles of a new entitlement structure, or by **deprecation**
 (renaming to `deprecated_<name>`).
 
-> **The operation is irreversible.** The write-ahead journal and the rollback macros are
-> the only safety net. Read [Rollback](#the-other-shipped-objects) **before** the first
-> real write.
+> **Not every write can be undone, and the difference is not a detail.** An `editacl`
+> write **replaces** the ACL of an object that already has one, and
+> `` `editacl_rollback_apply(<sid>)` `` restores the prior state from the journal. An
+> `editappacl` write that **creates** a generic stanza where none existed is undone by
+> nothing at all - no rollback macro, no REST path (see
+> [Creating a stanza with `editappacl` cannot be undone](#creating-a-stanza-with-editappacl-cannot-be-undone)); that is why
+> the command refuses it unless you pass `allow_create=true`, and why `appaclinventory`
+> tells you which of the two you are about to do **before** you do it. The write-ahead
+> journal and the rollback macros are the only safety net there is: read
+> [Rollback](#the-other-shipped-objects) **before** the first real write.
 
 > ### Order of use, and it is not a preference
 >
@@ -77,8 +84,12 @@ flowchart LR
 ```
 
 The intent line precedes the POST and is synchronised to disk: if it cannot be written,
-the POST is cancelled, which is what makes the operation reversible. Nothing runs in
-parallel, and one input event always produces exactly one output event.
+the POST is cancelled. That is what makes an **`editacl` write to an object's ACL**
+undoable - the prior state is on disk before anything changes, and
+`` `editacl_rollback_apply(<sid>)` `` replays it. It is a property of the **journal**, not
+of the write: an `editappacl` **creation** of a generic stanza stays irreversible however
+completely the journal records it. Nothing runs in parallel, and one input event always
+produces exactly one output event.
 
 ---
 
@@ -355,12 +366,12 @@ columns say what the **file** carries, some what the **platform** applies, some 
 > are about to launch can be undone. Everything else describes a state; that one describes
 > the consequence of an action.
 
-> **No column is ever empty without another saying why - nor without another saying whether
-> the empty means "absent" or "empty set".** If the three `eai:acl.*` cells are blank,
-> `acl_effective_status` says what stopped the read. If the two `acl_file_perms_*` cells are
-> blank, `acl_perms_source` says which of the two emptinesses it is: `none` means the
-> permissions are written **nowhere**, `local` or `default` mean they are written **there
-> and are empty**. Those two states are opposites, and they decide different writes.
+> **No column is ever empty without another saying why - nor without saying whether the
+> empty means "absent" or "empty set".** If the three `eai:acl.*` cells are blank,
+> `acl_effective_status` says what stopped the read. The three `acl_file_*` cells say their
+> own absence: a key that is **not written** comes out as `(absent)`, so a blank there means
+> one thing only - the key is written and holds no value. Those two states are opposites,
+> and they decide different writes.
 
 ### Identification - which stanza is this row about, and why is it here
 
@@ -369,12 +380,17 @@ columns say what the **file** carries, some what the **platform** applies, some 
 | `eai:acl.app` | Which application | a name |
 | `acl_stanza_kind` | Is this the application default, or one family | `app_default`, `family_default` |
 | `acl_stanza` | Which stanza, written as the file writes it, brackets included | `[]`, `[views]`, `[commands]` |
-| `acl_handler` | Which REST path the tool reaches this family by | a path, or empty |
+| `acl_handler` | Which REST path the tool reaches this **family** by, **by name** | a path, or empty |
 | `acl_row_reason` | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
 
-An empty `acl_handler` means the tool has no route to this family, and `acl_write_effect`
-says so with `no_route`. On an application row it is empty because a `[]` address needs no
-handler, and `acl_stanza_kind` says that.
+**An empty `acl_handler` means one thing, and one thing only: this family is not in the
+table shipped with the tool.** It does not mean the family cannot be written to - the table
+bounds resolution **by name**, never the write perimeter, and passing `acl_handler=` yourself
+addresses any handler (see [the `acl_handler` door](#acl_handler-addresses-any-handler-and-that-door-is-deliberate)).
+The rest of the row keeps answering: `acl_write_effect` still says what a write there would
+do, and `acl_reach` still says how far the stanza carries. Application rows describe no
+family and carry no handler at all: `[]` is addressed by the application name alone, and
+`acl_stanza_kind` says which kind of row you are on.
 
 `acl_row_reason` is the column to read first when a row surprises you. `stanza_exists` means
 the stanza is written in a metadata file. **`objects_exist` means it is not** - the family is
@@ -390,33 +406,40 @@ family worth showing. `requested` means you asked for it with `families=`.
 | `eai:acl.sharing` | Which scope applies, today | `app`, `global`, `user` |
 | `acl_effective_status` | Were those three **read**, and if not why | `ok`, `app_disabled`, `unreadable` |
 
-This column answers one question only: could the platform be read. When there is no route to
-read through, it says `unreadable` and `acl_write_effect` says why.
+`acl_effective_status` answers one question only: could the platform be read. `unreadable`
+covers its two causes, and **`acl_handler` tells them apart** - **empty**, there is no route
+to this family by name; **filled**, the call was made and it failed.
 
 ### Decision - what a write would do, and what stands in its way
 
 | Column | The question it answers | Values |
 |---|---|---|
-| `acl_write_effect` | **What a write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible`, `no_route` |
+| `acl_write_effect` | **What an `editappacl` write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible` |
 | `acl_objects_with_own_perms` | How many objects carry **their own permissions** and therefore escape this stanza | a count |
 | `acl_families_with_own_perms` | How many families of this application carry their own permissions and therefore escape `[]` | a count |
 | `acl_reach` | Does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
 
-**`acl_write_effect` is the safety column.**
+**`acl_write_effect` is the safety column**, and it answers on **every** row - two values,
+no third.
 
 - `overwrite_reversible` - the stanza already carries its permissions in the **local** layer.
-  A write replaces them, and `` `app_acl_rollback(<sid>)` `` can put them back.
+  An `editappacl` write **replaces** them, and `` `app_acl_rollback(<sid>)` `` can put the
+  previous values back.
 - `create_irreversible` - the permissions are **not** in the local layer, whether they sit in
-  the default layer or nowhere. A write **materialises** them there, and **nothing removes
-  them afterwards**: no rollback, no REST path. `editappacl` refuses such a target unless you
-  pass `allow_create=true`. **This is the common case on a freshly installed application**,
-  whose stanzas are all shipped in the default layer.
-- `no_route` - the tool has no handler for this family and cannot write to it by name.
+  the default layer or nowhere at all. An `editappacl` write **materialises** them there, and
+  **nothing removes them afterwards**: no rollback, no REST path. `editappacl` refuses such a
+  target unless you pass `allow_create=true`. **This is the common case on a freshly
+  installed application**, whose stanzas are all shipped in the default layer.
 
-`acl_reach` reads `all` only when nothing stands in the way **and** a route exists. It reads
-`unknown` when the metadata could not be read in full, or when there is no route - a scope
-the tool cannot act on is not known to be reached. Both causes are named by the column beside
-it: `acl_file_read` for the first, `acl_write_effect` for the second.
+`acl_write_effect` does **not** consult the route, and that is deliberate: a family outside
+the shipped table is still writable with `editappacl` through an explicit `acl_handler`, so it
+is precisely the row where you most need to be told that the write cannot be undone.
+
+`acl_reach` reads `all` when nothing stands between this stanza and the objects of its scope.
+It reads `unknown` for one reason only - the metadata could not be read in full - and
+`acl_file_read` names it. A family with no route in the shipped table reads `all` when nothing
+escapes it: nothing stands in the way, and the missing route is a fact about the tool that
+`acl_handler` states on its own.
 
 The scope of `acl_objects_with_own_perms` is the scope of the row: the family on a family
 row, the whole application on an application row. `acl_families_with_own_perms` is an
@@ -430,16 +453,28 @@ else; such an object still inherits, and is not counted.
 
 | Column | The question it answers | Values |
 |---|---|---|
-| `acl_perms_source` | **Where this stanza's permissions are written** - so which layer the two cells below quote, and what a write would do | `local`, `default`, `none` |
-| `acl_file_perms_read` | What that stanza writes for reading | roles, or empty |
-| `acl_file_perms_write` | What it writes for writing | roles, or empty |
-| `acl_file_export` | What the stanza writes for `export` | the text, or empty |
+| `acl_perms_source` | **Where this stanza's permissions are written** - so which layer the two cells below quote, and what an `editappacl` write would do | `local`, `default`, `nowhere` |
+| `acl_file_perms_read` | What that stanza writes for reading | roles, empty, or `(absent)` |
+| `acl_file_perms_write` | What it writes for writing | roles, empty, or `(absent)` |
+| `acl_file_export` | What the stanza writes for `export` | the text, empty, or `(absent)` |
 | `acl_file_read` | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
 
 `acl_perms_source` is decided by one thing: whether an `access` key exists, and in which
-layer. `none` means **no `access` key anywhere** - the stanza may still exist and carry an
-`export`, which is why `acl_file_export` can be filled while the two permission cells are
-empty.
+layer. `nowhere` means **no `access` key anywhere** - the stanza may still exist and carry an
+`export`, which is why `acl_file_export` can be filled while the two permission cells read
+`(absent)`.
+
+> **The word is `nowhere` and not `none`, and that is not a nicety.** `none` is a literal
+> `export` value on the Splunk side, and you will read it in `acl_file_export` two columns
+> away. One token for two opposite meanings on the same row is one token too many; the
+> platform's vocabulary wins, and it is our column that changes word.
+
+**`(absent)` means the key is not written; a blank means the key is written and carries
+nothing.** The two are opposites: a permission written empty leaves the objects
+**unreachable**, while an unwritten one leaves them **inheriting** from one level up. They
+are also the two states that decide whether an `editappacl` write **updates** or **creates**.
+No role name and no `export` value of the platform is spelled between parentheses, so the
+token cannot be mistaken for a value read from the file.
 
 **These columns quote the file; the `eai:acl.*` columns show what splunkd applies.** When the
 two disagree, something else is deciding - the other layer, or a generic stanza one level up.
@@ -540,10 +575,12 @@ replaces the whole `access` line as soon as one permission is present, so sendin
 > where the URI has a hyphen. Run the re-validation procedure, or a simulation, before
 > trusting an off-table handler.
 
-> ### Creating a stanza cannot be undone
+> ### Creating a stanza with `editappacl` cannot be undone
 >
-> No measured REST path removes a generic stanza, at any level. Modifying one is
-> reversible; **creating one is not**. Writing `[]` into the `local.meta` of an
+> No measured REST path removes a generic stanza, at any level. An `editappacl` write that
+> **modifies** an existing generic stanza is reversible - `` `app_acl_rollback_apply(<sid>)` ``
+> replays the prior state; an `editappacl` write that **creates** one is not, by any means
+> this app or the platform offers. Writing `[]` into the `local.meta` of an
 > application that had none masks the `[]` of its `default.meta` - the permissions shipped
 > with the application - permanently.
 >
@@ -565,7 +602,7 @@ replaces the whole `access` line as soon as one permission is present, so sendin
 > act and which are plain modifications.
 
 **Two ceilings, counting two different things.** `max_stanzas` bounds the number of
-**acts** - some of which cannot be undone; `max_impacted_objects` bounds the estimated
+**acts** an `editappacl` run performs - some of which cannot be undone; `max_impacted_objects` bounds the estimated
 **blast radius**. Neither is enough alone: one write on the default of a large application
 is a single act with an immense reach, and twenty writes on empty families move nothing.
 **Neither ever fires in simulation**, which sends no POST, so a `dryrun` always covers the
