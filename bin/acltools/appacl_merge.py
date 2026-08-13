@@ -1,4 +1,4 @@
-"""Merge engine of the application-level command (v4.1 sections 8.4, 8.6).
+"""Merge engine of the application-level command (v4.2 sections 8.4, 8.6).
 
 **The presence of the column alone decides whether to modify or to preserve; the cell
 only decides the value** - the semantics of v3.14 section 3.2, reconducted without
@@ -14,8 +14,8 @@ Two things are specific to this command, and both are measured.
 paths is a **block replacement conditioned on the presence of at least one
 permission**: with one `perms.*` in the body, the `access` line is replaced whole and
 the absent one is **deleted** from the file; with none, `access` is preserved entirely
-(Q0-1 cases B, C and L, Q0-2 "omission de perms.write"). A command that only wanted to
-touch `read` therefore has to re-read and send **both**.
+(Q0-1 cases B, C and L, and Q0-2 on the omission of `perms.write`). A command that only
+means to touch `read` therefore has to re-read and send **both**.
 
 **`sharing` is the only lever, and `user` is refused.** `export` is never transmitted:
 both handlers answer `400 Argument "export" is not supported by this handler.`

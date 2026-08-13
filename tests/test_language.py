@@ -153,6 +153,21 @@ _MARKER_RE = re.compile(
 #: Latin `et al.` / `et cetera`, which the lookahead spares.
 _ET_RE = re.compile(r"(?i)(?<![\w-])et(?![\w-])(?!\s+(?:al\b|cetera\b))")
 
+#: `de`, on the same pattern, **added by the remediation of 2026-08-13**.
+#:
+#: The pre-delivery audit found two French fragments in shipped modules that this
+#: detector walked straight past. One of them - `"omission de perms.write"`, a quoted
+#: fragment of a measurement report - carries no function word of the list above, no
+#: elision and no accent: `de` was the only French token in it, and `de` was not watched.
+#:
+#: It is safe here for the reason `et` is: **measured on this repository, zero standalone
+#: occurrences**, and the only English uses are Latin borrowings, which the lookahead
+#: spares. A marker whose false-positive rate is measured rather than assumed is a marker
+#: that survives the next contributor.
+_DE_RE = re.compile(
+    r"(?i)(?<![\w-])de(?![\w-])(?!\s+(?:facto\b|jure\b|novo\b|minimis\b))"
+)
+
 #: French elision: a single-letter (or `qu`-family) word joined to the next one by an
 #: apostrophe - `d'un`, `l'objet`, `n'est`, `qu'il`, `jusqu'a`.
 #:
@@ -186,7 +201,7 @@ def scan_text(text):
     """
     hits = []
     for number, line in enumerate(text.splitlines(), 1):
-        for regex in (_MARKER_RE, _ET_RE, _ELISION_RE):
+        for regex in (_MARKER_RE, _ET_RE, _DE_RE, _ELISION_RE):
             for match in regex.finditer(line):
                 hits.append((number, match.group(0), line.strip()))
     return hits
@@ -273,6 +288,45 @@ class RepositoryIsInEnglishTest(unittest.TestCase):
             % (len(faults), "\n".join(faults[:60])),
         )
 
+    #: Latin-1 accented letters. Second net, and it catches what a word list cannot: a
+    #: quoted French fragment carrying neither a function word nor an elision.
+    ACCENTED = "àâäçèéêëîï" \
+               "ôöùûüœ"
+
+    def test_no_accented_letter_in_the_shipped_python_modules(self):
+        """Added by the remediation of 2026-08-13, for a fragment that got through.
+
+        The audit found `Alias mesures` - with an acute accent - in a shipped module: a
+        quoted fragment of a French measurement report, with no function word and no
+        elision, invisible to the word list. An accented letter is visible, and the
+        shipped Python carries none.
+
+        The scope is deliberately narrow: **`bin/` only**, that is the Python that ships
+        inside the archive. `tests/` and `tools/` are `export-ignore`d and legitimately
+        carry accented characters - `tools/acl_probe_bootstrap_rest.py` builds an object
+        whose name exercises the URI-encoding rule, and that fixture has to look like what
+        it tests. Widening this net would make it a nuisance, and a nuisance guard rail is
+        a deleted guard rail.
+
+        It is a net and not a proof, and the two nets fail on different things: this one
+        misses `omission de perms.write`, which has no accent and which `_DE_RE` catches.
+        Two partial nets that fail differently are worth more than one that claims to be
+        complete.
+        """
+        faults = []
+        for relative, absolute in self.files:
+            if not relative.endswith(".py") or not relative.startswith("bin/"):
+                continue
+            for number, line in enumerate(_read(absolute).splitlines(), 1):
+                for char in self.ACCENTED:
+                    if char in line:
+                        faults.append(
+                            "  %s:%d  U+%04X  %s"
+                            % (relative, number, ord(char), line.strip()[:100])
+                        )
+        self.assertEqual(faults, [], "accented letter(s) in shipped Python:\n%s"
+                         % "\n".join(faults[:20]))
+
     def test_no_path_is_excluded_without_a_standing_reason(self):
         """An exclusion is a hole opened by hand, and holes outlive their reason.
 
@@ -317,6 +371,34 @@ class TheDetectorActuallyDetectsTest(unittest.TestCase):
     def test_a_french_conf_comment_is_caught(self):
         witness = "# Cette stanza est un glob : un fichier par execution."
         self.assertTrue(scan_text(witness))
+
+    def test_the_two_fragments_the_audit_found_are_now_caught(self):
+        """Regression net of minor m-4 of the pre-delivery audit.
+
+        Both fragments lived in shipped modules and both crossed this detector: the first
+        carries no function word at all, the second carries exactly one - `de` - which was
+        not watched. Reproduced verbatim, they must now be seen.
+        """
+        for witness in (
+            'one has to be designated as canonical (Q0-2, "Alias mesurés");',
+            '(Q0-1 cases B, C and L, Q0-2 "omission de perms.write"). A command that',
+        ):
+            with self.subTest(witness=witness[:50]):
+                self.assertTrue(
+                    scan_text(witness) or any(c in witness for c in
+                                              RepositoryIsInEnglishTest.ACCENTED),
+                    "fragment still invisible: %r" % witness,
+                )
+
+    def test_the_latin_borrowings_are_spared(self):
+        """`de` is watched, and the only English uses of it are Latin. A marker that
+        flagged `de facto` would be removed by the next contributor, which is how a guard
+        rail dies."""
+        for witness in ("This is the de facto behaviour of the handler.",
+                        "Rebuilt de novo on every run.",
+                        "The de jure position of the contract is stricter."):
+            with self.subTest(witness=witness):
+                self.assertEqual(scan_text(witness), [])
 
     def test_correct_english_prose_is_not_flagged(self):
         """Zero false positives is the other half of the requirement.

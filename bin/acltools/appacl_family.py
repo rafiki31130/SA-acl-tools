@@ -1,4 +1,4 @@
-"""Family table `stanza name` -> handler path (v4.1 section 5.2).
+"""Family table `stanza name` -> handler path (v4.2 section 5.2).
 
 Two sources, in this order: `bin/app_acl_family_map.json` (shipped), then
 `lookups/app_acl_family_map_override.csv` (created by the operator, never shipped),
@@ -12,7 +12,7 @@ measurement:
 - it is keyed by **stanza name**, not by object type. The measurement produced
   handler -> stanza; the command needs the inverse, and **the inversion is a choice,
   not a measurement**: seven handlers write `[props]`, two write `[savedsearches]`, and
-  one has to be designated as canonical (Q0-2, "Alias mesurés");
+  one has to be designated as canonical (Q0-2, "measured aliases");
 - the stanza name follows the **underlying configuration file**, never the URI:
   `data/ui/workflow-actions` writes `[workflow_actions]`, with an underscore and not a
   hyphen (measured, Q0-2). No derivation heuristic - pluralization, hyphen
