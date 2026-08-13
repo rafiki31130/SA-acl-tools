@@ -93,8 +93,8 @@ tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/(tests|tools)/'   # e
 
 1. Drop `SA-acl-tools/` under `$SPLUNK_HOME/etc/apps/` of the **search head** - never on
    an indexer, the command is declared `local = true`.
-2. Restart `splunkd`. Without it the capability does not enter the repository and cannot
-   be granted, and the search assistant ignores the command.
+2. Restart `splunkd`. Without it the three capabilities do not enter the repository and
+   cannot be granted, and the search assistant ignores the three commands.
 3. Check the vendored SDK: `sh tools/verify_vendor.sh $SPLUNK_HOME/bin/python3`. `tools/`
    is not in the archive; fetch it from the repository into
    `$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/`, where it finds the app as installed.
