@@ -8,6 +8,12 @@ htmlcov/
 # Mapping table override: created by the operator, never shipped (D-5).
 lookups/acl_endpoint_map_override.csv
 
+# Family table override, same rule one increment later (v4.1 section 5.2, req. 3): the
+# archive ships the `.example` and never the file itself. Without this line the file an
+# operator creates on a development install would be offered for commit, and a table
+# override committed by accident would ship to everybody.
+lookups/app_acl_family_map_override.csv
+
 # Per-instance local configuration (verify_ssl, journal index, ...).
 local/
 
