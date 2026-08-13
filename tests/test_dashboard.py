@@ -42,6 +42,14 @@ ROLE_NAME = "editacl_auditor"
 #: The two source macros (D-51). No search of the view names an index by hand.
 SOURCE_MACROS = ("acl_journal_source", "acl_diag_source")
 
+#: Their application-level counterparts (v4.1 section 11.1, **DV-3**). They are a
+#: **separate** tuple and not two more entries in the one above, because the two are used
+#: for two different things: the view's panels must name one of `SOURCE_MACROS` and only
+#: those - a panel counting objects that read the stanza journal would absorb one unit of
+#: account into the other - while the "no macro writes an index" sweep must spare all
+#: four, they being the four places where an index is legitimately written out.
+APP_SOURCE_MACROS = ("app_acl_journal_source", "app_acl_diag_source")
+
 #: Titles of the twelve panels, verbatim. Eleven carry a search; `What this view cannot
 #: show` is a static panel. The prompt panel carries no title and is checked separately.
 EXPECTED_PANEL_TITLES = (
@@ -1337,6 +1345,10 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         # this app's context would be unusable from the ad hoc search where an operator
         # actually governs an application.
         "commands/editappacl": ("system", "read : [ * ], write : [ admin ]"),
+        # v4.1 section 7: the inventory is the FIRST command of the workflow - section
+        # 12.2 says to consult it before engaging either write tool - so a command
+        # invocable only from a hidden app's own context would be consulted by nobody.
+        "commands/app_acl_inventory": ("system", "read : [ * ], write : [ admin ]"),
         "searchbnf": ("system", "read : [ * ], write : [ admin ]"),
         "macros": ("system", "read : [ * ], write : [ admin ]"),
         "transforms": ("system", "read : [ * ], write : [ admin ]"),
@@ -1375,9 +1387,16 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         # `admin` at installation - declaring without granting produces an app that is
         # installed, loaded and unusable (D-29).
         "capability::edit_app_acl_bulk": {},
+        # v4.1 section 7.6: a capability of its own for the INVENTORY, and its motive is
+        # proper to that command - reading the metadata file short-circuits the
+        # capability filtering REST applies, so the counters it publishes carry
+        # information the API would not serve to a caller without `admin_all_objects`.
+        # Bound 3 of section 6.2 reduces the exposure, this capability governs it.
+        "capability::list_app_acl": {},
         "role_admin": {
             "edit_acl_bulk": "enabled",
             "edit_app_acl_bulk": "enabled",
+            "list_app_acl": "enabled",
         },
         "role_editacl_auditor": {
             "search": "enabled",
@@ -1472,10 +1491,30 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
     #: suite. Every shipped search would then read an index that carries nothing, and
     #: report an empty result as a success - the failure D-51 exists to prevent, entered
     #: through the one file the rule points everybody at.
+    #: The application-level pair follows the same rule and gets the same freeze: it is
+    #: the same failure mode one increment further along, and DV-3 doubled the number of
+    #: places where a redirection has to be applied.
     EXPECTED_SOURCE_MACROS = {
         "acl_journal_source": "index=_internal sourcetype=editacl:journal",
         "acl_diag_source": "index=_internal sourcetype=editacl:diag",
+        "app_acl_journal_source": "index=_internal sourcetype=editappacl:journal",
+        "app_acl_diag_source": "index=_internal sourcetype=editappacl:diag",
     }
+
+    def test_the_two_journals_are_never_read_through_the_same_macro(self):
+        """DV-3 on the reading side: four macros, four distinct sourcetypes.
+
+        A line of `editacl:journal` carries an object, a line of `editappacl:journal`
+        carries a stanza whose blast radius is several objects. One macro serving both
+        would let an existing panel absorb the application-level writes into its object
+        counters - a confident and false view, which is the mode of failure this whole
+        separation exists to prevent.
+        """
+        sourcetypes = [
+            definition.rsplit("sourcetype=", 1)[1]
+            for definition in self.EXPECTED_SOURCE_MACROS.values()
+        ]
+        self.assertEqual(len(set(sourcetypes)), len(self.EXPECTED_SOURCE_MACROS))
 
     def test_both_source_macros_are_declared_and_name_their_sourcetype(self):
         for name, definition in self.EXPECTED_SOURCE_MACROS.items():
@@ -1501,7 +1540,7 @@ class NoShippedSearchWritesItsSourceOutTest(unittest.TestCase):
 
     #: The definitions of the source macros themselves, which necessarily carry the
     #: index: they are the single place where it is written.
-    SOURCE_STANZAS = frozenset(SOURCE_MACROS)
+    SOURCE_STANZAS = frozenset(SOURCE_MACROS + APP_SOURCE_MACROS)
 
     def test_no_macro_definition_other_than_the_sources_writes_an_index(self):
         macros = read_splunk_conf("default", "macros.conf")

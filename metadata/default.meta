@@ -33,6 +33,16 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
+# `app_acl_inventory` follows the same reasoning (v4.1 section 14.1, deliverable 6), and
+# it is even harder to argue against here: the inventory is the FIRST command of the
+# whole workflow - section 12.2 says to consult it before engaging either write tool -
+# and a command invocable only from the context of a hidden app would be consulted by
+# nobody. The effective access control stays carried by the `list_app_acl` capability.
+
+[commands/app_acl_inventory]
+access = read : [ * ], write : [ admin ]
+export = system
+
 # The search assistant follows the command. It reads `configs/conf-searchbnf` in the
 # namespace of the PAGE, that is, the app from which the operator types the search:
 # `search`, not `SA-acl-tools`. Confined to the app context, `searchbnf.conf` is

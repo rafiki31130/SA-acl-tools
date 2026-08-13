@@ -53,6 +53,7 @@ class LayoutTest(unittest.TestCase):
         ("metadata", "default.meta"),
         ("bin", "editacl.py"),
         ("bin", "editappacl.py"),
+        ("bin", "app_acl_inventory.py"),
         ("bin", "acl_endpoint_map.json"),
         ("bin", "app_acl_family_map.json"),
         ("bin", "acltools", "__init__.py"),
@@ -83,7 +84,7 @@ class LayoutTest(unittest.TestCase):
             # follow the same split as the object-level core, layer by layer.
             "appacl_model.py", "appacl_family.py", "appacl_target.py",
             "appacl_provenance.py", "appacl_merge.py", "appacl_impact.py",
-            "appacl_pipeline.py", "appacl_preflight.py",
+            "appacl_pipeline.py", "appacl_preflight.py", "appacl_inventory.py",
         }
         present = {
             f for f in os.listdir(os.path.join(BIN_DIR, "acltools"))
@@ -214,7 +215,23 @@ class CommandsConfTest(unittest.TestCase):
             "is_risky": "true",
             "maxinputs": "0",
         },
+        # v4.1 section 7.2: the same seven keys, with the one justified divergence of
+        # value - `is_risky = false`, the command mutating nothing.
+        "app_acl_inventory": {
+            "filename": "app_acl_inventory.py",
+            "chunked": "true",
+            "python.version": "python3",
+            "local": "true",
+            "run_in_preview": "false",
+            "is_risky": "false",
+            "maxinputs": "0",
+        },
     }
+
+    #: The commands that WRITE. The risk flag is checked positively on those and
+    #: negatively on the others: `is_risky` is not a property of a command, it is a
+    #: property of what the command does.
+    WRITING = ("editacl", "editappacl")
 
     def setUp(self):
         self.conf = read_conf("default", "commands.conf")
@@ -243,15 +260,36 @@ class CommandsConfTest(unittest.TestCase):
                     os.path.exists(os.path.join(BIN_DIR, keys["filename"]))
                 )
 
-    def test_both_commands_declare_themselves_risky(self):
+    def test_every_writing_command_declares_itself_risky(self):
         """`is_risky = false` on a write command removes the interface's confirmation.
 
         It is one word, it breaks nothing, and it silently drops the last thing standing
         between an operator and an irreversible write launched by accident.
         """
-        for command in self.EXPECTED:
+        for command in self.WRITING:
             with self.subTest(command=command):
                 self.assertEqual(self.conf.get(command, "is_risky"), "true")
+
+    def test_the_read_only_command_is_not_declared_risky(self):
+        """The other direction, and it is not symmetry for its own sake.
+
+        A confirmation dialog is worth something only while it is rare. Marking an
+        inventory risky would put one in front of the command section 12.2 asks the
+        operator to run BEFORE every campaign - that is, in front of the most frequent
+        gesture of the whole workflow - and would teach them to dismiss the dialog they
+        must read on the two commands that write.
+        """
+        for command in self.EXPECTED:
+            if command in self.WRITING:
+                continue
+            with self.subTest(command=command):
+                self.assertEqual(self.conf.get(command, "is_risky"), "false")
+
+    def test_the_writing_set_is_a_subset_of_the_declared_commands(self):
+        """Guard rail on the guard rail: a command renamed out of `WRITING` would make
+        the risk check above true by vacuity."""
+        self.assertTrue(set(self.WRITING))
+        self.assertEqual(set(self.WRITING) - set(self.EXPECTED), set())
 
 
 class SearchBnfConfTest(unittest.TestCase):
@@ -291,7 +329,9 @@ class SearchBnfConfTest(unittest.TestCase):
         assistant - which is exactly the silent gap this whole class exists to close.
         """
         commands = read_conf("default", "commands.conf").sections()
-        self.assertEqual(sorted(commands), ["editacl", "editappacl"])
+        self.assertEqual(
+            sorted(commands), ["app_acl_inventory", "editacl", "editappacl"]
+        )
         for command in commands:
             with self.subTest(command=command):
                 self.assertIn("%s-command" % command, self.conf.sections())
@@ -323,6 +363,7 @@ class SearchBnfConfTest(unittest.TestCase):
     COMMANDS = (
         ("editacl", "editacl.py", "EditAclCommand"),
         ("editappacl", "editappacl.py", "EditAppAclCommand"),
+        ("app_acl_inventory", "app_acl_inventory.py", "AppAclInventoryCommand"),
     )
 
     @staticmethod
@@ -821,7 +862,7 @@ class NoShippedStanzaIsNeutralizedTest(unittest.TestCase):
         from .test_spl_artifacts import read_splunk_conf
 
         searches = read_splunk_conf("default", "savedsearches.conf")
-        self.assertEqual(len(searches), 4, "the shipped search set changed")
+        self.assertEqual(len(searches), 6, "the shipped search set changed")
         for stanza, keys in searches.items():
             with self.subTest(stanza=stanza):
                 self.assertEqual(keys.get("disabled"), "0")
@@ -838,6 +879,7 @@ class SplArtifactsTest(unittest.TestCase):
         ("lookups", "acl_object_families.csv"),
         ("lookups", "acl_decommissioned_roles.csv"),
         ("tools", "revalidate_mapping.py"),
+        ("tools", "revalidate_app_acl_mapping.py"),
         ("tools", "acl_probe_bootstrap.sh"),
         ("tools", "acl_probe_bootstrap_rest.py"),
     )
