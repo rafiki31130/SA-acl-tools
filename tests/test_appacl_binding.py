@@ -1,4 +1,4 @@
-"""Binding of an SPL record to an `AppEventInput` (v4.1 sections 8.3, 8.4).
+"""Binding of an SPL record to an `AppEventInput` (v4.2 sections 8.3, 8.4).
 
 The presence semantics is decided in **one** place for the whole repository -
 `binding.field_present` - and this module checks that the application-level builder goes

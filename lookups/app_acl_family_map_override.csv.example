@@ -1,5 +1,5 @@
 family,handler_path
-# Example override of the family table (v4.1 section 5.2, requirement 3).
+# Example override of the family table (v4.2 section 5.2, requirement 3).
 #
 # To enable it: copy this file to `lookups/app_acl_family_map_override.csv` in the
 # installed app, then describe one family per line. The real file is NEVER shipped in
@@ -17,12 +17,12 @@ family,handler_path
 #
 # `handler_path` must match the pattern ^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$
 # - a non-conforming line is discarded and traced in the diagnostic log, never used. No
-# derivation heuristic is applied (v4.1 section 5.2, requirement 2): a family absent
+# derivation heuristic is applied (v4.2 section 5.2, requirement 2): a family absent
 # from the table produces `acl_status=rejected`,
 # `acl_error=unresolved_family:<family>`.
 #
 # THREE FAMILIES ARE KNOWN TO BE UNREACHABLE and are deliberately absent from the
-# shipped table (v4.1 section 5.3): `visualizations` answers `500 No capability
+# shipped table (v4.2 section 5.3): `visualizations` answers `500 No capability
 # specified for action='edit'`, `ntags` does not support ACL at all, and `props`
 # through `data/props/extractions` answers `400 Cannot parse object name` - `props` is
 # reachable through seven other handlers, of which the shipped one. Overriding a family

@@ -19,7 +19,7 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
-# `editappacl` follows the same reasoning (v4.1 section 14.1, deliverable 6): exported to
+# `editappacl` follows the same reasoning (v4.2 section 14.1, deliverable 6): exported to
 # the whole system, because a command that could only be invoked from this app's context
 # would be unusable from an ad hoc search - which is where an operator governs an
 # application's permissions. The effective access control stays carried by the
@@ -33,7 +33,7 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
-# `app_acl_inventory` follows the same reasoning (v4.1 section 14.1, deliverable 6), and
+# `app_acl_inventory` follows the same reasoning (v4.2 section 14.1, deliverable 6), and
 # it is even harder to argue against here: the inventory is the FIRST command of the
 # whole workflow - section 12.2 says to consult it before engaging either write tool -
 # and a command invocable only from the context of a hidden app would be consulted by

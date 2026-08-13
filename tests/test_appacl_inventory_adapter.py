@@ -1,7 +1,7 @@
 """`bin/app_acl_inventory.py` - adapter, wiring, and the rules that hold on its source.
 
 Same three guard rails as the other two adapters, and deliberately the **same
-instruments**: v4.1 section 13.2 asks for the single-emission-point control to be
+instruments**: v4.2 section 13.2 asks for the single-emission-point control to be
 extended to the new files, and extending a control means reusing it rather than writing a
 second one that will drift.
 
@@ -52,7 +52,7 @@ def _analyse():
 
 
 class TheSingleEmissionPointTest(unittest.TestCase):
-    """v4.1 section 13.2, extended to the third adapter.
+    """v4.2 section 13.2, extended to the third adapter.
 
     This command is meant to OPEN a pipeline that ends in `editappacl`, so its messages
     sit next to that command's in an interface that strips them of their origin. Without

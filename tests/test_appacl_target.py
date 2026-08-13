@@ -1,4 +1,4 @@
-"""Target resolution and URI construction (v4.1 sections 8.3, 11.3, and 4.1).
+"""Target resolution and URI construction (v4.2 sections 8.3, 11.3, and 4.1).
 
 The heart of this module is the guarantee of section 4.1: the namespace segment is the
 literal `nobody`, and it cannot be anything else because **no function here accepts an

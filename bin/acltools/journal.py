@@ -29,7 +29,7 @@ from .normalize import serialize_roles
 #: File name of the journal. The monitor stanza of section 8.3 is a matching glob.
 JOURNAL_BASENAME = "editacl_journal_%s.log"
 
-#: File name of the **application-level** journal (v4.1 section 11.1, **DV-3**).
+#: File name of the **application-level** journal (v4.2 section 11.1, **DV-3**).
 #:
 #: A separate file, and not more keys in the previous one. Three reasons, in order of
 #: weight:
@@ -246,7 +246,7 @@ def build_summary_record(ctx, counts, ts):
 
 
 # --------------------------------------------------------------------------- #
-# Application-level journal (v4.1 section 11.2)
+# Application-level journal (v4.2 section 11.2)
 # --------------------------------------------------------------------------- #
 #
 # Same three phases, the same format constraints, the same `ts` first. What changes is

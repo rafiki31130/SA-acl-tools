@@ -1,4 +1,4 @@
-"""Parameters of `editappacl` (v4.1 sections 8.5, 13.1, 13.3).
+"""Parameters of `editappacl` (v4.2 sections 8.5, 13.1, 13.3).
 
 This is where the **contract defaults** are frozen: simulation on, creation refused, two
 ceilings whose values are choices and not measurements. Three of the four are the friction
