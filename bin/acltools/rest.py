@@ -169,6 +169,37 @@ class RestClient(object):
         body["output_mode"] = "json"
         return self._request("POST", object_path + "/acl", payload=body)
 
+    def get_app_acl(self, path):
+        """`GET <path>?output_mode=json` - one retry on `5xx` (v4.1 section 8.7).
+
+        The application-level paths are **not** object paths: the `[]` path already
+        carries its `/acl` suffix and the family path its `/_acl` action, so the read and
+        the write bear on the **same** string. That is why this method takes the path as
+        it stands instead of suffixing it, and why the field filter `f=eai:acl*` of
+        `get_object_acl` is not applied: on `/services/apps/local/<app>/acl` it would
+        filter a `content` block the caller does not read anyway, and adding a parameter
+        no measurement covered to a measured call buys nothing.
+        """
+        params = {"output_mode": "json"}
+        response = self._request("GET", path, params=params)
+        if 500 <= response.status < 600:
+            time.sleep(RETRY_DELAY_SECONDS)
+            response = self._request("GET", path, params=params)
+        return response
+
+    def post_app_acl(self, path, payload):
+        """`POST <path>`, body `application/x-www-form-urlencoded`. **No retry.**
+
+        No retry, and for the reason that already forbids it on the object path: it could
+        not tell "the first POST never left" from "the first POST succeeded and the
+        answer was lost". Here the reason is sharper still - a write may have happened
+        despite a non-2xx answer (measured), so a retry would risk a second write on a
+        target whose state is already undetermined.
+        """
+        body = dict(payload)
+        body["output_mode"] = "json"
+        return self._request("POST", path, payload=body)
+
     def get_json(self, path, params=None):
         """Preflight call (context, roles, apps, search job)."""
         merged = {"output_mode": "json"}

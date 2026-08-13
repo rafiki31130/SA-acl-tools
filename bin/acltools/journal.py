@@ -22,12 +22,32 @@ import json
 import os
 import re
 
-from . import model
+from . import appacl_model, model
 from .errors import FatalJournalError
 from .normalize import serialize_roles
 
 #: File name of the journal. The monitor stanza of section 8.3 is a matching glob.
 JOURNAL_BASENAME = "editacl_journal_%s.log"
+
+#: File name of the **application-level** journal (v4.1 section 11.1, **DV-3**).
+#:
+#: A separate file, and not more keys in the previous one. Three reasons, in order of
+#: weight:
+#:
+#: 1. **File name collision.** The journal file name is indexed by `sid` (D-3), and
+#:    `| app_acl_inventory | ... | editappacl` and a `| editacl` can coexist in **one
+#:    search**, hence share a `sid`. Two commands writing the same path reopen exactly
+#:    the line-loss window D-3 closed, on the sole safety net of an irreversible
+#:    operation.
+#: 2. **Different units of account.** A line of `editacl:journal` carries an **object**;
+#:    a line of `editappacl:journal` carries a **stanza** whose blast radius is several
+#:    objects. Mixing them would have an existing monitoring panel absorb
+#:    application-level writes into its object counters - a confident and false view.
+#: 3. **The journal format is not versioned** (v3.14 section 15.7): lines of different
+#:    schemas coexist in the retention window with no marker telling them apart. Adding
+#:    keys to the existing sourcetype would aggravate a limit already known and already
+#:    paid for.
+APP_JOURNAL_BASENAME = "editappacl_journal_%s.log"
 
 #: Prefix of the per-status counters of the `summary` line (section 8.2, D-46). No
 #: colon, as every field name of the journal.
@@ -45,6 +65,16 @@ def journal_filename(sid):
 
 def journal_path(log_dir, sid):
     return os.path.join(log_dir, journal_filename(sid))
+
+
+def app_journal_filename(sid):
+    """File name of an application-level run's journal, with a sanitized `sid`."""
+    token = _SAFE_SID.sub("_", str(sid or "unknown"))
+    return APP_JOURNAL_BASENAME % (token or "unknown")
+
+
+def app_journal_path(log_dir, sid):
+    return os.path.join(log_dir, app_journal_filename(sid))
 
 
 def _state_fields(prefix, state):
@@ -212,6 +242,150 @@ def build_summary_record(ctx, counts, ts):
         record[SUMMARY_COUNT_PREFIX + status] = int(tallies.get(status, 0))
     for extra in sorted(set(tallies) - set(declared)):
         record[SUMMARY_COUNT_PREFIX + str(extra)] = int(tallies[extra])
+    return record
+
+
+# --------------------------------------------------------------------------- #
+# Application-level journal (v4.1 section 11.2)
+# --------------------------------------------------------------------------- #
+#
+# Same three phases, the same format constraints, the same `ts` first. What changes is
+# the **unit**: a line carries a stanza, not an object, and two facts the restore
+# depends on get keys of their own - `reversible` and `write_asserted`.
+
+#: Counter of the `summary` line carrying the aggregate blast radius of the run
+#: (section 11.2). No colon, like every field name of the journal.
+SUMMARY_IMPACT_TOTAL = "impacted_estimate_total"
+
+
+def _app_state_fields(prefix, state):
+    """The **three** attributes of an application-level state (section 11.2).
+
+    There is no `owner` here, and its absence is measured rather than chosen: the value
+    is inert on the `[]` path and refused on the `_acl` path, so journaling one would
+    record something no write can settle - and the restore macro would re-emit it.
+    """
+    return {
+        prefix + "_perms_read": serialize_roles(state.perms_read) if state else "",
+        prefix + "_perms_write": serialize_roles(state.perms_write) if state else "",
+        prefix + "_sharing": (state.sharing or "") if state else "",
+    }
+
+
+def _app_target_fields(result):
+    """Fields designating the **stanza** processed, common to `intent` and `outcome`.
+
+    **The empty string is a legitimate value of `stanza`**: it is the name of the `[]`
+    stanza. Everywhere else in this journal an empty value signals an absent
+    information, which is why the discrimination is carried by `stanza_kind` - non-empty
+    on every resolved target - and why no consumer may infer the target from `stanza`
+    alone (section 11.2, normative clause). A grouping by `stanza` alone would mix the
+    writes on `[]` with the lines of unresolved targets.
+
+    `handler` is filled in **at resolution time**, hence non-empty on every resolved
+    family target: that is what makes the restore of section 11.4 independent of the
+    coverage of the family table, and it is the direct correction of the defect closed on
+    2026-08-10 (v3.14 section 8.6.bis), where the macro re-emitted a field the journal
+    often left empty.
+    """
+    return {
+        "endpoint": str(result.endpoint or ""),
+        "app": str(result.app or ""),
+        "stanza_kind": str(result.stanza_kind or ""),
+        "stanza": str(result.stanza or ""),
+        "handler": str(result.handler or ""),
+        "reversible": str(result.reversible or ""),
+    }
+
+
+def _app_common_record(ctx, result, phase, ts):
+    record = _run_fields(ctx, phase, ts)
+    record.update(_app_target_fields(result))
+    return record
+
+
+def build_app_intent_record(ctx, result, ts):
+    """`phase=intent` line, written **before** the POST (sections 8.2, 11.2).
+
+    **This is the mechanism that closes the hole.** The prior state of a target that had
+    no stanza is useful information - it says what the objects saw before - but it is
+    **not a restorable prior state**: re-injecting it would **create the stanza a second
+    time**, under cover of a restore. It is therefore kept under `inherited_*` keys,
+    which the restore macro does not read.
+
+        reversible = true     before_* = the stanza's values, inherited_* empty
+        reversible = false    before_* empty, inherited_* = the inherited values
+        reversible = unknown  before_* empty, inherited_* = the values read
+
+    `after_*` carries the transmitted state in all three cases.
+    """
+    record = _app_common_record(ctx, result, "intent", ts)
+    record["impacted_estimate"] = (
+        "" if result.impacted_estimate is None else int(result.impacted_estimate)
+    )
+    reversible = str(result.reversible or "")
+    restorable = reversible == appacl_model.REVERSIBLE_TRUE
+    record.update(_app_state_fields("before", result.before if restorable else None))
+    record.update(
+        _app_state_fields("inherited", None if restorable else result.inherited)
+    )
+    record.update(_app_state_fields("after", result.after))
+    return record
+
+
+def build_app_outcome_record(ctx, result, ts):
+    """`phase=outcome` line, written after **every** event whatever its status.
+
+    `write_asserted` translates section 4.3 and has a closed domain of three values:
+    `yes` on a 2xx, `unknown` on a non-2xx **after a POST was sent** - measured, a write
+    can happen despite an error - and `no` when no POST was sent at all. The operator
+    reads that the state of the target is undetermined instead of wrongly deducing it.
+    """
+    record = _app_common_record(ctx, result, "outcome", ts)
+    record["status"] = str(result.status)
+    record["http_code"] = int(result.http_code or 0)
+    # The empty string, never `null` (v3.14 section 8.2, D-46): `KV_MODE = json`
+    # extracts a JSON `null` as the four-character string "null", which made the obvious
+    # predicate `isnotnull(error)` true on every line.
+    record["error"] = str(result.error or "")
+    record["write_asserted"] = app_write_asserted(result)
+    return record
+
+
+def app_write_asserted(result):
+    """Value of `write_asserted` for one result (section 11.2), closed domain."""
+    if not getattr(result, "post_attempted", False):
+        return appacl_model.WRITE_ASSERTED_NO
+    if 200 <= int(getattr(result, "http_code", 0) or 0) < 300:
+        return appacl_model.WRITE_ASSERTED_YES
+    return appacl_model.WRITE_ASSERTED_UNKNOWN
+
+
+def build_app_summary_record(ctx, counts, impacted_total, ts):
+    """`phase=summary` line: the run's counters (section 11.2).
+
+    **The enumeration is derived from `appacl_model.APP_ACL_STATUSES`**, the single
+    source of the statuses, and never written out by hand (v3.14 section 8.2, D-35). It
+    is read through the module rather than bound at import time, so the derivation holds
+    for whatever that source says at the moment of the call.
+
+    **Every** status is emitted, including at zero - `count_created` among them, which is
+    the number of irreversible acts of the run - plus `impacted_estimate_total`, the
+    aggregate blast radius. A count carried by no declared status is emitted all the
+    same, sorted after the others: losing a count in silence is the failure class this
+    journal exists to close.
+
+    Like its counterpart, it is **not** written on the fatal error path: its absence is
+    what signals an interruption.
+    """
+    record = _run_fields(ctx, "summary", ts)
+    tallies = dict(counts or {})
+    declared = tuple(appacl_model.APP_ACL_STATUSES)
+    for status in declared:
+        record[SUMMARY_COUNT_PREFIX + status] = int(tallies.get(status, 0))
+    for extra in sorted(set(tallies) - set(declared)):
+        record[SUMMARY_COUNT_PREFIX + str(extra)] = int(tallies[extra])
+    record[SUMMARY_IMPACT_TOTAL] = int(impacted_total or 0)
     return record
 
 

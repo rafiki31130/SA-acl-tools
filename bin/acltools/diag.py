@@ -35,6 +35,15 @@ BACKUP_COUNT = 5
 
 LOGGER_NAME = "editacl.diag"
 
+#: Diagnostic file of the application-level command (v4.1 section 11.1, **DV-3**). A
+#: file of its own, for the same three reasons the journal has one: a shared `sid` would
+#: make the two commands write the same path, the unit of account differs - a stanza is
+#: not an object - and the format is not versioned, so adding keys to an existing
+#: sourcetype aggravates a limit already paid for.
+APP_DIAG_BASENAME = "editappacl.log"
+
+APP_LOGGER_NAME = "editappacl.diag"
+
 REDACTED = "[redacted]"
 
 #: Redaction patterns. Deliberately broad: a false positive makes one diagnostic line
@@ -67,6 +76,10 @@ def redact(message):
 
 def diag_path(log_dir):
     return os.path.join(log_dir or "", DIAG_BASENAME)
+
+
+def app_diag_path(log_dir):
+    return os.path.join(log_dir or "", APP_DIAG_BASENAME)
 
 
 class _Formatter(logging.Formatter):
@@ -121,6 +134,12 @@ class NullDiagnostics(object):
     def journal(self, path, opened):
         pass
 
+    def family_table(self, coverage):
+        pass
+
+    def provenance_root(self, root):
+        pass
+
     def close(self):
         pass
 
@@ -136,6 +155,13 @@ class Diagnostics(NullDiagnostics):
 
     enabled = True
 
+    #: Name of the command, written into the startup line and used as the logger name.
+    #: It is a class attribute so that the application-level subclass changes it without
+    #: touching a single line of what the previous command writes - the `editacl:diag`
+    #: sourcetype extracts on those exact anchors.
+    COMMAND = "editacl"
+    LOGGER = LOGGER_NAME
+
     _LEVELS = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
@@ -149,7 +175,7 @@ class Diagnostics(NullDiagnostics):
     def __init__(self, path, sid="", handler=None):
         self.path = path
         self._sid = str(sid or "")
-        self._logger = logging.Logger(LOGGER_NAME, logging.INFO)
+        self._logger = logging.Logger(self.LOGGER, logging.INFO)
         self._logger.propagate = False
         self._handler = handler or RotatingFileHandler(
             path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
@@ -189,8 +215,9 @@ class Diagnostics(NullDiagnostics):
         """Startup line. The member is logged separately: `serverName` is only known
         after a REST call, and this line must precede everything that can fail."""
         self.info(
-            "editacl startup version=%s user=%s splunkd=%s verify_ssl=%s"
+            "%s startup version=%s user=%s splunkd=%s verify_ssl=%s"
             % (
+                self.COMMAND,
                 version or "?",
                 user or "-",
                 splunkd_uri or "-",
@@ -267,6 +294,69 @@ class Diagnostics(NullDiagnostics):
             pass
 
 
+class AppDiagnostics(Diagnostics):
+    """Writer of `editappacl.log` (v4.1 section 11.1).
+
+    Same machinery, same redaction, same tolerance to its own failures. What differs is
+    what there is to say: the parameters are not the same, the table is not the same, and
+    the read root of section 6.2 is a fact worth recording - it decides **which tree**
+    the command reads the provenance from, and an ambiguity there is fatal.
+    """
+
+    COMMAND = "editappacl"
+    LOGGER = APP_LOGGER_NAME
+
+    def params(self, params):
+        self.info(
+            "parameters dryrun=%s allow_create=%s validate_roles=%s journal=%s "
+            "max_stanzas=%s max_impacted_objects=%s"
+            % (
+                str(bool(params.dryrun)).lower(),
+                str(bool(params.allow_create)).lower(),
+                str(bool(params.validate_roles)).lower(),
+                str(bool(params.journal)).lower(),
+                params.max_stanzas,
+                params.max_impacted_objects,
+            )
+        )
+        # The seven field-naming parameters are recorded separately, for the reason the
+        # previous command already had: they determine which column is read for what,
+        # hence which attributes are modified and which preserved. Without them, a run in
+        # which a field name was redirected is unreadable after the fact.
+        names = params.names
+        self.info(
+            "field names app=%s stanza_kind=%s handler=%s stanza=%s new_perms_read=%s "
+            "new_perms_write=%s new_sharing=%s"
+            % (
+                names.app,
+                names.stanza_kind,
+                names.handler,
+                names.stanza,
+                names.new_perms_read,
+                names.new_perms_write,
+                names.new_sharing,
+            )
+        )
+        for warning in params.warnings or ():
+            self.warning("parameters: %s" % warning)
+
+    def family_table(self, coverage):
+        self.info(
+            "family table: %d entries (%d shipped, %d from override, %d overridden, "
+            "%d discarded)"
+            % (
+                coverage.get("total", 0),
+                coverage.get("from_json", 0),
+                coverage.get("from_override", 0),
+                len(coverage.get("overridden") or ()),
+                len(coverage.get("rejected") or ()),
+            )
+        )
+
+    def provenance_root(self, root):
+        self.info("provenance read root: %s" % (root or "-"))
+
+
 def open_diagnostics(log_dir, sid=""):
     """Open the diagnostic file, or return an inert diagnostic.
 
@@ -279,5 +369,15 @@ def open_diagnostics(log_dir, sid=""):
         return NullDiagnostics()
     try:
         return Diagnostics(diag_path(log_dir), sid=sid)
+    except Exception:                                                # noqa: BLE001
+        return NullDiagnostics()
+
+
+def open_app_diagnostics(log_dir, sid=""):
+    """Open `editappacl.log`, or return an inert diagnostic. **Never raises.**"""
+    if not log_dir:
+        return NullDiagnostics()
+    try:
+        return AppDiagnostics(app_diag_path(log_dir), sid=sid)
     except Exception:                                                # noqa: BLE001
         return NullDiagnostics()

@@ -24,6 +24,7 @@ attribute" into "preserve it". The predicate is therefore **exactly** `key in re
 with no further clause.
 """
 
+from . import appacl_model
 from .model import (
     TARGET_OWNER,
     TARGET_PERMS_READ,
@@ -112,5 +113,44 @@ def build_event(record, names):
         new_perms_write=field_value(record, names.new_perms_write),
         new_sharing=field_value(record, names.new_sharing),
         new_owner=field_value(record, names.new_owner),
+        present=frozenset(present),
+    )
+
+
+def build_app_event(record, names):
+    """Build the `AppEventInput` of a record (v4.1 sections 8.3, 8.4).
+
+    Same module, same presence predicate, same rule: `field_present` is consulted here
+    too, and nowhere else. That is the whole reason this function lives in `binding.py`
+    rather than next to the application-level pipeline - a second reading of the presence
+    of a column would be a second chance to read it differently.
+
+    The **designating** fields (section 8.3) are read for their value only. `stanza`
+    legitimately holds the empty string - it is the name of the `[]` stanza - which is
+    why `stanza_kind` is required and never deduced from it.
+
+    The **three** target values (section 8.4) are read for their value **and** for their
+    presence. There is no fourth: no owner is read, because none is writable
+    (**DV-5**).
+    """
+    record = record if record is not None else {}
+
+    present = set()
+    for attribute, column in (
+        (appacl_model.TARGET_PERMS_READ, names.new_perms_read),
+        (appacl_model.TARGET_PERMS_WRITE, names.new_perms_write),
+        (appacl_model.TARGET_SHARING, names.new_sharing),
+    ):
+        if field_present(record, column):
+            present.add(attribute)
+
+    return appacl_model.AppEventInput(
+        app=_text(field_value(record, names.app)),
+        stanza_kind=_text(field_value(record, names.stanza_kind)),
+        handler=_text(field_value(record, names.handler)),
+        stanza=_text(field_value(record, names.stanza)),
+        new_perms_read=field_value(record, names.new_perms_read),
+        new_perms_write=field_value(record, names.new_perms_write),
+        new_sharing=field_value(record, names.new_sharing),
         present=frozenset(present),
     )
