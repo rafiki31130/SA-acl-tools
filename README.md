@@ -438,6 +438,32 @@ path and refused with `400` on the other, so exposing one would be a false promi
 replaces the whole `access` line as soon as one permission is present, so sending only
 `perms.write` **deletes** `perms.read`.
 
+> ### `acl_handler` addresses any handler, and that door is deliberate
+>
+> The shipped family table bounds **resolution by name**, never the **write perimeter**.
+> Passing `acl_handler` explicitly addresses **any handler**, including a family the table
+> does not know and that nobody ever measured - writing a `[alerts]` header, for instance,
+> works.
+>
+> **The door is kept open, for three reasons in order of weight.** One, closing it would
+> bring back the defect of the previous project: a target written through an off-table
+> handler would become **unrestorable**, resolution once again depending on the coverage of
+> the table. Two, the table never claimed to be exhaustive - `searchbnf`, `sourcetypes`,
+> `manager` and `searchscripts` exist on the reference platform without appearing in it, and
+> confining writes to the table would forbid **real** families on the grounds that one
+> measurement campaign did not sweep them. Three, this is not where the guard rail is: what
+> bounds a write is the dedicated capability, the refusal to create by default, the two
+> ceilings and the simulation-by-default - four dispositifs, all exercised on a real
+> instance.
+>
+> **What you take on by using it.** You address a handler no measurement covered, so there
+> is no guarantee that the `POST` succeeds - three families are measured **negative**, see
+> the list of unreachable families below - and no guarantee that the stanza name written is
+> the one you expect: **the stanza name follows the underlying configuration file, not the
+> URI path**. `data/ui/workflow-actions` writes `[workflow_actions]`, with an underscore
+> where the URI has a hyphen. Run the re-validation procedure, or a simulation, before
+> trusting an off-table handler.
+
 > ### Creating a stanza cannot be undone
 >
 > No measured REST path removes a generic stanza, at any level. Modifying one is
@@ -468,6 +494,23 @@ replaces the whole `access` line as soon as one permission is present, so sendin
 is a single act with an immense reach, and twenty writes on empty families move nothing.
 **Neither ever fires in simulation**, which sends no POST, so a `dryrun` always covers the
 whole batch.
+
+> ### Run one `editappacl` at a time on a given application
+>
+> **This is an operating rule, because no mechanism enforces it.** The refusal of a
+> duplicate target is **within a single run**: nothing coordinates two runs launched at the
+> same time against the same stanza.
+>
+> The scenario to avoid is precise. Both runs read the provenance before either has written;
+> both classify the target as a materialisation; the second one journals empty `before_*`
+> and `reversible="false"` while it has in fact **modified** an existing value. That prior
+> value is then restorable by nothing - `app_acl_rollback` ignores the target, and
+> `app_acl_irreversible` lists it as a creation that it was not.
+>
+> The risk is established by reading the code and **has not been reproduced**: an attempt to
+> race two runs on the same missing stanza serialised cleanly. It is stated here because no
+> technical dispositif covers it, and because the cost of the rule is nil - a campaign on
+> one application is one run.
 
 **A target whose value already matches** comes out `noop` when it carries a stanza, and
 `noop_inherited` when it does not. The command deliberately does **not** materialise a
@@ -713,6 +756,13 @@ Limits proper to the application level:
   something else. Detecting those residues is out of scope.
 - **Writing a generic stanza changes nothing for an already frozen object**, and that is
   the whole point of consulting `acl_frozen_stanzas` first.
+- **Run one `editappacl` at a time on a given application.** Nothing enforces it: the
+  duplicate refusal is within a single run, and two concurrent runs can each report a
+  creation while one of them modified an existing value - whose prior state is then
+  restorable by nothing.
+- **`acl_handler` addresses any handler, including families the shipped table ignores.**
+  The door is deliberate; what you take on is a handler no measurement covered, with no
+  guarantee that the write succeeds nor that the stanza name is the one you expect.
 - **`max_stanzas` and `max_impacted_objects` default to 5 and 200, which are choices and
   not measurements.** The real magnitude of a generic write has not been quantified.
 - **The family table was established on Splunk Enterprise 9.4.6**, 19 families each

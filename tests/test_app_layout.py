@@ -307,16 +307,42 @@ class CommandsConfTest(unittest.TestCase):
         blind to what the platform's parser decides. Nothing in 1 288 tests could see it,
         and it cost a gate. A dash is legal in a command name and stays legal; only the
         underscore is forbidden, because only the underscore truncates.
+
+        **The control bears on the three places a command name is declared** - this file,
+        `searchbnf.conf`, and the adapter file name - because freezing only one of them
+        would let the other two drift into a name the parser truncates while the suite
+        stayed green.
         """
-        for command in self.conf.sections():
-            with self.subTest(command=command):
+        message = (
+            "%s carries an underscore: the SPL parser of 9.4.6 truncates a command name "
+            "at the first one, and the command becomes invocable by no search. The app's "
+            "convention, and Splunk's own (mvexpand, sendemail, inputlookup), is a single "
+            "unbroken word."
+        )
+        declared = self.conf.sections()
+        for command in declared:
+            with self.subTest(declaration="commands.conf", command=command):
+                self.assertNotIn("_", command, message % ("command %r" % command))
+            with self.subTest(declaration="filename", command=command):
                 self.assertNotIn(
-                    "_", command,
-                    "command %r carries an underscore: the SPL parser of 9.4.6 would "
-                    "truncate it at the first one, and the command would be invocable "
-                    "by no search. Rename it - the app's convention, and Splunk's own "
-                    "(mvexpand, sendemail, inputlookup), is a single unbroken word."
-                    % command,
+                    "_", self.conf.get(command, "filename"),
+                    message % ("the script of %r" % command),
+                )
+
+        searchbnf = read_conf("default", "searchbnf.conf")
+        stanzas = [s for s in searchbnf.sections() if s.endswith("-command")]
+        self.assertEqual(
+            sorted(s[: -len("-command")] for s in stanzas), sorted(declared),
+            "the commands described by the search assistant are not the commands "
+            "declared: one of the two files would carry a name the other does not.",
+        )
+        for stanza in stanzas:
+            name = stanza[: -len("-command")]
+            with self.subTest(declaration="searchbnf.conf", command=name):
+                self.assertNotIn("_", name, message % ("the assistant stanza %r" % name))
+                self.assertFalse(
+                    searchbnf.get(stanza, "syntax").split()[0].count("_"),
+                    message % ("the syntax production of %r" % name),
                 )
 
     def test_the_declared_file_names_match_the_command_names(self):
