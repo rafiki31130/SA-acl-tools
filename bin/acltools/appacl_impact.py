@@ -1,4 +1,4 @@
-"""Impact estimate of a generic write (v4.1 section 10.3).
+"""Impact estimate of a generic write (v4.2 section 10.3).
 
 **Definition.** `acl_impacted_estimate` is the number of **shared** objects of the
 application whose effective rights are today determined by the target stanza - those
@@ -14,6 +14,15 @@ header.
 
 Two implementation points that are decisions rather than transcriptions, and both are
 made here rather than left implicit.
+
+**Only the stanzas that actually freeze are subtracted, and that is the correction of
+A-2.** *Measured*: splunkd writes a `[<family>/<object>]` stanza for **every object it
+creates or edits**, carrying `owner`, `version` and `modtime` and no `access` line - and
+such an object keeps inheriting its permissions in full. Subtracting those made the
+estimate collapse to zero on any application whose objects had ever been touched, that is
+on any real application, while the output announced `no_inheriting_object` and the write
+moved the whole family. The predicate now lives in `appacl_provenance.materializes_permissions`
+and is used at both stanza levels.
 
 **The subtraction is on counts, not on names.** Bound 3 of section 6.2 states that
 `[<family>/<object>]` stanzas are *counted, never listed*: reading the file
@@ -63,8 +72,13 @@ class ImpactEstimator(object):
     """Estimates the blast radius of a write, **memoized per (app, family)**.
 
     The memoization spans the run and bears **only** on the object enumeration, which
-    depends on none of the handler caches of section 13.4 point 7. The effective state
-    and the provenance are re-read for every target, as that clause requires.
+    depends on none of the handler caches of section 13.4 point 7 - that is the one thing
+    the clause allows carrying from one row to the next.
+
+    It does **not** memoize the provenance: this class asks the reader for it on every
+    estimate, and `editappacl` refreshes that reader before each target. The subtraction
+    below therefore always runs against the file as it stands, which matters as soon as a
+    previous row of the same run has written to the same application.
     """
 
     def __init__(self, rest, provenance_reader, table=None):

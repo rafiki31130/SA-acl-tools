@@ -1,4 +1,4 @@
-"""Impact estimate (v4.1 section 10.3).
+"""Impact estimate (v4.2 section 10.3).
 
 The estimate is what makes the second ceiling mean anything: `max_stanzas` bounds the
 number of acts, `max_impacted_objects` bounds what those acts **move**, and neither is
@@ -21,8 +21,10 @@ from .appacl_helpers import (
     FIXTURE_TABLE,
     FakeAppRest,
     FakeProvenanceReader,
+    frozen_stanza,
     object_listing_body,
     provenance,
+    touched_stanza,
 )
 
 VIEWS_LISTING = "/servicesNS/nobody/my_app/data/ui/views"
@@ -53,14 +55,16 @@ class TheFamilyEstimateTest(unittest.TestCase):
         listing = object_listing_body(
             [("one", "my_app"), ("two", "my_app"), ("three", "my_app")]
         )
-        estimator, _rest = self._estimator(listing, local="[views/one]\na = 1\n")
+        estimator, _rest = self._estimator(listing, local=frozen_stanza("views/one"))
         self.assertEqual(estimator.estimate(_target()), 2)
 
     def test_a_frozen_stanza_present_in_both_files_counts_once(self):
         """HY-2: specificity wins between layers, so the two files are a **union**."""
         listing = object_listing_body([("one", "my_app"), ("two", "my_app")])
         estimator, _rest = self._estimator(
-            listing, local="[views/one]\na = 1\n", default="[views/one]\nb = 2\n"
+            listing,
+            local=frozen_stanza("views/one"),
+            default=frozen_stanza("views/one"),
         )
         self.assertEqual(estimator.estimate(_target()), 1)
 
@@ -88,7 +92,9 @@ class TheFamilyEstimateTest(unittest.TestCase):
         would be worse than an approximate one - the column is named `estimate`."""
         listing = object_listing_body([("one", "my_app")])
         estimator, _rest = self._estimator(
-            listing, local="[views/one]\na=1\n[views/gone]\nb=2\n[views/also_gone]\nc=3\n"
+            listing,
+            local=(frozen_stanza("views/one") + frozen_stanza("views/gone")
+                  + frozen_stanza("views/also_gone")),
         )
         self.assertEqual(estimator.estimate(_target()), 0)
 
@@ -155,7 +161,7 @@ class TheApplicationDefaultEstimateTest(unittest.TestCase):
 
     def test_a_family_with_a_header_is_excluded(self):
         estimator, _rest = self._estimator(
-            local="[views]\na = 1\n",
+            local=frozen_stanza("views"),
             listings={
                 VIEWS_LISTING: object_listing_body([("one", "my_app")]),
                 SEARCHES_LISTING: object_listing_body([("two", "my_app")]),
@@ -165,14 +171,14 @@ class TheApplicationDefaultEstimateTest(unittest.TestCase):
 
     def test_a_header_in_the_default_layer_excludes_too(self):
         estimator, _rest = self._estimator(
-            default="[views]\na = 1\n",
+            default=frozen_stanza("views"),
             listings={VIEWS_LISTING: object_listing_body([("one", "my_app")])},
         )
         self.assertEqual(estimator.estimate(_target(kind=STANZA_KIND_APP)), 0)
 
     def test_the_frozen_objects_of_the_remaining_families_are_subtracted(self):
         estimator, _rest = self._estimator(
-            local="[savedsearches/two]\na = 1\n",
+            local=frozen_stanza("savedsearches/two"),
             listings={
                 SEARCHES_LISTING: object_listing_body(
                     [("two", "my_app"), ("three", "my_app")]
@@ -186,6 +192,60 @@ class TheApplicationDefaultEstimateTest(unittest.TestCase):
             FakeAppRest(), FakeProvenanceReader(provenance()), None
         )
         self.assertEqual(estimator.estimate(_target(kind=STANZA_KIND_APP)), 0)
+
+
+class TheAuditCasesOfAnomalyA2Test(unittest.TestCase):
+    """**The three cases the pre-delivery audit measured on the lab, reproduced here.**
+
+    They are the regression net of anomaly A-2, and each one is a real fixture the auditor
+    built and wrote to, not a construction of the imagination:
+
+        [views]         12 objects created by REST, 12 stanzas, none carrying `access`
+        [savedsearches]  3 objects, 3 stanzas, ONE of them really frozen
+        [views]          6 objects delivered in `default/`, no stanza at all
+
+    Before the correction the first two estimated **0** against a real effect of **12** and
+    **2** - a hundred per cent off, in the direction that reassures - while the third was
+    already exact. That third case is what localises the defect: the subtraction of counts
+    is the right mechanism, its definition of "frozen" was not.
+    """
+
+    def _estimator(self, listing, local=None):
+        rest = FakeAppRest(
+            json_responses={VIEWS_LISTING: RestResponse(200, listing)},
+            default_json=RestResponse(200, b'{"entry":[]}'),
+        )
+        reader = FakeProvenanceReader(provenance(local=local))
+        return ImpactEstimator(rest, reader, FIXTURE_TABLE)
+
+    def test_twelve_objects_created_by_rest_are_twelve_impacted(self):
+        names = [("auditview%02d" % i, "my_app") for i in range(1, 13)]
+        stanzas = "".join(touched_stanza("views/%s" % name) for name, _ in names)
+        estimator = self._estimator(object_listing_body(names), local=stanzas)
+        self.assertEqual(estimator.estimate(_target()), 12)
+
+    def test_three_objects_of_which_one_is_really_frozen_are_two_impacted(self):
+        names = [("auditsearch%d" % i, "my_app") for i in (1, 2, 3)]
+        stanzas = (frozen_stanza("views/auditsearch1")
+                   + touched_stanza("views/auditsearch2")
+                   + touched_stanza("views/auditsearch3"))
+        estimator = self._estimator(object_listing_body(names), local=stanzas)
+        self.assertEqual(estimator.estimate(_target()), 2)
+
+    def test_six_objects_delivered_in_a_package_stay_exact(self):
+        """The counter-witness: the formula was already right where the objects carried no
+        stanza at all, which is why the correction is a predicate and not an algorithm."""
+        names = [("pkgview%d" % i, "my_app") for i in range(1, 7)]
+        estimator = self._estimator(object_listing_body(names), local=None)
+        self.assertEqual(estimator.estimate(_target()), 6)
+
+    def test_the_warning_no_longer_fires_when_the_write_moves_the_family(self):
+        """`no_inheriting_object` said "this write moves nothing today" while the write
+        moved every object of the family. A non-zero estimate is what withdraws it."""
+        names = [("auditview%02d" % i, "my_app") for i in range(1, 13)]
+        stanzas = "".join(touched_stanza("views/%s" % name) for name, _ in names)
+        estimator = self._estimator(object_listing_body(names), local=stanzas)
+        self.assertGreater(estimator.estimate(_target()), 0)
 
 
 class ZeroIsNotANoopTest(unittest.TestCase):

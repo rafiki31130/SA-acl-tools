@@ -1,4 +1,4 @@
-"""Reading the `.meta` files, and the bounds of that exception (v4.1 section 6).
+"""Reading the `.meta` files, and the bounds of that exception (v4.2 section 6).
 
 Two of the four bounds are held **mechanically** here, by reading the syntax tree of
 `bin/acltools/appacl_provenance.py` rather than by trusting a comment:
@@ -30,6 +30,7 @@ from acltools.appacl_provenance import (
     classify_stanza,
     family_of,
     is_safe_app_segment,
+    materializes_permissions,
     meta_path,
     parse_meta,
     read_meta_file,
@@ -40,7 +41,12 @@ from acltools.appacl_provenance import (
 from acltools.errors import FatalProvenanceRootError
 
 from . import BIN_DIR
-from .appacl_helpers import provenance
+from .appacl_helpers import (
+    frozen_stanza,
+    provenance,
+    scoped_stanza,
+    touched_stanza,
+)
 
 MODULE_PATH = os.path.join(BIN_DIR, "acltools", "appacl_provenance.py")
 
@@ -503,8 +509,18 @@ class TheCountsNeverListNamesTest(unittest.TestCase):
     without `admin_all_objects` would otherwise see object names the API refuses them.
     """
 
-    LOCAL = "[]\na = 1\n[views]\nb = 2\n[views/one]\nc = 3\n[views/two]\nd = 4\n"
-    DEFAULT = "[views/two]\ne = 5\n[macros/m]\nf = 6\n"
+    #: **Faithful fixtures.** Every stanza that stands for a frozen object or a governing
+    #: header carries an `access` line, because that is the key the platform writes when it
+    #: freezes and the only one that interrupts inheritance. The previous fixtures used an
+    #: invented key (`a = 1`), which freezes nothing - so the counts agreed with a
+    #: predicate that was wrong, and anomaly A-2 crossed 1 288 tests untouched.
+    LOCAL = (
+        frozen_stanza("")
+        + frozen_stanza("views")
+        + frozen_stanza("views/one")
+        + frozen_stanza("views/two")
+    )
+    DEFAULT = frozen_stanza("views/two") + frozen_stanza("macros/m")
 
     def setUp(self):
         self.prov = provenance(local=self.LOCAL, default=self.DEFAULT)
@@ -546,6 +562,109 @@ class TheCountsNeverListNamesTest(unittest.TestCase):
         self.assertTrue(self.prov.has_family_header("views"))
         self.assertFalse(self.prov.has_family_header("macros"))
         self.assertFalse(self.prov.has_family_header(""))
+
+
+class TheFreezePredicateTest(unittest.TestCase):
+    """**Anomaly A-2 of the pre-delivery audit, and the measurement that closes it.**
+
+    The premise the contract carried - *an object stanza freezes its object* - is false.
+    splunkd writes a `[<family>/<object>]` stanza for **every object it creates or edits**,
+    carrying `owner`, `version` and `modtime` and no `access` line, and such an object goes
+    on inheriting its permissions. Counting those as frozen made the impact estimate zero
+    on any application whose objects had ever been touched, while the output announced
+    `no_inheriting_object` and the write moved the whole family: wrong by 100 %, in the
+    direction that reassures.
+
+    **Measured on the lab**, at both stanza levels, by writing the generic and re-reading
+    the effective ACL of a witness of each shape:
+
+        stanza keys                    perms.read  perms.write  sharing
+        (no stanza at all)             moved       moved        moved
+        owner / version / modtime      moved       moved        moved
+        export, no access              moved       moved        FROZEN
+        access + export                FROZEN      FROZEN       FROZEN
+
+    And one level up, on a `[savedsearches]` header carrying `export`, `version` and
+    `modtime`: the witness object followed a change of `[]` on its permissions, so a header
+    that materializes nothing governs nothing either.
+
+    A fourth shape - `access` without `export` - is **not producible** through the
+    platform's own write paths: `sharing` is a required argument of the object ACL handler,
+    measured `400 The following required arguments are missing: owner, sharing`. So the
+    single predicate below covers every shape splunkd writes.
+
+    Every test in this class **fails on the previous behaviour**, which counted presence.
+    """
+
+    def test_a_stanza_that_carries_the_permissions_freezes(self):
+        prov = provenance(local=frozen_stanza("views/frozen_one"))
+        self.assertEqual(prov.frozen_count("views"), 1)
+
+    def test_a_stanza_written_by_splunkd_on_an_edit_freezes_nothing(self):
+        """THE case of A-2, and the one that dominates any real application."""
+        prov = provenance(local=touched_stanza("views/edited_one"))
+        self.assertEqual(prov.frozen_count("views"), 0)
+
+    def test_a_stanza_carrying_only_the_scope_freezes_nothing_here(self):
+        """`export` freezes the SCOPE, not the permissions. Such an object still has its
+        permissions moved by a generic write, so it stays inside the count - and the
+        estimate then overstates what the scope dimension of that write reaches, which is
+        the safe direction for a volume guard rail."""
+        prov = provenance(local=scoped_stanza("views/scoped_one"))
+        self.assertEqual(prov.frozen_count("views"), 0)
+
+    def test_the_mixture_counts_only_what_freezes(self):
+        prov = provenance(
+            local=(frozen_stanza("views/a") + touched_stanza("views/b")
+                   + scoped_stanza("views/c") + frozen_stanza("views/d")),
+        )
+        self.assertEqual(prov.frozen_count("views"), 2)
+
+    def test_the_freezing_layer_wins_over_the_touched_one(self):
+        """HY-2: specificity wins between layers, and at equal specificity the two files
+        are a union. An object frozen in `default.meta` is frozen, whatever its
+        `local.meta` twin carries."""
+        prov = provenance(
+            local=touched_stanza("views/one"), default=frozen_stanza("views/one")
+        )
+        self.assertEqual(prov.frozen_count("views"), 1)
+
+    def test_a_family_header_that_materializes_nothing_governs_nothing(self):
+        """Same predicate one level up, and it is measured there too: the objects of such
+        a family stay inside the blast radius of the application default."""
+        prov = provenance(local=scoped_stanza("views"))
+        self.assertFalse(prov.has_family_header("views"))
+        self.assertEqual(prov.family_header_count(), 0)
+
+    def test_a_family_header_that_carries_the_permissions_governs(self):
+        prov = provenance(local=frozen_stanza("views"))
+        self.assertTrue(prov.has_family_header("views"))
+        self.assertEqual(prov.family_header_count(), 1)
+
+    def test_the_predicate_reads_the_keys_and_nothing_else(self):
+        self.assertTrue(materializes_permissions(["access"]))
+        self.assertTrue(materializes_permissions({"access": "", "export": ""}))
+        self.assertFalse(materializes_permissions([]))
+        self.assertFalse(materializes_permissions(None))
+        self.assertFalse(materializes_permissions(["owner", "version", "modtime"]))
+        self.assertFalse(materializes_permissions(["export"]))
+
+    def test_presence_and_materialization_are_two_different_questions(self):
+        """`acl_present_local` answers presence, which is what section 7.4 asks of it.
+        The freeze predicate answers governance. Conflating them is the defect."""
+        prov = provenance(local=touched_stanza("views"))
+        self.assertTrue(prov.present_local("views"))
+        self.assertFalse(prov.materialized_local("views"))
+
+    def test_a_stanza_carrying_the_permissions_is_materialized(self):
+        prov = provenance(local=frozen_stanza("views"))
+        self.assertTrue(prov.present_local("views"))
+        self.assertTrue(prov.materialized_local("views"))
+
+    def test_an_absent_stanza_is_neither(self):
+        prov = provenance(local=None)
+        self.assertFalse(prov.present_local("views"))
+        self.assertFalse(prov.materialized_local("views"))
 
 
 class TheReaderMemoizesPerApplicationTest(unittest.TestCase):

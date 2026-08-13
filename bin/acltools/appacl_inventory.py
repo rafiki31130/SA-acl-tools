@@ -1,4 +1,4 @@
-"""Inventory of the application-level ACL stanzas (v4.1 section 7).
+"""Inventory of the application-level ACL stanzas (v4.2 section 7).
 
 **What this command exists to answer**, and nothing else has its place in the output
 (section 7.1): *is this application still governable through its generic stanzas, or is
@@ -35,7 +35,12 @@ from .appacl_model import (
     STANZA_KIND_FAMILY,
     AppAclState,
 )
-from .appacl_provenance import classify_stanza, family_of
+from .appacl_provenance import (
+    META_ACCESS_KEY,
+    META_EXPORT_KEY,
+    classify_stanza,
+    family_of,
+)
 from .appacl_target import build_app_default_path, build_family_default_path
 from .normalize import serialize_roles
 
@@ -74,12 +79,6 @@ SERVER_NAME_KEY = "serverName"
 #: REST path listing the applications (section 6.2, bound 4: the perimeter of read files
 #: is limited to the applications **this call returns**).
 APPS_PATH = "/services/apps/local"
-
-#: Literal keys of a `.meta` stanza this module reads (section 6.4). `access` carries
-#: both permissions on one line, which is why the two output columns are obtained by
-#: splitting it rather than by looking up two keys that do not exist.
-META_ACCESS_KEY = "access"
-META_EXPORT_KEY = "export"
 
 #: **Declared output field set** (section 7.4, and v3.14 section 5.7, D-33). The SDK
 #: writer freezes the stream header on the keys of the **first** record emitted; a field
@@ -342,6 +341,12 @@ def governable_of(stanza_kind, provenance_available, frozen_stanzas, family_head
 
     `partial` is the honest word: it says some objects escape the generic stanza, and it
     does not pretend to say how many matter.
+
+    **What counts as escaping is measured, not assumed.** `frozen_stanzas` and
+    `family_headers` are fed by `materializes_permissions`: a stanza that carries only
+    `owner`, `version` and `modtime` - what splunkd writes for every object it touches -
+    freezes nothing and is not counted. Before the remediation of 2026-08-13 it was, and
+    every application whose objects had ever been edited came out `partial`.
     """
     if not provenance_available:
         return GOVERNABLE_UNKNOWN

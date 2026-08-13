@@ -1,4 +1,4 @@
-"""The inventory core (v4.1 section 7), and the bounds it inherits from section 6.
+"""The inventory core (v4.2 section 7), and the bounds it inherits from section 6.
 
 What this module holds, and it is the whole reason the command exists: **the distinction
 between an inherited value and a frozen one**. Measured (Q0-4), REST answers the same
@@ -54,8 +54,11 @@ from .appacl_helpers import (
     FakeAppRest,
     FakeProvenanceReader,
     app_acl_body,
+    frozen_stanza,
     object_listing_body,
     provenance,
+    scoped_stanza,
+    touched_stanza,
 )
 from .test_spl_artifacts import read_splunk_conf
 
@@ -562,6 +565,68 @@ class TheOutputCarriesCountsAndNeverObjectNamesTest(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Section 7.4 - the object counts, and what they cost
 # --------------------------------------------------------------------------- #
+
+class TheGovernabilityVerdictAfterAnomalyA2Test(unittest.TestCase):
+    """**The derived reach of A-2, which the auditor could name but not measure.**
+
+    The same definition of "frozen" feeds `acl_frozen_stanzas` and `acl_governable`. With
+    the old one, an application whose objects had merely been **edited** - which is every
+    real application - came out `partial`, and `yes` was reachable only on an application
+    delivered as a package and never touched. The decision aid said "you can no longer
+    govern this" about applications that were perfectly governable.
+    """
+
+    #: An application nobody has frozen: three views created or edited through splunkd,
+    #: each carrying the stanza splunkd writes on an edit and nothing more.
+    EDITED_ONLY = (
+        touched_stanza("views/edited_one")
+        + touched_stanza("views/edited_two")
+        + touched_stanza("views/edited_three")
+    )
+
+    def test_an_application_whose_objects_were_only_edited_is_governable(self):
+        row = builder().app_default_row("my_app", provenance(local=self.EDITED_ONLY))
+        self.assertEqual(row["acl_frozen_stanzas"], 0)
+        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
+
+    def test_the_family_row_agrees(self):
+        row = builder().family_row(
+            "my_app", "views", provenance(local=self.EDITED_ONLY)
+        )
+        self.assertEqual(row["acl_frozen_stanzas"], 0)
+        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
+
+    def test_one_really_frozen_object_is_enough_to_degrade_the_verdict(self):
+        """The negative control: the verdict still reacts, it just reacts to the right
+        thing."""
+        row = builder().family_row(
+            "my_app", "views",
+            provenance(local=self.EDITED_ONLY + frozen_stanza("views/frozen_one")),
+        )
+        self.assertEqual(row["acl_frozen_stanzas"], 1)
+        self.assertEqual(row["acl_governable"], GOVERNABLE_PARTIAL)
+
+    def test_a_family_header_that_materializes_nothing_does_not_degrade_the_app_row(self):
+        """Same predicate one level up: a header carrying only the scope leaves its family
+        inside the reach of the application default."""
+        row = builder().app_default_row("my_app", provenance(local=scoped_stanza("views")))
+        self.assertEqual(row["acl_family_headers"], 0)
+        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
+
+    def test_the_family_is_still_EMITTED_even_when_nothing_freezes_it(self):
+        """Section 7.5 condition 2 is about the **presence** of objects of the family, not
+        about their freezing, and it is deliberately left alone: an operator asking what a
+        family looks like must see it, whatever its stanzas carry."""
+        self.assertIn("views", families_to_emit(provenance(local=self.EDITED_ONLY), ()))
+
+    def test_the_row_still_reports_the_stanza_as_present(self):
+        """`acl_present_local` answers presence, which is what section 7.4 asks of it. It
+        is the freeze counters that changed, not this column - and the two questions are
+        now distinct rather than conflated."""
+        row = builder().family_row("my_app", "views", provenance(local=touched_stanza("views")))
+        self.assertEqual(row["acl_present_local"], "true")
+        self.assertEqual(row["acl_governable"], GOVERNABLE_YES)
+
 
 class TheObjectCountsTest(unittest.TestCase):
     """`count_objects` is off by default because it costs one REST call per (application,

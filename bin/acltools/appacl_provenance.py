@@ -1,4 +1,4 @@
-"""Provenance: reading the `.meta` files (v4.1 section 6).
+"""Provenance: reading the `.meta` files (v4.2 section 6).
 
 **This module is the exception to the "API only" rule of the project, and it carries its
 own bounds.** The rule aims at writes, because a write is what creates a replication
@@ -79,6 +79,25 @@ SPLUNK_HOME_VARIABLE = "SPLUNK_HOME"
 #: than a derivative of it, and what makes its failure **detectable** (`isdir` false)
 #: instead of silent.
 FALLBACK_DIRNAME_LEVELS = 3
+
+#: Keys of a `.meta` stanza that **interrupt inheritance**, and the dimension each one
+#: interrupts. *Measured* on the lab (remediation of 2026-08-13), at **both** stanza
+#: levels - object stanza and family header - by writing the generic and re-reading the
+#: effective ACL of witnesses carrying different key sets:
+#:
+#:     stanza keys                    perms.read  perms.write  sharing
+#:     (no stanza at all)             moved       moved        moved
+#:     owner / version / modtime      moved       moved        moved
+#:     export (no access)             moved       moved        FROZEN
+#:     access + export                FROZEN      FROZEN       FROZEN
+#:
+#: **`access` is the key that freezes the permissions; `export` freezes the scope; the
+#: bookkeeping keys freeze nothing.** That is the whole correction of anomaly A-2: splunkd
+#: writes a stanza for **every object it creates or edits**, carrying only
+#: `owner`/`version`/`modtime`, and treating those as frozen made the impact estimate zero
+#: in the nominal case - wrong by 100 %, in the direction that reassures.
+META_ACCESS_KEY = "access"
+META_EXPORT_KEY = "export"
 
 #: Provenance values (section 7.4), closed domain.
 PROVENANCE_LOCAL = "local"
@@ -241,6 +260,32 @@ def classify_stanza(name):
     if "/" in text:
         return STANZA_KIND_OBJECT
     return STANZA_KIND_FAMILY
+
+
+def materializes_permissions(keys):
+    """True if this stanza's keys **carry the permissions**, rather than inherit them.
+
+    The single predicate of the whole package for the question *does this stanza take its
+    object, or its family, out of the reach of the generic one above it?* It is used at
+    both levels - `[<family>/<object>]` and `[<family>]` - because the measurement gave
+    the same answer at both, which is what makes one function enough.
+
+    **Presence of the stanza is not the question, and that was the defect.** A stanza
+    carrying only `owner`, `version` and `modtime` is what splunkd writes for every object
+    it creates or edits; such an object keeps inheriting its permissions in full. Counting
+    it as frozen made the impact estimate collapse to zero on any application whose objects
+    had ever been touched - that is, on any real application.
+
+    `export` is deliberately **not** part of the predicate. It freezes the **scope**, not
+    the permissions: an object whose stanza carries `export` without `access` still has its
+    permissions moved by a generic write, so it must stay **inside** the count. The
+    consequence is stated where it belongs - the estimate may overstate what the scope
+    dimension of a write reaches - and overstating is the safe direction for a volume
+    guard rail.
+
+    `keys` is any iterable of key names, so a stanza mapping can be passed as it stands.
+    """
+    return META_ACCESS_KEY in set(keys or ())
 
 
 def family_of(name):
@@ -411,10 +456,32 @@ class AppProvenance(object):
     # -- presence and provenance -------------------------------------------- #
 
     def present_local(self, stanza):
+        """Does the stanza **exist** in `local.meta`? (section 7.4, `acl_present_local`)
+
+        Presence, and presence only. It is **not** the predicate that decides whether the
+        stanza governs anything - `materialized_local` is - and the two were conflated
+        before the remediation of 2026-08-13.
+        """
         return self.local.has(stanza)
 
     def present_default(self, stanza):
         return self.default.has(stanza)
+
+    def materialized_local(self, stanza):
+        """Does the stanza carry the **permissions** in `local.meta`?
+
+        The question `editappacl` has to answer before writing, and the one that decides
+        whether the write is reversible. A stanza that exists without an `access` line does
+        not carry the permissions: writing them **materializes** them, which masks the
+        inherited value and cannot be undone - no measured REST path removes a key from a
+        stanza any more than it removes the stanza itself.
+
+        Reporting such a write as a reversible modification would promise a restore that
+        `app_acl_rollback` cannot deliver: replaying the prior effective values would write
+        an `access` line where there was none, freezing the family instead of restoring it.
+        That is the failure class of the 515 objects, one level down.
+        """
+        return materializes_permissions(self.local.get(stanza))
 
     def provenance_of(self, stanza):
         """Where the effective value comes from (section 7.4), closed domain.
@@ -437,56 +504,98 @@ class AppProvenance(object):
     # -- counts, and counts only (bound 3) ---------------------------------- #
 
     def _object_stanza_names(self, family=None):
-        """Set of `[<family>/<object>]` stanza names, **private to this class**.
+        """Set of the `[<family>/<object>]` stanzas that **freeze** their object,
+        **private to this class**.
 
-        It exists so that the counts below are computed over the **union** of the two
-        files rather than over their sum: HY-2 establishes that specificity wins between
-        layers, so a stanza present in both is one frozen object, not two. The set never
-        leaves the instance, and no public method returns it - that is bound 3, held by a
-        test.
+        Two filters, and the second one is the correction of A-2:
+
+        1. the name must be an object name - `classify_stanza`;
+        2. the stanza must **materialize the permissions** - carry an `access` key. A
+           stanza carrying only `owner`, `version` and `modtime` is what splunkd writes
+           for every object it touches, and such an object still inherits.
+
+        The union of the two files is taken rather than their sum: HY-2 establishes that
+        specificity wins between layers, so an object frozen in either file is one frozen
+        object and not two. **A stanza that freezes in `default.meta` counts even when its
+        `local.meta` twin carries only bookkeeping keys** - the freezing layer wins.
+
+        The set never leaves the instance, and no public method returns it: that is
+        bound 3 of section 6.2, held by a test.
         """
         names = set()
         for meta in (self.local, self.default):
-            for name in meta.stanzas:
+            for name, keys in meta.stanzas.items():
                 if classify_stanza(name) != STANZA_KIND_OBJECT:
                     continue
                 if family is not None and family_of(name) != str(family or ""):
+                    continue
+                if not materializes_permissions(keys):
                     continue
                 names.add(name)
         return names
 
     def frozen_count(self, family=None):
-        """Number of distinct `[<family>/<object>]` stanzas, over the two files.
+        """Number of distinct objects whose stanza **carries the permissions**.
 
-        With no argument, over the whole application.
+        With no argument, over the whole application. This is the figure the impact
+        estimate subtracts and the one `acl_frozen_stanzas` publishes; before the
+        remediation it counted every object stanza, frozen or not, and collapsed the
+        estimate to zero on any application whose objects had been edited.
         """
         return len(self._object_stanza_names(family))
 
     def has_family_header(self, family):
-        """True if `[<family>]` exists in either file."""
+        """True if `[<family>]` **governs** the family in either file.
+
+        Same predicate one level up, and the measurement gave the same answer there: a
+        `[savedsearches]` header carrying only `export`, `version` and `modtime` does
+        **not** interrupt the inheritance of the permissions from `[]` - the witness
+        object followed `[]` across a change. So a header that does not materialize the
+        permissions leaves its family inside the blast radius of the application default.
+        """
         name = str(family or "")
         if not name:
             return False
-        return self.local.has(name) or self.default.has(name)
+        return any(
+            materializes_permissions(meta.get(name))
+            for meta in (self.local, self.default)
+            if meta.has(name)
+        )
 
     def family_header_count(self):
-        """Number of distinct family headers carried by the application."""
+        """Number of distinct family headers that **govern** their family.
+
+        It feeds the `app_default` line of `acl_governable`, whose `yes` asks that nothing
+        stand between `[]` and the objects. A header that materializes nothing stands in
+        the way of nothing.
+        """
         names = set()
         for meta in (self.local, self.default):
-            for name in meta.stanzas:
-                if classify_stanza(name) == STANZA_KIND_FAMILY:
-                    names.add(name)
+            for name, keys in meta.stanzas.items():
+                if classify_stanza(name) != STANZA_KIND_FAMILY:
+                    continue
+                if not materializes_permissions(keys):
+                    continue
+                names.add(name)
         return len(names)
 
 
 class ProvenanceReader(object):
     """Reads and **memoizes** the provenance of each application of the run.
 
-    Memoization is per application and lasts for the run. It does not contradict the
-    caution clause of section 13.4 point 7 - "re-read the effective state and the
-    provenance immediately before processing each target" - because that clause bears on
-    what the **handler caches** may lie about, and this reader does not go through a
-    handler. `refresh()` exists for the caller that wants the file read again.
+    Memoization is per application and lasts **until `refresh()` is called**, which is the
+    whole of the contract this class offers.
+
+    **Who calls it, and who does not, is a decision of the caller and not of this class.**
+    `editappacl` refreshes before every target: it writes between rows, and section 13.4
+    point 7 allows carrying only the object enumeration from one row to the next.
+    `app_acl_inventory` does not refresh: it writes nothing, so no row can invalidate the
+    read of another, and re-reading the same two files once per emitted row would buy
+    nothing at all.
+
+    Before the remediation of 2026-08-13 nobody called `refresh()` and two comments in the
+    package asserted that the provenance was re-read for every target. The behaviour was
+    corrected rather than the comments, because the clause is normative.
     """
 
     def __init__(self, root, opener=None):

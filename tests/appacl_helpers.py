@@ -1,4 +1,4 @@
-"""Test doubles of the application-level command (v4.1).
+"""Test doubles of the application-level command (v4.2).
 
 Same discipline as `tests/helpers.py`: no HTTP simulation library, no socket, no local
 server, and JSON fixtures **written by hand** from the shape observed on the reference
@@ -25,6 +25,39 @@ from acltools.appacl_model import (
 )
 from acltools.appacl_provenance import AppProvenance, MetaFile, parse_meta
 from acltools.rest import RestResponse
+
+#: The three shapes a `[<family>/<object>]` stanza really takes on the platform, and what
+#: each one freezes. **Measured** on the lab during the remediation of 2026-08-13, by
+#: writing the generic header and re-reading the effective ACL of a witness of each shape:
+#:
+#:     shape        keys                        perms      scope
+#:     TOUCHED      owner / version / modtime   inherits   inherits
+#:     SCOPED       export (+ bookkeeping)      inherits   frozen
+#:     FROZEN       access + export             frozen     frozen
+#:
+#: They exist as **named constants** because the fixtures that used to stand in for a
+#: frozen object carried an invented key (`a = 1`), which freezes nothing. That is what
+#: let anomaly A-2 through a suite of 1 288 tests: the code was wrong and the fixtures
+#: were wrong in the same direction, so they agreed. A fixture that does not reproduce
+#: what the platform writes tests the developer's belief, not the platform.
+def frozen_stanza(name):
+    """A stanza that really freezes: it carries the permissions."""
+    return ("[%s]\naccess = read : [ power ], write : [ admin ]\nexport = none\n"
+            "owner = nobody\nversion = 9.4.6\nmodtime = 1786518192.167816000\n" % name)
+
+
+def touched_stanza(name):
+    """What splunkd writes for **every object it creates or edits**. Freezes nothing."""
+    return ("[%s]\nowner = admin\nversion = 9.4.6\n"
+            "modtime = 1786518192.167816000\n" % name)
+
+
+def scoped_stanza(name):
+    """A stanza carrying `export` and no `access`: the scope is frozen, the permissions
+    are not. Produced by a POST that sets the sharing without sending permissions."""
+    return ("[%s]\nexport = system\nowner = nobody\nversion = 9.4.6\n"
+            "modtime = 1786518192.167816000\n" % name)
+
 
 #: Sentinel for an **absent column** in `make_app_event`. `None` cannot play that role:
 #: it is a possible value of a *present* column, and confusing the two is the very error

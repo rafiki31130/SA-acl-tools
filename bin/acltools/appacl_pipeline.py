@@ -1,4 +1,4 @@
-"""State machine of `editappacl` (v4.1 sections 8.7, 9, 10, 11.2).
+"""State machine of `editappacl` (v4.2 sections 8.7, 9, 10, 11.2).
 
 It carries the normative order of the controls, the ordering of the journal lines with
 respect to the POST, the two volume ceilings and the deduplication of targets. It is the
@@ -315,15 +315,25 @@ class AppEventProcessor(object):
             work.warn(warning)
 
         # **The file is read here, after the GET and before any write decision**: the
-        # modification / creation classification has no other source (Q0-4). It is
-        # re-read for every target, per the caution clause of section 13.4 point 7.
-        provenance = (
-            self._provenance.provenance_of_app(target.app)
-            if self._provenance is not None
-            else None
-        )
+        # modification / creation classification has no other source (Q0-4).
+        #
+        # `refresh()` first, and it is not decoration: section 13.4 point 7 allows reusing
+        # only the object enumeration from one row to the next, and this command writes
+        # between rows - a target processed after a write to the same application must not
+        # be classified against a file read before it. The memoized reader was keeping the
+        # provenance for the whole run while two comments claimed the opposite; the
+        # comments were not the thing that was wrong.
+        provenance = None
+        if self._provenance is not None:
+            self._provenance.refresh(target.app)
+            provenance = self._provenance.provenance_of_app(target.app)
         available = provenance is not None and provenance.available
-        present = bool(available and provenance.present_local(target.stanza))
+        # **Materialized, not merely present.** A stanza that exists without an `access`
+        # line does not carry the permissions: writing them masks an inherited value, and
+        # nothing removes a key from a stanza any more than it removes the stanza. Such a
+        # write is a creation in the sense of section 9, and reporting it as a reversible
+        # modification would promise a restore the rollback cannot deliver.
+        present = bool(available and provenance.materialized_local(target.stanza))
 
         if not available:                                            # rank 8
             work.reversible = REVERSIBLE_UNKNOWN

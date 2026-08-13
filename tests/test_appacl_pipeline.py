@@ -1,4 +1,4 @@
-"""State machine of `editappacl` (v4.1 sections 8.6, 8.7, 9, 10, 11.2).
+"""State machine of `editappacl` (v4.2 sections 8.6, 8.7, 9, 10, 11.2).
 
 Three things are held here, and the third is the one the increment exists for:
 
@@ -33,10 +33,13 @@ from .appacl_helpers import (
     FakeImpact,
     FakeProvenanceReader,
     app_acl_body,
+    frozen_stanza,
     make_app_ctx,
     make_app_event,
     make_app_params,
     provenance,
+    scoped_stanza,
+    touched_stanza,
 )
 from .helpers import FakeClock, FakeJournal
 
@@ -386,7 +389,7 @@ class TheSimulationWritesNothingTest(unittest.TestCase):
         of it cannot be undone."""
         processor = build(
             params=make_app_params(dryrun=True, allow_create=True),
-            prov=provenance(local="[views]\na = 1\n"),
+            prov=provenance(local=frozen_stanza("views")),
             impact=FakeImpact(7),
         )
         processor.process(make_app_event(stanza="views", handler="", read="user"))
@@ -731,6 +734,129 @@ class TheInternalErrorIsContainedTest(unittest.TestCase):
         result = processor.process(make_app_event(read="user"))
         self.assertEqual(result.status, "error")
         self.assertTrue(result.error.startswith("internal:RuntimeError"))
+
+
+class TheStanzaMustCarryThePermissionsToBeReversibleTest(unittest.TestCase):
+    """**Beyond the literal wording of A-2, and the same measured predicate.**
+
+    The contract ties reversibility to the **existence** of the stanza in `local.meta`. The
+    measurement says existence is not the question: a stanza that exists without an `access`
+    line does not carry the permissions, so writing them **materializes** an inherited value
+    - and nothing removes a key from a stanza any more than it removes the stanza itself.
+
+    Reporting such a write as a reversible modification would promise a restore that
+    `app_acl_rollback` cannot deliver: replaying the prior effective values would write an
+    `access` line where there was none, **freezing** the family instead of restoring it.
+    That is the failure class of the 515 objects, one level down, and the classification is
+    therefore conservative - a mixed act counts as a creation.
+    """
+
+    def test_a_stanza_without_permissions_is_a_creation(self):
+        result = build(
+            prov=provenance(local=scoped_stanza("views")),
+            params=make_app_params(allow_create=True),
+        ).process(make_app_event(stanza="views", handler="", read="user"))
+        self.assertEqual(result.status, "created")
+        self.assertEqual(result.reversible, REVERSIBLE_FALSE)
+
+    def test_it_is_refused_by_default_like_any_other_creation(self):
+        result = build(
+            prov=provenance(local=touched_stanza("views")),
+            params=make_app_params(allow_create=False),
+        ).process(make_app_event(stanza="views", handler="", read="user"))
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.error, "irreversible_creation")
+
+    def test_a_stanza_that_carries_the_permissions_stays_a_modification(self):
+        result = build(
+            prov=provenance(local=frozen_stanza("views")),
+            params=make_app_params(allow_create=False),
+        ).process(make_app_event(stanza="views", handler="", read="user"))
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(result.reversible, REVERSIBLE_TRUE)
+
+    def test_the_prior_state_is_journaled_as_inherited_and_not_as_restorable(self):
+        """The mechanism that closes the hole: an inherited value is kept under keys the
+        rollback macro does not read."""
+        result = build(
+            prov=provenance(local=scoped_stanza("views")),
+            params=make_app_params(allow_create=True),
+        ).process(make_app_event(stanza="views", handler="", read="user"))
+        self.assertIsNotNone(result.inherited)
+
+    def test_an_already_compliant_target_says_the_value_is_inherited(self):
+        """`noop` claims the stanza carries the value; on a stanza with no `access` line it
+        does not, and `noop_inherited` is what says so."""
+        result = build(
+            prov=provenance(local=touched_stanza("views")),
+            params=make_app_params(allow_create=True),
+        ).process(make_app_event(stanza="views", handler=""))
+        self.assertEqual(result.status, "noop_inherited")
+        self.assertIn("not_materialized", result.warnings)
+
+
+class TheProvenanceIsReReadForEveryTargetTest(unittest.TestCase):
+    """Minor m-1 of the audit, corrected in the behaviour and not in the comments.
+
+    Section 13.4 point 7 allows carrying only the **object enumeration** from one row to
+    the next. `refresh()` was called nowhere in production while two comments asserted the
+    provenance was re-read for every target; this command writes between rows, so a target
+    classified against a file read before an earlier write is classified against the past.
+    """
+
+    class _CountingReader(object):
+        def __init__(self, prov):
+            self._prov = prov
+            self.refreshed = []
+            self.reads = []
+
+        def refresh(self, app):
+            self.refreshed.append(app)
+
+        def provenance_of_app(self, app):
+            self.reads.append(app)
+            return self._prov
+
+    def test_the_reader_is_refreshed_before_every_target(self):
+        reader = self._CountingReader(provenance(local=frozen_stanza("views")))
+        processor = AppEventProcessor(
+            params=make_app_params(),
+            ctx=make_app_ctx(),
+            rest=FakeAppRest(),
+            journal=None,
+            table=FIXTURE_TABLE,
+            provenance=reader,
+            impact=FakeImpact(0),
+        )
+        for family in ("views", "macros", "savedsearches"):
+            processor.process(make_app_event(stanza=family, handler="", read="user"))
+        self.assertEqual(len(reader.refreshed), 3)
+        self.assertEqual(reader.refreshed, ["my_app", "my_app", "my_app"])
+
+    def test_the_refresh_precedes_the_read(self):
+        """Refreshing after reading would leave the first target of every application
+        classified against nothing at all."""
+        order = []
+        reader = self._CountingReader(provenance(local=frozen_stanza("views")))
+        reader.refresh = lambda app: order.append("refresh")
+        original = reader.provenance_of_app
+
+        def read(app):
+            order.append("read")
+            return original(app)
+
+        reader.provenance_of_app = read
+        processor = AppEventProcessor(
+            params=make_app_params(),
+            ctx=make_app_ctx(),
+            rest=FakeAppRest(),
+            journal=None,
+            table=FIXTURE_TABLE,
+            provenance=reader,
+            impact=FakeImpact(0),
+        )
+        processor.process(make_app_event(stanza="views", handler="", read="user"))
+        self.assertEqual(order[:2], ["refresh", "read"])
 
 
 if __name__ == "__main__":
