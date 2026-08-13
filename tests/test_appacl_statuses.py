@@ -53,7 +53,18 @@ class ThePartitionIsCompleteTest(unittest.TestCase):
         }
         expected.add(os.path.join(BIN_DIR, "editacl.py"))
         expected.add(os.path.join(BIN_DIR, "editappacl.py"))
+        expected.add(os.path.join(BIN_DIR, "app_acl_inventory.py"))
         self.assertEqual(set(SOURCES) | set(APP_SOURCES), expected)
+
+    def test_the_three_adapters_are_covered(self):
+        """A command file left out of both sets would be scanned by nothing at all."""
+        from . import BIN_DIR as _bin
+
+        adapters = {
+            path for path in set(SOURCES) | set(APP_SOURCES)
+            if os.path.dirname(path) == _bin
+        }
+        self.assertEqual(len(adapters), 3, sorted(adapters))
 
     def test_the_application_level_set_is_not_empty(self):
         self.assertGreaterEqual(len(APP_SOURCES), 8)

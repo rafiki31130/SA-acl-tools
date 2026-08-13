@@ -92,7 +92,12 @@ _PACKAGE = os.path.join(BIN_DIR, "acltools")
 #: on each side. The **shared** modules - `journal.py`, `binding.py`, `normalize.py`,
 #: `mapping.py` - stay in `SOURCES` and carry no literal status either way.
 APP_MODULE_PREFIX = "appacl_"
-APP_ADAPTER = "editappacl.py"
+
+#: The adapters of the application-level side. `app_acl_inventory.py` produces no status
+#: at all - it writes nothing, so it has nothing to report the outcome of - and it is
+#: scanned all the same: a file left out of both sets is a place where a status could be
+#: born unseen, which is precisely the blind spot this device exists to close.
+APP_ADAPTERS = ("editappacl.py", "app_acl_inventory.py")
 
 
 def _package_modules(app_level):
@@ -111,7 +116,9 @@ SOURCES = _package_modules(False) + (os.path.join(BIN_DIR, "editacl.py"),)
 #: Counterpart set, consumed by `tests/test_appacl_statuses.py`. It lives here, next to
 #: the extractor, so that a module added to the package lands in exactly one of the two
 #: sets - neither in both, nor in neither.
-APP_SOURCES = _package_modules(True) + (os.path.join(BIN_DIR, APP_ADAPTER),)
+APP_SOURCES = _package_modules(True) + tuple(
+    os.path.join(BIN_DIR, name) for name in APP_ADAPTERS
+)
 
 #: Attribute names that carry an `acl_status`. A write to one of them is a **status
 #: site**: it is canonical, propagated, or opaque - never ignored.
