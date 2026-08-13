@@ -130,7 +130,11 @@ tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/(tests|tools)/'   # e
 6. **Grant read access to the journal index** to whoever must use the monitoring view,
    the rollback macros or the change-journal search - outside this app: no
    `srchIndexesAllowed`, no `srchIndexesDefault`, no `srchFilter` is declared here.
-7. First run **in simulation** (`dryrun=t`, the default) on a restricted scope.
+7. First run **in simulation** (`dryrun=t`, the default) on a restricted scope. **On a
+   platform with a self-signed certificate this first run fails**, and it is the step most
+   first installations stop at: the command verifies the `splunkd` certificate by default.
+   The failure is explicit - a fatal message that names its own remedy - and that remedy is
+   the note immediately below this list. It is one file to create.
 
 **Self-signed certificate.** Verification of the `splunkd` certificate is on by default,
 using `$SPLUNK_HOME/etc/auth/cacert.pem` when present. Failing that, create
