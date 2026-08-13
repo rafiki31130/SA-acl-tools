@@ -260,6 +260,25 @@ class AppParams:
 
 
 @dataclass(frozen=True)
+class AppInventoryParams:
+    """Validated parameters of `app_acl_inventory` (section 7.3).
+
+    Three, and three only. Every column of the output either carries the governability
+    decision or feeds `editappacl`, so there is nothing else to switch on or off - and
+    `count_objects` is the one thing that is optional, because it is the one thing that
+    costs a REST call per (application, family) where the rest is read from a single
+    file.
+    """
+
+    #: Patterns retained after the allow-list filter. Never empty: an absent parameter
+    #: yields `("*",)`, which is the documented default.
+    apps: Tuple[str, ...] = ("*",)
+    #: Families to emit unconditionally, even with no stanza and no frozen object.
+    families: Tuple[str, ...] = ()
+    count_objects: bool = False
+
+
+@dataclass(frozen=True)
 class AppRunContext:
     """Run constants, identical on every journal line (section 11.2).
 

@@ -7,7 +7,13 @@ parameter, and the three others are indifferent to which command calls them. One
 copy of them would be one more thing to keep in step.
 """
 
-from .appacl_model import DEFAULT_APP_FIELD_NAMES, AppFieldNames, AppParams
+from .appacl_inventory import parse_app_filter, parse_family_list
+from .appacl_model import (
+    DEFAULT_APP_FIELD_NAMES,
+    AppFieldNames,
+    AppInventoryParams,
+    AppParams,
+)
 from .errors import FatalConfigError
 
 #: Dedicated capability of the write command (section 8.1), declared **and granted to
@@ -17,6 +23,20 @@ from .errors import FatalConfigError
 #: pipeline does not enumerate and whose number is only known by estimation. This is the
 #: only place the app can express that difference - `admin_all_objects` does not.
 REQUIRED_APP_CAPABILITY = "edit_app_acl_bulk"
+
+#: Dedicated capability of the **inventory** command (section 7.6), declared **and
+#: granted to `admin`** by `default/authorize.conf`.
+#:
+#: Its motive is proper to this command, and it is the counterpart of the file-reading
+#: exception: **reading the file short-circuits the capability filtering REST applies**.
+#: The frozen-stanza counters of an application carry information the API would not serve
+#: a caller without `admin_all_objects`. Bound 3 of section 6.2 - counts, never names -
+#: reduces the exposure; this capability governs it.
+#:
+#: Splunk offers no native gating of search commands by capability: the check lives in
+#: the code, at the head of the run, and a failed check is a fatal error (v3.14
+#: section 7).
+REQUIRED_INVENTORY_CAPABILITY = "list_app_acl"
 
 #: Default stanza ceiling (section 8.5). **A choice, not a measurement**, and it is named
 #: as such wherever it appears: O-6 of the phase 0 measurement states that the real
@@ -184,4 +204,23 @@ def validate_app_params(
         max_stanzas=max_stanzas_int,
         max_impacted_objects=max_impacted_int,
         warnings=tuple(warnings),
+    )
+
+
+def validate_inventory_params(apps=None, families=None, count_objects=False):
+    """Validate the three parameters of section 7.3. Pure function.
+
+    **No parameter of this command can be fatally invalid**, and that is a decision
+    rather than an omission: the two filters are passed through the allow list of
+    section 7.3, so a character the contract does not admit is dropped instead of
+    rejecting the run. Section 13.1 lists the fatal errors limitatively and names only
+    "invalid parameter: syntactically incorrect field name, `max_stanzas` or
+    `max_impacted_objects` not a strictly positive integer" - none of which this command
+    has. `count_objects` is the exception that proves it: a value that is not a boolean
+    **is** an invalid parameter, and it is refused as one.
+    """
+    return AppInventoryParams(
+        apps=parse_app_filter(apps),
+        families=parse_family_list(families),
+        count_objects=_as_bool(count_objects, "count_objects", default=False),
     )
