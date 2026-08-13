@@ -52,9 +52,12 @@ class LayoutTest(unittest.TestCase):
         ("default", "data", "ui", "views", "editacl_runs.xml"),
         ("metadata", "default.meta"),
         ("bin", "editacl.py"),
+        ("bin", "editappacl.py"),
         ("bin", "acl_endpoint_map.json"),
+        ("bin", "app_acl_family_map.json"),
         ("bin", "acltools", "__init__.py"),
         ("lookups", "acl_endpoint_map_override.csv.example"),
+        ("lookups", "app_acl_family_map_override.csv.example"),
         ("tools", "requirements-vendor.txt"),
         ("tools", "vendor.sh"),
         ("tools", "verify_vendor.sh"),
@@ -75,6 +78,12 @@ class LayoutTest(unittest.TestCase):
             "__init__.py", "errors.py", "model.py", "normalize.py", "mapping.py",
             "endpoint.py", "merge.py", "preflight.py", "journal.py", "rest.py",
             "pipeline.py",
+            # Application-level core (v4.1 section 14.1, deliverable 2). The provenance,
+            # target, impact and family modules are named by the contract; the others
+            # follow the same split as the object-level core, layer by layer.
+            "appacl_model.py", "appacl_family.py", "appacl_target.py",
+            "appacl_provenance.py", "appacl_merge.py", "appacl_impact.py",
+            "appacl_pipeline.py", "appacl_preflight.py",
         }
         present = {
             f for f in os.listdir(os.path.join(BIN_DIR, "acltools"))
@@ -178,33 +187,71 @@ class DeployableArchiveTest(unittest.TestCase):
 
 
 class CommandsConfTest(unittest.TestCase):
-    """Section 2.1: the keys are normative, reproduced identically."""
+    """Section 2.1: the keys are normative, reproduced identically.
+
+    The same seven keys for both commands (v4.1 section 8.1 reproduces the template of
+    v3.14 section 2.1). Only `filename` differs, and freezing the whole stanza key by key
+    is what makes an eighth key - added for a run-time need and never decided - fail the
+    suite instead of shipping.
+    """
 
     EXPECTED = {
-        "filename": "editacl.py",
-        "chunked": "true",
-        "python.version": "python3",
-        "local": "true",
-        "run_in_preview": "false",
-        "is_risky": "true",
-        "maxinputs": "0",
+        "editacl": {
+            "filename": "editacl.py",
+            "chunked": "true",
+            "python.version": "python3",
+            "local": "true",
+            "run_in_preview": "false",
+            "is_risky": "true",
+            "maxinputs": "0",
+        },
+        "editappacl": {
+            "filename": "editappacl.py",
+            "chunked": "true",
+            "python.version": "python3",
+            "local": "true",
+            "run_in_preview": "false",
+            "is_risky": "true",
+            "maxinputs": "0",
+        },
     }
 
     def setUp(self):
         self.conf = read_conf("default", "commands.conf")
 
-    def test_stanza_editacl(self):
-        self.assertIn("editacl", self.conf.sections())
+    def test_the_declared_commands_are_exactly_these(self):
+        self.assertEqual(sorted(self.conf.sections()), sorted(self.EXPECTED))
 
     def test_the_normative_keys_are_reproduced_identically(self):
-        for key, value in self.EXPECTED.items():
-            with self.subTest(key=key):
-                self.assertEqual(self.conf.get("editacl", key), value)
+        for command, keys in self.EXPECTED.items():
+            for key, value in keys.items():
+                with self.subTest(command=command, key=key):
+                    self.assertEqual(self.conf.get(command, key), value)
 
     def test_no_extra_key(self):
-        self.assertEqual(
-            sorted(self.conf.options("editacl")), sorted(self.EXPECTED)
-        )
+        for command, keys in self.EXPECTED.items():
+            with self.subTest(command=command):
+                self.assertEqual(
+                    sorted(self.conf.options(command)), sorted(keys)
+                )
+
+    def test_the_declared_file_exists(self):
+        """A `filename` pointing nowhere loads without error and fails at search time."""
+        for command, keys in self.EXPECTED.items():
+            with self.subTest(command=command):
+                self.assertTrue(
+                    os.path.exists(os.path.join(BIN_DIR, keys["filename"]))
+                )
+
+    def test_both_commands_declare_themselves_risky(self):
+        """`is_risky = false` on a write command removes the interface's confirmation.
+
+        It is one word, it breaks nothing, and it silently drops the last thing standing
+        between an operator and an irreversible write launched by accident.
+        """
+        for command in self.EXPECTED:
+            with self.subTest(command=command):
+                self.assertEqual(self.conf.get(command, "is_risky"), "true")
 
 
 class SearchBnfConfTest(unittest.TestCase):
@@ -237,10 +284,17 @@ class SearchBnfConfTest(unittest.TestCase):
 
     def test_the_stanza_carries_the_name_of_the_declared_command(self):
         """The `[<command>-command]` convention is imposed by the platform: a badly
-        named stanza is loaded without error and highlights nothing."""
+        named stanza is loaded without error and highlights nothing.
+
+        The set of shipped commands is frozen here as well: a command declared in
+        `commands.conf` and forgotten in this file exists, runs, and is invisible to the
+        assistant - which is exactly the silent gap this whole class exists to close.
+        """
         commands = read_conf("default", "commands.conf").sections()
-        self.assertEqual(commands, ["editacl"])
-        self.assertIn("editacl-command", self.conf.sections())
+        self.assertEqual(sorted(commands), ["editacl", "editappacl"])
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn("%s-command" % command, self.conf.sections())
 
     def test_usage_public(self):
         """`usage` is required, and the search assistant only acts on `public`."""
@@ -263,19 +317,26 @@ class SearchBnfConfTest(unittest.TestCase):
                     orphans.add(term)
         self.assertEqual(sorted(orphans), [])
 
-    def test_the_described_options_are_exactly_those_of_the_code(self):
-        """Anti-drift: the assistant must never offer an option the command does not
-        know, nor stay silent about an option it accepts.
+    #: The two shipped commands, with the file and the class each one is declared in.
+    #: Every control below runs on both: an option described for one command and absent
+    #: from the other's code is the same defect, whichever command it lands on.
+    COMMANDS = (
+        ("editacl", "editacl.py", "EditAclCommand"),
+        ("editappacl", "editappacl.py", "EditAppAclCommand"),
+    )
 
-        The names are read from the source of `bin/editacl.py`, never by import: the
-        suite stays runnable without the SDK.
+    @staticmethod
+    def _options_of_the_code(filename, class_name):
+        """`Option` names declared by a command class, read from its **source**.
+
+        Never by import: the suite stays runnable without the SDK.
         """
-        path = os.path.join(BIN_DIR, "editacl.py")
+        path = os.path.join(BIN_DIR, filename)
         with open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read(), filename=path)
-        options_of_the_code = set()
+        options = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef) and node.name == "EditAclCommand":
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
                 for element in node.body:
                     if (isinstance(element, ast.Assign)
                             and isinstance(element.value, ast.Call)
@@ -283,41 +344,113 @@ class SearchBnfConfTest(unittest.TestCase):
                             and element.value.func.id == "Option"):
                         for target in element.targets:
                             if isinstance(target, ast.Name):
-                                options_of_the_code.add(target.id)
-        self.assertTrue(options_of_the_code, "no Option read from bin/editacl.py")
+                                options.add(target.id)
+        return options
 
-        options_described = set()
-        for section, syntax in self._syntaxes().items():
-            if section == "editacl-command":
-                continue
-            options_described.add(syntax.split("=", 1)[0].strip())
-        self.assertEqual(options_described, options_of_the_code)
+    def _option_sections(self, command):
+        """Sections of this file describing an option of `command`.
+
+        The stanza naming convention is `<command>-<option with hyphens>`, so the
+        partition is by prefix. `editacl` is a prefix of `editappacl` as a **string** but
+        not as a stanza name - `editappacl-app` does not start with `editacl-` - which is
+        why the separator is part of the test.
+        """
+        prefix = command + "-"
+        return {
+            section: syntax
+            for section, syntax in self._syntaxes().items()
+            if section.startswith(prefix) and section != command + "-command"
+        }
+
+    def test_the_described_options_are_exactly_those_of_the_code(self):
+        """Anti-drift: the assistant must never offer an option the command does not
+        know, nor stay silent about an option it accepts."""
+        for command, filename, class_name in self.COMMANDS:
+            with self.subTest(command=command):
+                options_of_the_code = self._options_of_the_code(filename, class_name)
+                self.assertTrue(
+                    options_of_the_code, "no Option read from bin/%s" % filename
+                )
+                options_described = {
+                    syntax.split("=", 1)[0].strip()
+                    for syntax in self._option_sections(command).values()
+                }
+                self.assertEqual(options_described, options_of_the_code)
+
+    def test_every_option_section_belongs_to_a_declared_command(self):
+        """No orphan option stanza: one describing a command that does not exist would
+        be loaded, valid, and shown by the assistant for nothing."""
+        declared = {name for name, _f, _c in self.COMMANDS}
+        for section in self._syntaxes():
+            with self.subTest(section=section):
+                owner = section.split("-", 1)[0]
+                self.assertIn(owner, declared)
 
     def test_every_option_of_the_code_appears_in_the_command_syntax(self):
-        syntax = self.conf.get("editacl-command", "syntax")
-        for section in self._syntaxes():
-            if section == "editacl-command":
-                continue
-            self.assertIn("<%s>" % section, syntax)
+        for command, _filename, _class_name in self.COMMANDS:
+            syntax = self.conf.get("%s-command" % command, "syntax")
+            for section in self._option_sections(command):
+                with self.subTest(command=command, option=section):
+                    self.assertIn("<%s>" % section, syntax)
+
+    def test_the_syntax_of_every_command_starts_with_its_name(self):
+        for command, _filename, _class_name in self.COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    self.conf.get("%s-command" % command, "syntax").startswith(command)
+                )
+
+    def test_usage_is_public_for_every_command(self):
+        for command, _filename, _class_name in self.COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.conf.get("%s-command" % command, "usage"), "public"
+                )
 
     def test_description_and_summary_are_filled_in(self):
-        for key in ("shortdesc", "description"):
-            with self.subTest(key=key):
-                self.assertTrue(self.conf.get("editacl-command", key).strip())
+        for command, _filename, _class_name in self.COMMANDS:
+            for key in ("shortdesc", "description"):
+                with self.subTest(command=command, key=key):
+                    self.assertTrue(
+                        self.conf.get("%s-command" % command, key).strip()
+                    )
 
     def test_at_least_one_example_with_its_comment(self):
-        examples = [
-            o for o in self.conf.options("editacl-command")
-            if re.fullmatch(r"example\d+", o)
-        ]
-        self.assertTrue(examples, "the assistant shows an example: one must be given")
-        for example in examples:
-            with self.subTest(example=example):
-                self.assertIn(
-                    example.replace("example", "comment"),
-                    self.conf.options("editacl-command"),
-                )
-                self.assertIn("editacl", self.conf.get("editacl-command", example))
+        for command, _filename, _class_name in self.COMMANDS:
+            stanza = "%s-command" % command
+            examples = [
+                o for o in self.conf.options(stanza) if re.fullmatch(r"example\d+", o)
+            ]
+            self.assertTrue(
+                examples, "the assistant shows an example: one must be given"
+            )
+            for example in examples:
+                with self.subTest(command=command, example=example):
+                    self.assertIn(
+                        example.replace("example", "comment"),
+                        self.conf.options(stanza),
+                    )
+                    self.assertIn(command, self.conf.get(stanza, example))
+
+    def test_the_two_commands_point_at_each_other(self):
+        """v4.1 section 12.3: the descriptions cross-reference through `related`.
+
+        The order of use - generic first, specific by exception - is a rule an operator
+        needs at the moment they choose a command, and the assistant is where they read
+        the syntax. A `related` that names only `rest` sends them nowhere.
+        """
+        self.assertIn("editappacl", self.conf.get("editacl-command", "related"))
+        self.assertIn("editacl", self.conf.get("editappacl-command", "related"))
+
+    def test_the_irreversibility_is_told_to_the_operator(self):
+        """The refusal to create is the friction section 9.3 places on the act, and the
+        assistant is the first place the operator reads what the command does."""
+        text = " ".join(
+            self.conf.get(section, "description")
+            for section in ("editappacl-command", "editappacl-allow-create")
+        )
+        self.assertIn("IRREVERSIBLE", text)
+        self.assertIn("allow_create=true", text)
 
     def test_the_simulation_default_is_told_to_the_operator(self):
         """The assistant is the first place where the operator reads the syntax: the
@@ -412,10 +545,53 @@ class InputsConfTest(unittest.TestCase):
             "index": "_internal",
             "sourcetype": "editacl:diag",
         },
+        # v4.1 section 11.1, DV-3: separate files, separate sourcetypes. A shared file
+        # name would reopen the line-loss window D-3 closed, since the two commands can
+        # share a `sid` inside one search.
+        "monitor://$SPLUNK_HOME/var/log/splunk/editappacl_journal*.log": {
+            "disabled": "false",
+            "index": "_internal",
+            "sourcetype": "editappacl:journal",
+        },
+        "monitor://$SPLUNK_HOME/var/log/splunk/editappacl.log": {
+            "disabled": "false",
+            "index": "_internal",
+            "sourcetype": "editappacl:diag",
+        },
     }
 
     def setUp(self):
         self.conf = read_conf("default", "inputs.conf")
+
+    def test_the_app_journal_glob_matches_the_filename_produced_by_the_code(self):
+        from acltools.journal import app_journal_filename
+
+        name = app_journal_filename("1754483000.1")
+        self.assertTrue(name.startswith("editappacl_journal"))
+        self.assertTrue(name.endswith(".log"))
+
+    def test_the_two_journals_do_not_share_a_file_name(self):
+        """The reason DV-3 exists, checked on the two producers rather than on prose.
+
+        `| app_acl_inventory | ... | editappacl` and a `| editacl` can coexist in one
+        search and therefore share a `sid`; two commands writing the same path would lose
+        lines at the moment one of them rotates or truncates.
+        """
+        from acltools.journal import app_journal_filename, journal_filename
+
+        self.assertNotEqual(journal_filename("1.1"), app_journal_filename("1.1"))
+
+    def test_the_editacl_glob_does_not_swallow_the_app_journal(self):
+        """`editacl_journal*.log` and `editappacl_journal*.log` must not overlap.
+
+        They do not, and the reason is worth a test rather than a reading: the second
+        name does not start with the first. A future rename to `editacl_app_journal_*`
+        would be caught here instead of at ingestion, where the symptom is one sourcetype
+        quietly absorbing the other's lines.
+        """
+        from acltools.journal import app_journal_filename
+
+        self.assertFalse(app_journal_filename("1.1").startswith("editacl_journal"))
 
     def test_neither_monitor_is_disabled(self):
         for stanza in self.EXPECTED:
@@ -485,6 +661,36 @@ class PropsConfTest(unittest.TestCase):
                 "\\s+journal=(?<journal>\\S+)\\s+max_objects=(?<max_objects>\\S+)",
             "EXTRACT-editacl_diag_journal":
                 "(?<journal_file>editacl_journal\\S*\\.log)",
+        },
+        # v4.1 section 11.1: the application-level pair. The journal stanza is identical
+        # key for key - it is the same format, produced by the same builders - and the
+        # diagnostic one differs only where the parameter line differs.
+        "editappacl:journal": {
+            "KV_MODE": "json",
+            "SHOULD_LINEMERGE": "false",
+            "LINE_BREAKER": "([\\r\\n]+)",
+            "TIME_PREFIX": '\\"ts\\":\\"',
+            "TIME_FORMAT": "%Y-%m-%dT%H:%M:%S.%3N%:z",
+            "MAX_TIMESTAMP_LOOKAHEAD": "40",
+            "TRUNCATE": "0",
+        },
+        "editappacl:diag": {
+            "SHOULD_LINEMERGE": "false",
+            "LINE_BREAKER": "([\\r\\n]+)",
+            "KV_MODE": "none",
+            "EXTRACT-editappacl_diag_run":
+                "^\\S+\\s+(?<level>[A-Z]+)\\s+sid=(?<sid>\\S+)",
+            "EXTRACT-editappacl_diag_startup":
+                "\\bversion=(?<version>\\S+)\\s+user=(?<user>\\S+)\\s",
+            "EXTRACT-editappacl_diag_target":
+                "\\bsplunkd=(?<splunkd>\\S+)\\s+verify_ssl=(?<verify_ssl>\\S+)",
+            "EXTRACT-editappacl_diag_params":
+                "\\bdryrun=(?<dryrun>\\S+)\\s+allow_create=(?<allow_create>\\S+)"
+                "\\s+validate_roles=(?<validate_roles>\\S+)\\s+journal=(?<journal>\\S+)"
+                "\\s+max_stanzas=(?<max_stanzas>\\S+)"
+                "\\s+max_impacted_objects=(?<max_impacted_objects>\\S+)",
+            "EXTRACT-editappacl_diag_journal":
+                "(?<journal_file>editappacl_journal\\S*\\.log)",
         },
     }
 

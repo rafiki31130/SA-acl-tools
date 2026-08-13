@@ -1332,6 +1332,11 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         "": ("none", "read : [ * ], write : [ admin ]"),
         "commands": ("system", None),
         "commands/editacl": ("system", "read : [ * ], write : [ admin ]"),
+        # v4.1 section 14.1, deliverable 6: one stanza per command object, exported to
+        # the system for the same reason as the first - a command invocable only from
+        # this app's context would be unusable from the ad hoc search where an operator
+        # actually governs an application.
+        "commands/editappacl": ("system", "read : [ * ], write : [ admin ]"),
         "searchbnf": ("system", "read : [ * ], write : [ admin ]"),
         "macros": ("system", "read : [ * ], write : [ admin ]"),
         "transforms": ("system", "read : [ * ], write : [ admin ]"),
@@ -1365,7 +1370,15 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
     #: `search`, and three refusals - the exhaustive form is the natural one.
     EXPECTED_AUTHORIZE = {
         "capability::edit_acl_bulk": {},
-        "role_admin": {"edit_acl_bulk": "enabled"},
+        # v4.1 section 8.1: a capability of its own for the application-level write. It
+        # neither implies nor is implied by the one above, and both are granted to
+        # `admin` at installation - declaring without granting produces an app that is
+        # installed, loaded and unusable (D-29).
+        "capability::edit_app_acl_bulk": {},
+        "role_admin": {
+            "edit_acl_bulk": "enabled",
+            "edit_app_acl_bulk": "enabled",
+        },
         "role_editacl_auditor": {
             "search": "enabled",
             "run_collect": "disabled",

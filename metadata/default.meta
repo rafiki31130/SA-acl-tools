@@ -19,6 +19,20 @@ export = system
 access = read : [ * ], write : [ admin ]
 export = system
 
+# `editappacl` follows the same reasoning (v4.1 section 14.1, deliverable 6): exported to
+# the whole system, because a command that could only be invoked from this app's context
+# would be unusable from an ad hoc search - which is where an operator governs an
+# application's permissions. The effective access control stays carried by the
+# `edit_app_acl_bulk` capability, not by this declaration.
+#
+# No class-wide `[views]` stanza is added here either: the per-object stanza below is
+# enough, and a class-wide one would export every future view of this app without
+# anybody deciding it.
+
+[commands/editappacl]
+access = read : [ * ], write : [ admin ]
+export = system
+
 # The search assistant follows the command. It reads `configs/conf-searchbnf` in the
 # namespace of the PAGE, that is, the app from which the operator types the search:
 # `search`, not `SA-acl-tools`. Confined to the app context, `searchbnf.conf` is
