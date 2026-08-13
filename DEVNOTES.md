@@ -52,6 +52,10 @@ README states in one line, with the measurement or the reasoning that establishe
 25. [Known limits](#25-known-limits)
 26. [Troubleshooting](#26-troubleshooting)
 
+**Part III - the application level**
+
+27. [The application level](#27-the-application-level)
+
 ---
 
 ## 1. Layering
@@ -2516,6 +2520,244 @@ consequence and the guard spelled out.
 | Clicking a run does nothing at all: empty box, no detail panels | The client-side behaviour of the view is **not validated** beyond the click observed once | Type the `sid` into the *Run (sid)* box, or open the view as `?form.sid_in=<sid>`. Report it: it is a known unmeasured path |
 | A run does not appear in the view at all | It ran with `journal=false` | The *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype |
 | A saved search seems duplicated after an upgrade | The searches were renamed when the repository moved to English | Check `local/savedsearches.conf` and remove the stale entries |
+
+---
+
+## 27. The application level
+
+Everything above is about one object at a time. This section is about the other level -
+the **generic stanzas** of an application - and about the five facts that forced its
+design to differ.
+
+### 27.1 The two levels, and why one could not absorb the other
+
+A metadata file carries three shapes of stanza, and their chain is **measured in all three
+levels**: `[<family>/<object>]` wins over `[<family>]`, which wins over `[]`. Specificity
+wins over the layer the stanza lives in, so `default.meta` and `local.meta` are read as a
+single set of stanzas and not as two layers to merge - which is why the impact estimate
+subtracts a **union** and not a sum.
+
+The two write paths share nothing but the fact of being paths:
+
+```
+app_default     POST /services/apps/local/<app>/acl        owner mandatory and INERT
+family_default  POST /servicesNS/nobody/<app>/<h>/_acl     owner REFUSED with 400
+```
+
+That asymmetry is measured on both handlers and is **not** smoothed over: it authorises no
+generalisation in either direction about the handlers nobody measured. It is also why
+there is no owner parameter at all - a value that is inert on one path and refused on the
+other is not expressible, and a parameter for it would be a false promise.
+
+### 27.2 The file-reading exception, and the four bounds that keep it one
+
+The project forbids writing anywhere but through the API, because a write outside splunkd
+creates a replication divergence on a search head cluster. **Reading creates none**, and
+reading is the only thing that answers the question the whole increment exists for.
+
+Measured: an object that **inherits** and an object carrying its **own** stanza of the same
+value return a **strictly identical** ACL block. Six alternative REST sources were probed,
+six negative. So without the file, `app_acl_inventory` cannot say whether an application is
+governable, and `editappacl` cannot tell a modification from a creation - which is the
+distinction the whole irreversibility dispositif rests on.
+
+The exception is bounded, and three of the four bounds are held **mechanically** rather
+than by a comment:
+
+| Bound | What it forbids | How it is held |
+|---|---|---|
+| Read only | Any write, delete, rename or temporary-file expression in the provenance module | Syntax-tree test: forbidden imports, forbidden calls, forbidden **method names** on any object, and exactly one `open()` whose mode is a **literal** read mode |
+| Provenance only | Reimplementing the layer merge, the inheritance resolution or the platform's normalisation | The module exposes presence, literals and counts, and nothing that could be mistaken for an effective value |
+| Counts, never names | Emitting an object name read from the file | The set of object stanza names is private to the class, no public method returns one, and a test greps the **emitted rows** for the fixture's object names |
+| Limited perimeter | Reading anything but `<root>/<app>/metadata/{local,default}.meta`, for the applications the platform lists | The application segment is validated as a segment, the resulting path is checked to stay under the root, and the application list comes from `GET /services/apps/local` |
+
+The third bound is why the inventory needs a capability of its own: **reading the file
+short-circuits the capability filtering REST applies**. A caller without
+`admin_all_objects` would otherwise see, through this command, information the API refuses
+them. The bound reduces the exposure to counts; `list_app_acl` governs what is left.
+
+### 27.3 Locating the tree, and the three plausible-and-false ways of doing it
+
+`$SPLUNK_HOME` is resolvable, and it was **measured** over three executions - generating
+command and streaming command, dispatch from the carrying app and from `search`. Two
+**independent** routes:
+
+| Priority | Route | What it yields |
+|---|---|---|
+| Main | `os.environ["SPLUNK_HOME"]` then `etc/apps` | Present in all three executions, absolute, independent of the working directory and of the dispatching app |
+| Fallback | `dirname` three times over the command module's own path | Yields `etc/apps` **directly**, without presupposing that `etc` lives under `SPLUNK_HOME` |
+
+They are compared, and a **divergence is fatal**: an ambiguous root would make the command
+read a tree other than the one splunkd serves, and nothing would signal it. An installation
+where `etc` is relocated has not been tested, and the comparison is what turns that
+untested case into an explicit refusal rather than a silent read of the wrong tree.
+
+Three other ways of getting there are **forbidden by name**, and the syntax-tree test
+rejects them in the provenance module and in both application-level adapters:
+
+- the SDK's `environment.splunk_home` falls back **silently on the working directory**
+  when the variable is missing. Measured outside splunkd it then yields the app's `bin/`,
+  under which `etc/apps` does not exist - the command would fail later and worse;
+- `os.getcwd()` is that same `bin/` directory in all three measured executions;
+- `searchinfo.app` names the **dispatching** app, not the carrying one: it is `search` as
+  soon as the search is launched from anywhere else.
+
+They are forbidden for the same reason the `nobody` namespace segment is hardcoded: what
+is banned is banned because the platform accepts the mistake in silence.
+
+### 27.4 The generating character comes from the SDK, not from `commands.conf`
+
+Left open by the contract, settled from the vendored SDK, which is the artifact that
+decides: `GeneratingCommand.ConfigurationSettings` declares
+
+```python
+generating = ConfigurationSetting(readonly=True, value=True, ...)
+```
+
+and the protocol specification announces it for **both** versions. Nothing had to be added
+to the normative key set of `commands.conf`, and a test freezes both halves of that
+statement - the SDK still pins it, and the file still declares no such key.
+
+The symmetric precedent is already in this document: `@Configuration(type='streaming')` is
+**refused** on a `StreamingCommand`, `type` being pinned by that base class. Same shape,
+opposite direction - the base class decides, and the decorator must not contradict it.
+
+### 27.5 The member name comes from a cheap REST call
+
+The `searchinfo` branch is measured **negative**: the full dump of its fourteen fields
+carries neither a member name, nor a `serverName`, nor a host name, and `splunkd_uri` is
+`https://127.0.0.1:8089`. The remaining branch is the cheap REST call, and it is measured
+**positive**: `GET /services/server/info` returns `entry[0].content.serverName`.
+`/services/shcluster/member/info` answers `503` on a standalone instance and is therefore
+not the route.
+
+`SPLUNK_SERVER_NAME` of the environment is a **named trap** and a test forbids reaching
+it: it carries the name of the systemd **service**, not the `serverName` of the instance.
+It is exactly the kind of value that is plausible and false, on a column whose whole
+purpose is to tell two members apart.
+
+Reservation, and it is not smoothed over: the measurement is on a standalone instance.
+That `serverName` is the right discriminant **between SHC members** is an inference, and
+the README says to fall back on `splunk_server` if the column is empty or ambiguous.
+
+### 27.6 Nothing removes a generic stanza, and empty permissions are not a removal
+
+Eleven removal candidates were tried at the object level - `DELETE` of the ACL, `remove`,
+`delete`, `reset`, `inherit`, `restore`, `remove_stanza` and others - eleven failures, each
+traced with its code and message. At the family level, `DELETE .../<handler>/_acl` answers
+`404 Invalid custom action ... eai action: remove` and a `POST` carrying `remove=1` answers
+`400 Argument "remove" is not supported`. At the application level, `DELETE
+/services/apps/local/<app>/acl` answers **`200` with no effect** - a dangerous false
+positive - and the handler rejects every argument name outside the four it accepts.
+
+What that establishes is **not** that no path exists: it is that none was found among those
+tried, and that the argument route is closed on the `[]` handler. It closes the arguments,
+not an endpoint nobody has discovered.
+
+**Setting empty permissions is not a removal, and the two are opposite states.** A stanza
+with empty permissions leaves the object **unreachable** - `read=['']`, no role at all; a
+removed stanza makes the object **inherit again**. Measured on the effective permissions,
+both directions. That is the whole reason the order-of-use rule is contractual rather than
+advisory: `editacl` writes exactly the stanzas that nothing removes, so every object it
+touches leaves generic governance for good.
+
+### 27.7 The ordered control table
+
+The order decides which status wins when several conditions hold. Two precedences carry
+the design rather than the implementation: rank 9 precedes rank 10, so **a target already
+compliant never trips the irreversibility refusal** - no write would happen anyway; and
+rank 10 precedes rank 12, because the refusal is a property of the **target** while a
+ceiling is a property of the **batch**, and an operator must see the first even when the
+second would have applied.
+
+| Rank | Control | Status | Call |
+|---|---|---|---|
+| 0 | `stanza_kind` missing, empty or out of domain | `rejected`, `invalid_stanza_kind:<v>` | none |
+| 1 | `app` missing or empty | `rejected`, `app_missing` | none |
+| 2 | `app` is `system` | `rejected`, `app_system_forbidden` | none |
+| 3 | Target already processed in this run | `rejected`, `duplicate_target` | none |
+| 4 | Handler resolution impossible | `rejected`, `unresolved_family:<stanza>` | none |
+| 5 | GET answered `404` | `not_found` | GET |
+| 5bis | GET answered `403` | `forbidden` | GET |
+| 5ter | GET answered `5xx` after one retry | `error` | GET |
+| 6 | `new_sharing` present and empty | `rejected`, `sharing_empty_not_allowed` | GET |
+| 7 | `new_sharing` outside `{app, global}` | `rejected`, `invalid_sharing:<v>` | GET |
+| 8 | Provenance unreadable **and** `allow_create=false` | `rejected`, `provenance_unavailable` | GET |
+| 9 | Merged state equals effective state, stanza present | `noop` | GET |
+| 9bis | Merged state equals effective state, stanza absent | `noop_inherited` | GET |
+| 10 | Stanza absent **and** `allow_create=false` | `rejected`, `irreversible_creation` | GET |
+| 11 | An **added** role does not exist | `invalid_role` | GET |
+| 12 | `max_stanzas` reached | `skipped_ceiling` | GET |
+| 13 | `max_impacted_objects` would be exceeded | `skipped_impact_ceiling` | GET |
+| 14 | `dryrun=true` | `dryrun` | GET |
+| write | POST sent, the stanza pre-existed | `updated` | GET + POST |
+| write | POST sent, the stanza did not exist | `created` | GET + POST |
+
+`created` is a status of its own and not a flag on `updated`, because a creation is an act
+of another nature - it cannot be undone - and a flag would disappear from the most common
+gesture there is, `| stats count by acl_status`.
+
+The two ceilings **never fire in simulation**: both count stanzas **written**, a simulation
+writes none, so both conditions are false by construction. The contract states the ranks in
+an order that would have made the impact ceiling bite in simulation if read literally; the
+counters being defined on written stanzas settles it, and a guard makes the reasoning
+explicit at the point where it applies.
+
+### 27.8 The rollback selects on reversibility, not on success
+
+The previous command's rollback restored only the objects whose journal attested a
+successful write. The premise - a failed POST left the target untouched - is **false on
+this path**: a `403 Not removable` was measured coming back from a POST that had written.
+
+So the application-level rollback pairs `intent` with `outcome` and retains every target
+for which **a POST was sent**, whatever it answered. `write_asserted` is the field that
+says it, with a closed domain of three values: `no` when no POST left, `yes` on a 2xx,
+`unknown` on anything else after a POST. Rewriting the prior state of a stanza that did not
+move is a `noop` by idempotence, so the wider selection cannot hurt while the narrower one
+can miss a mutation.
+
+**Creations are excluded by construction rather than by a filter.** A creation has
+`reversible="false"` and **empty** `before_*` keys; the effective value it masked is kept
+under `inherited_*`, which the rollback macro does not read. Re-injecting an inherited
+value would create the stanza a second time under cover of a restore. And what the rollback
+leaves behind is not silent: `app_acl_irreversible(<sid>)` lists it, with the value created
+and the inherited value it masked. That is the dispositif the previous project lacked - it
+found its rollback hole after delivery, at 515 non-restorable objects out of 515.
+
+The restore depends on **no field the journal can leave empty**: the primary resolution
+route is `handler`, filled in at resolution time and therefore non-empty on every resolved
+family target, and it does not go through the shipped table either.
+
+### 27.9 Why the inventory is a command, and the trap that creates
+
+A macro cannot read a file, and the provenance has no REST source, so `app_acl_inventory`
+had to be a command. Its **name** says the opposite: the commands of this app carry no
+underscore (`editacl`, `editappacl`), its macros do (`acl_inventory`), and an operator who
+transposes the habit writes it between backticks and gets a run-time error. The name comes
+from the commissioner and was kept; the compensation is documentation, in the README and in
+the `searchbnf` description of both artefacts.
+
+`acl_governable` is a **derivation and not an appreciation**: its three values recompute
+from columns the same row publishes, so an operator who distrusts the verdict can redo the
+arithmetic without leaving the table. That is the same discipline as the status enumeration
+- a figure whose provenance cannot be retraced is a figure nobody can contest.
+
+The impact figure carries the word **estimate** everywhere, and it is a **lower bound**:
+an account that cannot see every object sees a truncated population, private objects are
+excluded - their metadata lives outside the read perimeter - and families the table does
+not cover cannot be enumerated at all. An exact figure that is false would be worth less
+than an estimate named as such.
+
+### 27.10 Two guard rails added to the test suite
+
+- **`tests/test_appacl_inventory.py`** holds the bounds from the outside: the allow-list
+  filter, the governability table cell by cell, the emission rules, and one test that greps
+  the **emitted rows** for the object names of a fixture that deliberately carries three -
+  the negative control being that the same rows must count them.
+- **`tests/test_appacl_inventory_adapter.py`** extends the single-emission-point control to
+  the third adapter, **with the extractor of `tests/test_message_prefix.py`** rather than a
+  copy of it. Extending a control means reusing the instrument; a second copy of it would
+  be exactly the drift the control exists to catch.
 
 ---
 
