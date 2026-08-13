@@ -767,6 +767,16 @@ class SavedsearchesTest(unittest.TestCase):
         "ACL - change journal",
     )
 
+    #: The two application-level searches (v4.1 section 14.1, deliverable 8). They are a
+    #: separate tuple: the controls above bear on searches built on `acl_inventory`, a
+    #: macro, while these two are built on the journal of the other command and on a
+    #: generating command. Folding them into `NAMES` would make three of those controls
+    #: false and one of them vacuous.
+    APP_NAMES = (
+        "App ACL - irreversible writes",
+        "App ACL - governability of the estate",
+    )
+
     def test_the_three_searches_of_section_12_7_are_shipped(self):
         for name in self.NAMES:
             self.assertIn(name, self.conf)
@@ -786,8 +796,11 @@ class SavedsearchesTest(unittest.TestCase):
 
     def test_no_search_is_scheduled(self):
         # The inventory is a macro invocable inline; scheduling is a recommended usage,
-        # never the way it is reached (section 6.7 constraint 1).
-        for name in self.NAMES + (self.AUDIT,):
+        # never the way it is reached (section 6.7 constraint 1). The application-level
+        # pair follows the same rule for a sharper reason: one of them runs a GENERATING
+        # command that reads the file system of the member, and scheduling it would put
+        # that read on a timer nobody watches.
+        for name in self.NAMES + (self.AUDIT,) + self.APP_NAMES:
             self.assertEqual(self.conf[name]["enableSched"], "0")
 
     #: The keys a shipped saved search is allowed to carry, exhaustively.
@@ -810,8 +823,10 @@ class SavedsearchesTest(unittest.TestCase):
                 with self.subTest(search=name, key=key):
                     self.assertIn(key, self.ALLOWED_KEYS)
 
-    def test_the_shipped_searches_are_exactly_the_four_declared(self):
-        self.assertEqual(sorted(self.conf), sorted(self.NAMES + (self.AUDIT,)))
+    def test_the_shipped_searches_are_exactly_the_six_declared(self):
+        self.assertEqual(
+            sorted(self.conf), sorted(self.NAMES + (self.AUDIT,) + self.APP_NAMES)
+        )
 
     # -- section 12.7, blocking deliverable ---------------------------------- #
 
@@ -907,6 +922,312 @@ class LookupsAndMetadataTest(unittest.TestCase):
         meta = read_splunk_conf("metadata", "default.meta")
         for stanza in ("macros", "transforms", "lookups"):
             self.assertEqual(meta[stanza]["export"], "system")
+
+
+class AppLevelMacrosTest(unittest.TestCase):
+    """The five application-level macros (v4.1 sections 11.1 and 11.4).
+
+    **This class is where the hole the previous project paid for is held shut.** The
+    rollback of `editacl` re-emitted a field the journal often left empty, and 515 written
+    objects out of 515 could not be restored - the defect was not that the hole existed
+    but that no clause named it and no artifact made it visible. Three properties below
+    are the direct answer, and each is checked on the SPL rather than on the intention:
+    the selection is on **reversibility** and not on success (DV-1), the resolution rests
+    on a field the journal **never leaves empty**, and what the rollback does not cover is
+    listed by a macro of its own.
+    """
+
+    #: The five stanzas of deliverable 7 of section 14.1.
+    NAMES = (
+        "app_acl_journal_source",
+        "app_acl_diag_source",
+        "app_acl_rollback(1)",
+        "app_acl_rollback_apply(1)",
+        "app_acl_irreversible(1)",
+    )
+
+    #: Fields of the `intent` line the rollback set is built from. They are read from the
+    #: journal module rather than copied, so a renamed key fails here instead of
+    #: producing an empty rollback reported as a success.
+    def setUp(self):
+        self.conf = read_splunk_conf("default", "macros.conf")
+        self.rollback = self.conf["app_acl_rollback(1)"]["definition"]
+        self.applied = self.conf["app_acl_rollback_apply(1)"]["definition"]
+        self.irreversible = self.conf["app_acl_irreversible(1)"]["definition"]
+
+    def test_the_five_macros_are_declared(self):
+        for name in self.NAMES:
+            with self.subTest(macro=name):
+                self.assertIn(name, self.conf)
+                self.assertTrue(self.conf[name].get("description", "").strip())
+                self.assertEqual(self.conf[name].get("iseval"), "0")
+
+    def test_none_of_them_names_an_index_outside_the_two_sources(self):
+        """D-51: the two source macros are the single place the index is written. An
+        artifact that spelled it out would keep reading the old index after a
+        redirection, and return an empty result without saying so - here, on the safety
+        net of an irreversible operation.
+
+        The applied form names no source at all, and that is stronger rather than
+        weaker: it DELEGATES to the preview form, so it inherits whatever that one
+        reads and cannot drift from it.
+        """
+        for name in self.NAMES[2:]:
+            definition = self.conf[name]["definition"]
+            with self.subTest(macro=name):
+                self.assertNotRegex(definition, r"(?<![\w])index\s*=")
+                self.assertTrue(
+                    "app_acl_journal_source" in definition
+                    or "`app_acl_rollback($sid$)`" in definition,
+                    "%s reaches the journal through neither the source macro nor the "
+                    "preview macro" % name,
+                )
+
+    def test_no_source_macro_uses_a_sourcetype_wildcard(self):
+        """D-49: the diagnostic file auto-extracts field names that are homonyms of the
+        journal's, with INVERTED meaning - they carry an SPL field name, not a value. A
+        `sourcetype=editappacl:*` mixes the two sets without raising anything."""
+        for name in self.NAMES[:2]:
+            with self.subTest(macro=name):
+                self.assertNotIn("*", self.conf[name]["definition"])
+
+    # -- DV-1: reversibility, not success ------------------------------------ #
+
+    def test_the_rollback_selects_on_reversibility_and_not_on_the_status(self):
+        """**DV-1.** Measured: a POST answering `403 Not removable` had written all the
+        same, so the premise of the previous contract - an object whose POST failed was
+        not modified - is false on this path. Selecting on `status="updated"` here would
+        leave a mutated stanza out of the restore set."""
+        self.assertIn('reversible="true"', self.rollback)
+        self.assertNotIn('status="updated"', self.rollback)
+
+    def test_the_rollback_retains_every_target_a_post_was_sent_for(self):
+        """`write_asserted` is the field that says it, and its domain is closed: `no`
+        when no POST left, `yes` on a 2xx, `unknown` on anything else after a POST."""
+        self.assertIn('write_asserted!="no"', self.rollback)
+        self.assertIn("eventstats max(_posted) AS posted BY endpoint", self.rollback)
+
+    def test_the_rollback_reads_no_inherited_key(self):
+        """**The mechanism that closes the hole.** The effective value a creation masked
+        is kept under `inherited_*`, which this macro must not read: re-injecting it would
+        CREATE THE STANZA A SECOND TIME under cover of a restore."""
+        for key in ("inherited_perms_read", "inherited_perms_write", "inherited_sharing"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, self.rollback)
+
+    def test_the_rollback_emits_the_input_contract_of_the_write_command(self):
+        """The restore depends on no field the journal can leave empty, and on no
+        coverage of the family table: `handler` is filled in at resolution time, and it is
+        the PRIMARY resolution route of section 8.3."""
+        for field in ('"eai:acl.app"', "acl_stanza_kind", "acl_handler", "acl_stanza",
+                      '"eai:acl.perms.read"', '"eai:acl.perms.write"',
+                      '"eai:acl.sharing"'):
+            with self.subTest(field=field):
+                self.assertIn(field, self.rollback)
+
+    def test_the_emitted_names_are_the_defaults_of_the_write_command(self):
+        """Read from the code, never copied: a renamed default would otherwise leave the
+        macro emitting a column the command no longer reads, and a restore would
+        `preserve` every attribute while reporting a success."""
+        from acltools.appacl_model import DEFAULT_APP_FIELD_NAMES as names
+
+        emitted = re.findall(r'AS\s+"?([A-Za-z:._]+)"?', self.rollback)
+        for field in (names.app, names.stanza_kind, names.handler, names.stanza,
+                      names.new_perms_read, names.new_perms_write, names.new_sharing):
+            with self.subTest(field=field):
+                self.assertIn(field, emitted)
+
+    def test_the_rollback_consumes_only_journaled_keys(self):
+        from .test_appacl_journal import APP_INTENT_KEYS
+
+        for field in ("before_perms_read", "before_perms_write", "before_sharing",
+                      "app", "stanza_kind", "handler", "stanza", "endpoint",
+                      "reversible"):
+            with self.subTest(field=field):
+                self.assertIn(field, self.rollback)
+                self.assertIn(field, APP_INTENT_KEYS)
+
+    def test_the_rollback_materializes_the_two_permission_columns(self):
+        """Defense in depth (D-32): an ABSENT column preserves the attribute where an
+        EMPTY one clears it, so a permission lost along the chain would restore nothing
+        while reporting a success."""
+        for field in ("eai:acl.perms.read", "eai:acl.perms.write"):
+            with self.subTest(field=field):
+                self.assertIn("coalesce('%s'" % field, self.rollback)
+
+    def test_it_materializes_neither_the_sharing_nor_the_stanza_name(self):
+        """Two opposite reasons for the same abstention. An empty `sharing` does not
+        exist platform-side and would turn a correct preservation into a rejection; an
+        empty `acl_stanza` is the LEGITIMATE name of the `[]` stanza, and the kind of
+        target is read from `acl_stanza_kind`, never from that field alone."""
+        for field in ("eai:acl.sharing", "acl_stanza"):
+            with self.subTest(field=field):
+                self.assertNotIn("coalesce('%s'" % field, self.rollback)
+
+    def test_the_rollback_is_invocable_in_generating_position(self):
+        self.assertTrue(self.rollback.startswith("search `app_acl_journal_source`"))
+
+    def test_only_the_applied_form_writes(self):
+        self.assertNotIn("| editappacl ", self.rollback)
+        self.assertIn("| editappacl ", self.applied)
+
+    def test_the_applied_form_delegates_instead_of_copying(self):
+        self.assertIn("`app_acl_rollback($sid$)`", self.applied)
+
+    def test_the_applied_form_refuses_to_create(self):
+        """Section 11.4: `allow_create=f` is explicit and NOT negotiable - a restore never
+        creates anything. A target of the set found absent at replay time comes out
+        `rejected` rather than recreated."""
+        self.assertIn("allow_create=f", self.applied)
+
+    def test_the_applied_form_raises_both_ceilings_by_value(self):
+        """The VALUES are frozen, not merely the presence of the keys: `max_stanzas=5`
+        put back by hand would stop a restore at the sixth stanza - on the safety net of
+        an irreversible operation - and report a success. That is exactly the mutation
+        class R-4 named on the previous command."""
+        self.assertIn("max_stanzas=100000", self.applied)
+        self.assertIn("max_impacted_objects=100000000", self.applied)
+        self.assertIn("dryrun=f", self.applied)
+
+    # -- section 9.4, dispositif 4 ------------------------------------------- #
+
+    def test_the_irreversible_macro_lists_what_the_rollback_leaves_behind(self):
+        """Without it, "what my rollback will not undo" is visible NOWHERE. That is the
+        dispositif the previous project lacked."""
+        self.assertIn('reversible="false"', self.irreversible)
+        self.assertIn('reversible="unknown"', self.irreversible)
+        self.assertNotIn('reversible="true"', self.irreversible)
+
+    def test_the_irreversible_macro_shows_the_created_and_the_masked_value(self):
+        for key in ("after_perms_read", "after_perms_write", "after_sharing",
+                    "inherited_perms_read", "inherited_perms_write",
+                    "inherited_sharing"):
+            with self.subTest(key=key):
+                self.assertIn(key, self.irreversible)
+
+    def test_the_irreversible_macro_lists_only_targets_that_were_written(self):
+        """A refused creation was never written: listing it would drown the acts that
+        cannot be undone among the ones that never happened."""
+        self.assertIn('write_asserted!="no"', self.irreversible)
+        self.assertIn("posted=1", self.irreversible)
+
+    def test_the_irreversible_macro_writes_nothing(self):
+        self.assertNotIn("| editappacl", self.irreversible)
+
+    def test_the_two_macro_families_never_read_each_others_journal(self):
+        """DV-3 on the reading side: one journal counts objects, the other counts stanzas
+        whose blast radius is several objects."""
+        for name in self.NAMES[2:]:
+            with self.subTest(macro=name):
+                self.assertNotIn("`acl_journal_source`", self.conf[name]["definition"])
+        for name in ("editacl_rollback(1)", "editacl_rollback_apply(1)"):
+            with self.subTest(macro=name):
+                self.assertNotIn(
+                    "`app_acl_journal_source`", self.conf[name]["definition"]
+                )
+
+
+class AppLevelSavedSearchesTest(unittest.TestCase):
+    """The two shipped searches of deliverable 8 of section 14.1.
+
+    They cover the minimal need QO-6 left in place after ruling a dashboard extension out
+    of scope: what an execution did that cannot be undone, and what the estate still lets
+    us govern.
+    """
+
+    IRREVERSIBLE = "App ACL - irreversible writes"
+    GOVERNABILITY = "App ACL - governability of the estate"
+
+    def setUp(self):
+        self.conf = read_splunk_conf("default", "savedsearches.conf")
+
+    def test_both_are_shipped(self):
+        for name in (self.IRREVERSIBLE, self.GOVERNABILITY):
+            with self.subTest(search=name):
+                self.assertIn(name, self.conf)
+                self.assertTrue(self.conf[name]["description"].strip())
+
+    def test_the_irreversible_search_names_its_source_by_the_macro(self):
+        search = self.conf[self.IRREVERSIBLE]["search"]
+        self.assertIn("`app_acl_journal_source`", search)
+        self.assertNotRegex(search, r"(?<![\w])index\s*=")
+
+    def test_the_irreversible_search_selects_the_creations(self):
+        search = self.conf[self.IRREVERSIBLE]["search"]
+        self.assertIn("reversible=false", search)
+        self.assertIn("impacted_estimate", search)
+
+    def test_the_irreversible_search_carries_the_macro_call(self):
+        """The operator has nothing to type at the moment they need the detail."""
+        self.assertIn("app_acl_irreversible(", self.conf[self.IRREVERSIBLE]["search"])
+
+    def test_the_governability_search_is_built_on_the_command(self):
+        """On the COMMAND and not on a macro: the provenance it ventilates has no REST
+        source at all, which is the whole reason `app_acl_inventory` is a command."""
+        search = self.conf[self.GOVERNABILITY]["search"]
+        self.assertIn("| app_acl_inventory", search)
+        self.assertNotIn("`app_acl_inventory`", search)
+
+    def test_the_governability_search_groups_on_the_derived_verdict(self):
+        search = self.conf[self.GOVERNABILITY]["search"]
+        self.assertRegex(search, r"BY[^|]*\bacl_governable\b")
+        self.assertIn("acl_member", search)
+
+    def test_the_governability_search_keeps_the_columns_the_verdict_derives_from(self):
+        """The verdict recomputes from the counters, so the counters travel with it: a
+        table showing `partial` without saying how much would be an opinion."""
+        search = self.conf[self.GOVERNABILITY]["search"]
+        self.assertIn("acl_frozen_stanzas", search)
+        self.assertIn("acl_family_headers", search)
+
+
+class AppLevelRevalidationTest(unittest.TestCase):
+    """Section 5.2, requirement 4: a procedure, executable, declared a prerequisite.
+
+    O-4 of the phase 0 measurement is blunt: no measurement made on 9.4.6 transposes by
+    deduction, the handler-to-stanza table least of all.
+    """
+
+    def setUp(self):
+        path = os.path.join(REPO_ROOT, "tools", "revalidate_app_acl_mapping.py")
+        with open(path, encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_the_procedure_is_shipped(self):
+        self.assertTrue(self.source)
+
+    def test_it_reuses_the_core_rather_than_rewriting_it(self):
+        for symbol in ("from acltools.appacl_family import load_family_table",
+                       "from acltools.appacl_target import build_family_default_path"):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, self.source)
+
+    def test_it_produces_the_three_required_lists(self):
+        for marker in ("== A. ", "== B. ", "== C. "):
+            self.assertIn(marker, self.source)
+
+    def test_it_reads_the_files_through_the_bounded_reader(self):
+        """List C can only come from the metadata files, and it comes from them through
+        the SAME read-only reader the command uses - so a family this procedure reports is
+        a family the command would report too."""
+        self.assertIn("from acltools.appacl_provenance import", self.source)
+        self.assertIn("ProvenanceReader", self.source)
+
+    def test_it_never_writes_to_the_platform_it_validates(self):
+        """The shipped table was built by POST, because writing is the only thing that
+        establishes which stanza a handler writes. This procedure runs on somebody's
+        production: a validation that mutated what it validates would be worth less than
+        no validation at all."""
+        self.assertNotIn('"POST"', self.source)
+        self.assertNotIn("method=\"POST\"", self.source)
+        self.assertNotIn("def post", self.source)
+
+    def test_the_password_is_never_a_command_line_argument(self):
+        self.assertIn("sys.stdin.readline()", self.source)
+        self.assertNotIn("--password", self.source)
+
+    def test_it_names_the_override_file_that_treats_list_c(self):
+        self.assertIn("app_acl_family_map_override.csv", self.source)
 
 
 class RevalidationTest(unittest.TestCase):

@@ -36,6 +36,24 @@ from acltools.journal import (
 
 from .appacl_helpers import app_state, make_app_ctx
 
+#: Keys of the `intent` line, **hardcoded** - same discipline as
+#: `ROLLBACK_FIELDS_FROM_INTENT` on the object side, and for the same reason: the three
+#: restore macros of section 11.4 consume these names, so a schema change that nobody
+#: carried over to the SPL must break a test rather than produce an empty rollback set
+#: reported as a success.
+#:
+#: `tests/test_spl_artifacts.py` imports this tuple to check that the macros consume
+#: nothing else, and `TheIntentLineKeysAreTheDeclaredOnesTest` below checks that the
+#: builder produces exactly these. Both directions, so neither list can drift alone.
+APP_INTENT_KEYS = (
+    "ts", "phase", "sid", "user", "dryrun",
+    "endpoint", "app", "stanza_kind", "stanza", "handler", "reversible",
+    "impacted_estimate",
+    "before_perms_read", "before_perms_write", "before_sharing",
+    "inherited_perms_read", "inherited_perms_write", "inherited_sharing",
+    "after_perms_read", "after_perms_write", "after_sharing",
+)
+
 BEFORE = app_state(sharing="app", read=("power",), write=("admin",))
 AFTER = app_state(sharing="global", read=("user",), write=("admin",))
 
@@ -367,6 +385,38 @@ class TheSummaryLineTest(unittest.TestCase):
         for key in ("endpoint", "app", "stanza", "stanza_kind", "handler"):
             with self.subTest(key=key):
                 self.assertNotIn(key, record)
+
+
+class TheIntentLineKeysAreTheDeclaredOnesTest(unittest.TestCase):
+    """The schema the three restore macros read, frozen from both ends.
+
+    A key renamed here and not in `default/macros.conf` produces an EMPTY rollback set,
+    reported as a success, on the only safety net of an irreversible operation. That is
+    not a hypothetical failure mode: it is the one the previous project shipped.
+    """
+
+    def test_the_builder_produces_exactly_the_declared_keys(self):
+        record = build_app_intent_record(make_app_ctx(), result(), "t")
+        self.assertEqual(sorted(record), sorted(APP_INTENT_KEYS))
+
+    def test_the_shape_holds_for_a_creation_too(self):
+        """The keys are the same on the three natures of operation; what changes is which
+        of them carry a value (section 11.2)."""
+        record = build_app_intent_record(
+            make_app_ctx(),
+            result(reversible=REVERSIBLE_FALSE, before=None, inherited=BEFORE),
+            "t",
+        )
+        self.assertEqual(sorted(record), sorted(APP_INTENT_KEYS))
+        self.assertEqual(record["before_perms_read"], "")
+        self.assertNotEqual(record["inherited_perms_read"], "")
+
+    def test_no_declared_key_carries_a_colon(self):
+        """Format constraint reprised from v3.14 section 8.2: a colon in a field name
+        breaks the search-time extraction of the journal."""
+        for key in APP_INTENT_KEYS:
+            with self.subTest(key=key):
+                self.assertNotIn(":", key)
 
 
 class TheCountCreatedIsTheCountOfIrreversibleActsTest(unittest.TestCase):
