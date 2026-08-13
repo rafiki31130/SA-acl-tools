@@ -55,6 +55,7 @@ README states in one line, with the measurement or the reasoning that establishe
 **Part III - the application level**
 
 27. [The application level](#27-the-application-level)
+    - [27.6.bis What actually freezes an object](#276bis-what-actually-freezes-an-object-and-what-only-looks-like-it)
 
 ---
 
@@ -2532,7 +2533,8 @@ design to differ.
 ### 27.1 The two levels, and why one could not absorb the other
 
 A metadata file carries three shapes of stanza, and their chain is **measured in all three
-levels**: `[<family>/<object>]` wins over `[<family>]`, which wins over `[]`. Specificity
+levels** (**Q0-3**, verdict 4): `[<family>/<object>]` wins over `[<family>]`, which wins
+over `[]`. Specificity
 wins over the layer the stanza lives in, so `default.meta` and `local.meta` are read as a
 single set of stanzas and not as two layers to merge - which is why the impact estimate
 subtracts a **union** and not a sum.
@@ -2544,7 +2546,8 @@ app_default     POST /services/apps/local/<app>/acl        owner mandatory and I
 family_default  POST /servicesNS/nobody/<app>/<h>/_acl     owner REFUSED with 400
 ```
 
-That asymmetry is measured on both handlers and is **not** smoothed over: it authorises no
+That asymmetry is measured on both handlers - **Q0-1** case G on the `[]` path, **Q0-2** on
+the `_acl` path - and is **not** smoothed over: it authorises no
 generalisation in either direction about the handlers nobody measured. It is also why
 there is no owner parameter at all - a value that is inert on one path and refused on the
 other is not expressible, and a parameter for it would be a false promise.
@@ -2555,9 +2558,9 @@ The project forbids writing anywhere but through the API, because a write outsid
 creates a replication divergence on a search head cluster. **Reading creates none**, and
 reading is the only thing that answers the question the whole increment exists for.
 
-Measured: an object that **inherits** and an object carrying its **own** stanza of the same
-value return a **strictly identical** ACL block. Six alternative REST sources were probed,
-six negative. So without the file, `app_acl_inventory` cannot say whether an application is
+*Measured* - **Q0-4**: an object that **inherits** and an object carrying its **own** stanza
+of the same value return a **strictly identical** ACL block. Six alternative REST sources
+were probed, six negative. So without the file, `app_acl_inventory` cannot say whether an application is
 governable, and `editappacl` cannot tell a modification from a creation - which is the
 distinction the whole irreversibility dispositif rests on.
 
@@ -2642,6 +2645,8 @@ the README says to fall back on `splunk_server` if the column is empty or ambigu
 
 ### 27.6 Nothing removes a generic stanza, and empty permissions are not a removal
 
+*Measured* - **Q0-3**, the removal campaign of the phase 0 feasibility measurement.
+
 Eleven removal candidates were tried at the object level - `DELETE` of the ACL, `remove`,
 `delete`, `reset`, `inherit`, `restore`, `remove_stanza` and others - eleven failures, each
 traced with its code and message. At the family level, `DELETE .../<handler>/_acl` answers
@@ -2654,12 +2659,92 @@ What that establishes is **not** that no path exists: it is that none was found 
 tried, and that the argument route is closed on the `[]` handler. It closes the arguments,
 not an endpoint nobody has discovered.
 
-**Setting empty permissions is not a removal, and the two are opposite states.** A stanza
+**Setting empty permissions is not a removal, and the two are opposite states** - **Q0-3**,
+verdict 3, read on the effective permissions. A stanza
 with empty permissions leaves the object **unreachable** - `read=['']`, no role at all; a
 removed stanza makes the object **inherit again**. Measured on the effective permissions,
 both directions. That is the whole reason the order-of-use rule is contractual rather than
 advisory: `editacl` writes exactly the stanzas that nothing removes, so every object it
 touches leaves generic governance for good.
+
+### 27.6.bis What actually freezes an object, and what only looks like it
+
+**This is the correction of the anomaly the pre-delivery audit found**, and it is worth
+reading before anything else in this section: the premise it removes was in the contract,
+in the code, and in the test fixtures at the same time - which is exactly why a suite of
+1 288 tests did not see it.
+
+**The false premise**: *an object carrying a `[<family>/<object>]` stanza no longer
+inherits*. splunkd writes such a stanza for **every object it creates or edits**, and that
+stanza carries only bookkeeping:
+
+```
+[views/auditview01]
+owner = admin
+version = 9.4.6
+modtime = 1786587690.119080000
+```
+
+Counting those as frozen made `acl_impacted_estimate` collapse to **zero** on any
+application whose objects had ever been touched - that is, on any real application - while
+the output announced `no_inheriting_object`, *this write moves nothing today*, and the
+write moved the entire family. Measured by the auditor: `[views]` with 12 objects,
+estimate **0**, real effect **12**.
+
+*Measured* by the remediation, at **both** stanza levels, by writing the generic header and
+re-reading the effective ACL of a witness of each shape:
+
+| Stanza keys | perms.read | perms.write | sharing |
+|---|---|---|---|
+| no stanza at all | moved | moved | moved |
+| `owner` / `version` / `modtime` | moved | moved | moved |
+| `export`, no `access` | moved | moved | **frozen** |
+| `access` + `export` | **frozen** | **frozen** | **frozen** |
+
+**`access` freezes the permissions, `export` freezes the scope, the bookkeeping keys freeze
+nothing.** The same experiment one level up, on a `[savedsearches]` header carrying
+`export`, `version` and `modtime`: the witness object followed a change of `[]` on its
+permissions, so a header that materialises nothing governs nothing either. One predicate,
+`materializes_permissions`, therefore serves both levels.
+
+A fourth shape - `access` without `export` - is **not producible** through the platform's
+own write paths: `sharing` is a required argument of the object ACL handler, measured
+`400 The following required arguments are missing: owner, sharing`. So the predicate covers
+every shape splunkd writes, and the missing cell is unreachable rather than unexamined.
+
+**What the predicate deliberately does not include, and in which direction it errs.**
+`export` is not part of it. An object whose stanza carries `export` without `access` still
+has its **permissions** moved by a generic write, so it stays inside the count; what will
+not reach it is the **scope** half of that write. The estimate therefore overstates the
+reach of the scope dimension on such objects - and overstating is the safe direction for a
+volume guard rail, the audit having established that the dangerous error is the one that
+reassures.
+
+**Three consequences, and the third goes beyond the letter of the finding.**
+
+1. `acl_impacted_estimate`, hence the `max_impacted_objects` ceiling, which bounded nothing
+   while its input was zero.
+2. `acl_frozen_stanzas` and `acl_governable`. With the old predicate every application
+   whose objects had been edited came out `partial`, and `yes` was reachable only on an
+   application delivered as a package and never touched - the decision aid said *you can no
+   longer govern this* about applications that were perfectly governable.
+3. **Reversibility.** The contract ties it to the **existence** of the stanza in
+   `local.meta`; the measurement says existence is not the question. Writing permissions
+   into a stanza that carries none **materialises** an inherited value, and nothing removes
+   a key from a stanza any more than it removes the stanza itself. Reporting that as a
+   reversible modification would promise a restore `app_acl_rollback` cannot deliver:
+   replaying the prior *effective* values would write an `access` line where there was
+   none, **freezing** the family instead of restoring it. That is the failure class of the
+   515 objects, one level down, so the classification is conservative - a mixed act counts
+   as a creation, and `noop` becomes `noop_inherited` where the value was inherited all
+   along.
+
+**What let it through, and it is not the number of tests.** The fixtures standing in for a
+frozen object carried an invented key (`a = 1`), which freezes nothing. The code was wrong
+and the fixtures were wrong **in the same direction**, so they agreed. A fixture that does
+not reproduce what the platform writes tests the developer's belief, not the platform;
+`tests/appacl_helpers.py` now carries the three real shapes as named constants, and every
+test that means *frozen* has to say which one it means.
 
 ### 27.7 The ordered control table
 

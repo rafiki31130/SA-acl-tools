@@ -348,8 +348,8 @@ answers *what would happen if I governed it?*
 | `eai:acl.perms.read`, `eai:acl.perms.write`, `eai:acl.sharing` | **Effective** permissions and scope | REST |
 | `acl_present_local`, `acl_present_default` | Does the stanza exist in that layer | the file |
 | `acl_file_perms_read`, `acl_file_perms_write`, `acl_file_export` | **Literal** values of the stanza in `local.meta`, empty when absent | the file |
-| `acl_frozen_stanzas` | Number of objects carrying their own stanza. Of the family on a family row, of the **whole application** on an `app_default` row | the file |
-| `acl_family_headers` | `app_default` row only: number of family headers in the application | the file |
+| `acl_frozen_stanzas` | Number of objects whose own stanza **carries the permissions**. Of the family on a family row, of the **whole application** on an `app_default` row | the file |
+| `acl_family_headers` | `app_default` row only: number of family headers that **carry the permissions** | the file |
 | `acl_objects_total`, `acl_objects_inheriting` | Object population and the part of it still inheriting. Empty unless `count_objects=true` | REST + the file |
 | `acl_governable` | `yes`, `partial` or `unknown` | derived |
 | `acl_provenance` | `local`, `default`, `inherited` or `unavailable` | the file |
@@ -370,6 +370,28 @@ from the other columns of the same row:
 `unknown` is not an empty cell: it says the metadata could not be read, and therefore
 that **no** provenance conclusion is emitted. `partial` says some objects escape the
 generic stanza; it does not pretend to say how many of them matter.
+
+> ### What counts as frozen, and what only looks like it
+>
+> splunkd writes a `[<family>/<object>]` stanza for **every object it creates or edits**,
+> carrying `owner`, `version` and `modtime` and nothing else. **Such an object still
+> inherits**: it is not frozen, and this inventory does not count it as one.
+>
+> Measured on the reference platform, at the object level and at the family-header level
+> alike:
+>
+> | The stanza carries | Its permissions | Its sharing scope |
+> |---|---|---|
+> | nothing (no stanza at all) | inherited | inherited |
+> | `owner` / `version` / `modtime` | inherited | inherited |
+> | `export` but no `access` | inherited | **its own** |
+> | `access` | **its own** | **its own** |
+>
+> So `acl_frozen_stanzas` counts the objects carrying an `access` line, and nothing else.
+> An object whose stanza carries only `export` is counted as still governed - a generic
+> write does move its permissions - but that write will **not** move its scope. On that one
+> dimension the figures read high rather than low, which is the direction a volume guard
+> rail should err in.
 
 **Reading `acl_file_*` next to `eai:acl.*` is the point.** The first says what the local
 layer holds, the second what splunkd serves. When they differ, something else is
@@ -418,6 +440,14 @@ replaces the whole `access` line as soon as one permission is present, so sendin
 > reversible; **creating one is not**. Writing `[]` into the `local.meta` of an
 > application that had none masks the `[]` of its `default.meta` - the permissions shipped
 > with the application - permanently.
+>
+> **A stanza that exists without carrying permissions counts as a creation too**, and for
+> the same reason: nothing removes a key from a stanza any more than it removes the
+> stanza. Writing permissions where there were none masks an inherited value for good, so
+> such a target comes out `created` rather than `updated`, and `allow_create=false` refuses
+> it. Reporting it as a modification would promise you a rollback that cannot work -
+> replaying the previous *effective* values would write the permissions in explicitly and
+> freeze the family instead of restoring it.
 >
 > The command therefore **refuses to create by default**: a missing target comes out
 > `rejected` / `irreversible_creation`, with no call at all. `allow_create=true` is the
@@ -523,7 +553,7 @@ creations per run with their target and estimated reach, and carries the
 `app_acl_irreversible` call for each. `App ACL - governability of the estate` ventilates
 the applications by `acl_governable`, per member.
 
-**Redirecting the journal index now takes FOUR overrides**, not two: `local/inputs.conf`
+**Redirecting both journal indexes takes FOUR overrides in all**, not two: `local/inputs.conf`
 and `local/macros.conf`, for **each** of the two journal sets. Applying one and not the
 other leaves the shipped searches reading the old index and returning an empty result
 without saying so.
@@ -589,9 +619,11 @@ Limits that change what you have to do. The reasoning behind each one is in
 - **An account without the `editacl_auditor` role gets a `404` on the view, not a `403`**:
   a missing role, not a broken deployment. An account holding `admin_all_objects` reads
   the view anyway, whatever the role.
-- **Redirecting the journal index takes TWO overrides**, `local/inputs.conf` to ingest
-  **and** `local/macros.conf` to read. With only the first, the view goes stale and the
-  rollback macros return an empty set reported as a success.
+- **Redirecting the `editacl` journal index takes TWO overrides**, `local/inputs.conf` to
+  ingest **and** `local/macros.conf` to read. With only the first, the view goes stale and
+  the rollback macros return an empty set reported as a success. **Counting the
+  application-level journal, it is four in all** - two per journal set, one file each,
+  and the two sets are independent.
 - **A run launched with `journal=false` appears in no panel built on the journal**; the
   *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype.
 - **Writing an `eventtype` aligns its derived objects by cascade, and that alignment
