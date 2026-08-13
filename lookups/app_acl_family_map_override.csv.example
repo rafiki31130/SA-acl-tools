@@ -1,0 +1,34 @@
+family,handler_path
+# Example override of the family table (v4.1 section 5.2, requirement 3).
+#
+# To enable it: copy this file to `lookups/app_acl_family_map_override.csv` in the
+# installed app, then describe one family per line. The real file is NEVER shipped in
+# the archive: an app upgrade therefore cannot overwrite it, since the archive does not
+# contain it. The counterpart is that a file living in `lookups/` is overwritten by an
+# upgrade if it IS shipped - so back this one up before upgrading.
+#
+# `family` is the name of the generic stanza as it appears in `metadata/local.meta` -
+# `views`, `savedsearches`, `workflow_actions` - and NOT the URI of a handler. The
+# stanza name follows the underlying configuration file, not the URI: the handler
+# `data/ui/workflow-actions` writes `[workflow_actions]`, with an underscore.
+#
+# It is loaded AFTER `bin/app_acl_family_map.json` and overrides it: a family present
+# in both takes the value from this file.
+#
+# `handler_path` must match the pattern ^[A-Za-z0-9][A-Za-z0-9._~-]*(/[A-Za-z0-9._~-]+)*$
+# - a non-conforming line is discarded and traced in the diagnostic log, never used. No
+# derivation heuristic is applied (v4.1 section 5.2, requirement 2): a family absent
+# from the table produces `acl_status=rejected`,
+# `acl_error=unresolved_family:<family>`.
+#
+# THREE FAMILIES ARE KNOWN TO BE UNREACHABLE and are deliberately absent from the
+# shipped table (v4.1 section 5.3): `visualizations` answers `500 No capability
+# specified for action='edit'`, `ntags` does not support ACL at all, and `props`
+# through `data/props/extractions` answers `400 Cannot parse object name` - `props` is
+# reachable through seven other handlers, of which the shipped one. Overriding a family
+# towards one of those paths produces an HTTP error per event, never a silent write.
+#
+# The two lines below are commented out: this example file must override nothing as it
+# stands.
+#an-unknown-family,data/ui/something
+#another-family,admin/something-else

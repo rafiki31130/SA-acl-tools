@@ -1,0 +1,21 @@
+{
+  "alert_actions": "alerts/alert_actions",
+  "collections": "storage/collections/config",
+  "commands": "admin/commandsconf",
+  "eventtypes": "saved/eventtypes",
+  "fields": "admin/fields",
+  "global-banner": "admin/global-banner",
+  "lookups": "data/lookup-table-files",
+  "macros": "data/macros",
+  "models": "datamodel/model",
+  "nav": "data/ui/nav",
+  "panels": "data/ui/panels",
+  "props": "data/props/lookups",
+  "savedsearches": "saved/searches",
+  "tags": "saved/fvtags",
+  "times": "data/ui/times",
+  "transforms": "data/transforms/lookups",
+  "views": "data/ui/views",
+  "viewstates": "data/ui/viewstates",
+  "workflow_actions": "data/ui/workflow-actions"
+}
