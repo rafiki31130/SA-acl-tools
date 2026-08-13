@@ -43,6 +43,7 @@ from .appacl_model import (
 )
 from .appacl_provenance import (
     FILE_READ_OK,
+    LAYER_LOCAL,
     LAYER_NONE,
     META_ACCESS_KEY,
     META_EXPORT_KEY,
@@ -52,10 +53,36 @@ from .appacl_provenance import (
 from .appacl_target import build_app_default_path, build_family_default_path
 from .normalize import serialize_roles
 
-#: How the `[]` stanza is written **in the output**, and it is written as it is written in
-#: the file. The empty string was accurate and unreadable: a cell nobody can see is a cell
-#: an operator reads as a bug.
+#: How a stanza is written **in the output**: as it is written in the file, **brackets
+#: included, everywhere**. The v4.5 output quoted the file for `[]` and dropped the
+#: brackets for `commands`, which the reading trial flagged as an inconsistency - the same
+#: column citing the file in two different registers.
+#:
+#: `editappacl` strips the brackets before resolving a family (section 8.3), so chaining
+#: without parameters keeps working.
 APP_STANZA_LABEL = "[]"
+
+
+def stanza_label(name):
+    """The stanza as the file writes it: `[]`, `[views]`, `[commands]`."""
+    return "[%s]" % (name or "")
+
+
+#: Closed domain of `acl_write_effect` (v4.6 section 7.4) - **what a write would do to this
+#: target, and whether it could be undone.**
+#:
+#: The most important correction of v4.6. The inventory exists to decide **before** writing,
+#: and it did not say whether the write would be reversible. The independent reader deduced
+#: it - **without certainty** - from the fact that all eight stanzas of the inventoried
+#: application live in the `default` layer, which makes every write there a creation.
+#:
+#: **The predicate is exactly the one of section 9.2** - the `access` key in `local.meta` -
+#: applied to reading instead of writing. It is not reimplemented here: it comes from
+#: `AppProvenance.perms_source`, which calls the same `materializes_permissions` the write
+#: command calls through `materialized_local`.
+WRITE_EFFECT_OVERWRITE = "overwrite_reversible"
+WRITE_EFFECT_CREATE = "create_irreversible"
+WRITE_EFFECT_NO_ROUTE = "no_route"
 
 #: Closed domain of `acl_row_reason` (section 7.4) - *why is this row here?*
 #:
@@ -74,8 +101,12 @@ ROW_REASON_REQUESTED = "requested"
 #: table, failed call, disabled application - on 26 rows out of 124, that is 21 %. The
 #: previous contract forbade adding an error column; that prohibition was withdrawn once a
 #: fifth of the rows were mute.
+#: **One nature only, since v4.6.** `no_handler` used to live here and said a fact about
+#: the **tool** in a column that answers *could the platform be read*. The reading trial
+#: classified the column as `guessed` for that single reason. The route moved to
+#: `acl_write_effect`; a family with no route reads as `unreadable`, and the neighbouring
+#: column says why.
 EFFECTIVE_OK = "ok"
-EFFECTIVE_NO_HANDLER = "no_handler"
 EFFECTIVE_APP_DISABLED = "app_disabled"
 EFFECTIVE_UNREADABLE = "unreadable"
 
@@ -88,6 +119,12 @@ EFFECTIVE_UNREADABLE = "unreadable"
 REACH_ALL = "all"
 REACH_PARTIAL = "partial"
 REACH_UNKNOWN = "unknown"
+
+#: Value of `acl_member` when the platform would not give its own name (v4.6 section 6.3).
+#: The v4.5 fallback was an empty cell plus a README pointing at `splunk_server` - a field
+#: **absent from this output**, so the advice could not be followed from the table. A named
+#: value can at least be filtered on.
+MEMBER_UNKNOWN = "unknown"
 
 #: Path of the cheap REST call that names the execution member (section 6.3).
 #:
@@ -134,8 +171,10 @@ INVENTORY_OUTPUT_FIELDS = (
     # -- why the columns above may be empty, and why this row exists ----------- #
     "acl_effective_status",
     "acl_row_reason",
+    # -- what a write would do to this target, and whether it could be undone -- #
+    "acl_write_effect",
     # -- what the file carries, and from which layer --------------------------- #
-    "acl_stanza_layer",
+    "acl_perms_source",
     "acl_file_perms_read",
     "acl_file_perms_write",
     "acl_file_export",
@@ -360,22 +399,55 @@ def export_of(literal):
 # Governability - a derivation, never an appreciation
 # --------------------------------------------------------------------------- #
 
-def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_perms):
-    """`acl_reach` (section 7.4) - **the verdict**, recomputable from its neighbours.
+def write_effect_of(has_route, perms_source):
+    """`acl_write_effect` (v4.6 section 7.4) - **what a write would do to this target.**
+
+        overwrite_reversible   the target already carries its permissions in `local.meta`:
+                               a write replaces them, and `app_acl_rollback` can undo it
+        create_irreversible    a write would MATERIALIZE permissions in `local.meta` where
+                               there are none - nothing removes them afterwards, and
+                               `editappacl` refuses without `allow_create=true`
+        no_route               the tool has no handler for this family and cannot write to
+                               it by name at all
+
+    **The predicate is exactly the one of section 9.2**, applied to reading instead of
+    writing: `perms_source` comes from `AppProvenance.perms_source`, which calls the same
+    `materializes_permissions` the write command calls through `materialized_local`. The
+    two commands answer the same question with the same rule, and the inventory stops
+    obliging the operator to reconstitute it.
+
+    The order matters: with no route there is nothing to say about reversibility, so
+    `no_route` wins.
+    """
+    if not has_route:
+        return WRITE_EFFECT_NO_ROUTE
+    if perms_source == LAYER_LOCAL:
+        return WRITE_EFFECT_OVERWRITE
+    return WRITE_EFFECT_CREATE
+
+
+def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_perms,
+             write_effect=None):
+    """`acl_reach` (section 7.4) - **the verdict of scope**, recomputable from its
+    neighbours.
 
         family_default   all   no object of the family carries its own permissions
         app_default      all   no object AND no family carries its own permissions
         both             unknown as soon as the metadata could not be read in full
+        family_default   unknown as soon as there is no route
 
-    `unknown` is not an empty cell: it says the file could not be read, so **no** verdict
-    is asserted. `partial` says some objects escape this stanza; it does not pretend to say
-    how many of them matter.
+    **`all` together with `no_route` is a forbidden state, and v4.6 forbids it.** The
+    reading trial found `searchbnf` reported `all` - so announced reached in full - while
+    also `no_handler`, that is unreachable by the tool. An operator sorting on
+    `acl_reach = all` was picking up a target the write fails on. The scope of an action the
+    tool cannot carry out is not `all`; it is not known.
 
-    **What counts as escaping is measured, not assumed** (`materializes_permissions`): a
-    stanza carrying only `owner`, `version` and `modtime` - what splunkd writes for every
-    object it touches - freezes nothing and is not counted.
+    Both causes of `unknown` are named by a neighbouring column - `acl_file_read` for the
+    read, `acl_write_effect` for the route - as the rule of the empty cell requires.
     """
     if str(file_read or "") != FILE_READ_OK:
+        return REACH_UNKNOWN
+    if write_effect == WRITE_EFFECT_NO_ROUTE:
         return REACH_UNKNOWN
     if int(objects_with_own_perms or 0) > 0:
         return REACH_PARTIAL
@@ -383,10 +455,6 @@ def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_p
         return REACH_PARTIAL
     return REACH_ALL
 
-
-# --------------------------------------------------------------------------- #
-# Row production
-# --------------------------------------------------------------------------- #
 
 def families_to_emit(provenance, requested):
     """Which `family_default` rows an application produces, **and why** (section 7.5).
@@ -464,7 +532,7 @@ class InventoryBuilder(object):
         self._rest = rest
         self._provenance = provenance_reader
         self._table = table if table is not None else FamilyTable({})
-        self._member = str(member or "")
+        self._member = str(member or "") or MEMBER_UNKNOWN
         #: Consulted **only** when a platform read has already failed, so that the row can
         #: say `app_disabled` instead of the undifferentiated `unreadable`. Memoized by the
         #: caller, and never called on the nominal path.
@@ -473,14 +541,19 @@ class InventoryBuilder(object):
     # -- one row ------------------------------------------------------------ #
 
     def _platform_state(self, app, stanza_kind, handler):
-        """`(state, acl_effective_status)` - and the status explains the state when it is
-        empty, which is the rule the whole table is built on."""
+        """`(state, acl_effective_status)`.
+
+        **One nature only since v4.6**: this answers *could the platform be read*. With no
+        route there is nothing to read, so the answer is `unreadable` and the reason lives
+        in `acl_write_effect` - a fact about the tool, in the column that carries facts
+        about the tool.
+        """
         if stanza_kind == STANZA_KIND_APP:
             endpoint = build_app_default_path(app)
         elif handler:
             endpoint = build_family_default_path(app, handler)
         else:
-            return AppAclState(), EFFECTIVE_NO_HANDLER
+            return AppAclState(), EFFECTIVE_UNREADABLE
 
         state = read_effective_state(self._rest, endpoint)
         if state is not None:
@@ -494,39 +567,41 @@ class InventoryBuilder(object):
 
         The order is not cosmetic and a test freezes it: the SDK writer fixes the stream
         header on the keys of the first record, so the order emitted is the order of this
-        dictionary. Measured before the revision: `acl_member` came out ninth instead of
-        last.
+        dictionary.
 
         `scope` is the stanza name whose object stanzas count for this row - the family on
         a family row, `None` for an application row, where the count spans the whole
         application.
         """
         state, effective_status = self._platform_state(app, stanza_kind, handler)
-        literal = provenance.literal_any(stanza)
-        read_literal, write_literal = split_access(literal)
-        layer = provenance.stanza_layer(stanza)
+        perms_source = provenance.perms_source(stanza)
+        read_literal, write_literal = split_access(provenance.access_literal(stanza))
         file_read = provenance.read_status()
         objects = provenance.frozen_count(scope)
         families = provenance.family_header_count()
+        has_route = stanza_kind == STANZA_KIND_APP or bool(handler)
+        write_effect = write_effect_of(has_route, perms_source)
 
         return {
             "eai:acl.app": app,
             "acl_stanza_kind": stanza_kind,
-            "acl_stanza": APP_STANZA_LABEL if stanza_kind == STANZA_KIND_APP else stanza,
+            "acl_stanza": stanza_label("" if stanza_kind == STANZA_KIND_APP else stanza),
             "acl_handler": handler,
             "eai:acl.perms.read": serialize_roles(state.perms_read),
             "eai:acl.perms.write": serialize_roles(state.perms_write),
             "eai:acl.sharing": state.sharing,
             "acl_effective_status": effective_status,
             "acl_row_reason": reason,
-            "acl_stanza_layer": layer,
+            "acl_write_effect": write_effect,
+            "acl_perms_source": perms_source,
             "acl_file_perms_read": read_literal,
             "acl_file_perms_write": write_literal,
-            "acl_file_export": export_of(literal),
+            "acl_file_export": export_of(provenance.literal_any(stanza)),
             "acl_file_read": file_read,
             "acl_objects_with_own_perms": objects,
             "acl_families_with_own_perms": families,
-            "acl_reach": reach_of(stanza_kind, file_read, objects, families),
+            "acl_reach": reach_of(stanza_kind, file_read, objects, families,
+                                  write_effect),
             "acl_member": self._member,
         }
 

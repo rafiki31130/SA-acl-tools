@@ -348,7 +348,7 @@ class TheFatalErrorsAreTheContractualOnesTest(unittest.TestCase):
         marker = source.index("TABLE_UNREADABLE_WARNING = (")
         text = source[marker:marker + 700]
         self.assertIn("acl_handler", text)
-        self.assertIn(module.EFFECTIVE_NO_HANDLER, text)
+        self.assertIn(module.WRITE_EFFECT_NO_ROUTE, text)
 
     def test_the_fatal_path_marks_the_job_as_failed(self):
         """The SDK's `error_exit` sends a final chunk carrying `finished: true`, after

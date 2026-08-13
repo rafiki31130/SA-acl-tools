@@ -1,14 +1,18 @@
 # SA-acl-tools
 
-Splunk application shipping three custom search commands that rewrite Splunk permissions
-through the REST API, from an SPL pipeline describing the target state. They work at
-**two levels**, and the level is what tells them apart:
+Splunk application shipping three custom search commands for Splunk permissions: **two
+write** them through the REST API from an SPL pipeline describing the target state, and
+**one only reads**. They work at **two levels**, and the level is what tells the two writers
+apart:
 
-| Command | Level | What it touches |
-|---|---|---|
-| `editacl` | one object | The ACL of each knowledge object the pipeline enumerates |
-| `appaclinventory` | one application | Nothing. It **reports** the generic stanzas and their provenance |
-| `editappacl` | one application | The generic stanzas `[]` and `[<family>]` of an application, which govern every object that has none of its own |
+| Command | Writes? | Level | What it touches |
+|---|---|---|---|
+| `editacl` | **yes** | one object | The ACL of each knowledge object the pipeline enumerates |
+| `appaclinventory` | **no** | one application | Nothing at all. It **reports** the generic stanzas, where their permissions are written, and what a write would do |
+| `editappacl` | **yes** | one application | The generic stanzas `[]` and `[<family>]` of an application, which govern every object that has none of its own |
+
+Read first, write second: `appaclinventory` is the command you run before either of the
+other two.
 
 It also ships an inventory macro, five rollback and reporting macros, six saved searches
 and a run monitoring view. Driving use case: decommissioning legacy roles, by
@@ -43,9 +47,9 @@ and a run monitoring view. Driving use case: decommissioning legacy roles, by
 > the object **unreachable**; a removed stanza makes it **inherit again**. Two opposite
 > states, not two spellings of one.
 
-This document is for whoever **runs** the tool. The architecture, the measurements the
-behaviour rests on, the traps and the design decisions live in
-[`DEVNOTES.md`](DEVNOTES.md), which is not shipped in the deployable archive.
+This document is for whoever **runs** the tool, and it is meant to be sufficient: every
+answer you need while operating is here or in the output of the commands. Nothing sends you
+to a file that is not installed alongside them.
 
 ```mermaid
 flowchart LR
@@ -81,7 +85,7 @@ parallel, and one input event always produces exactly one output event.
 ## Installation
 
 Build the archive from a **git reference**, never from the working tree. `tests/`,
-`tools/` and `DEVNOTES.md` are left out by `.gitattributes`; `bin/lib/` is included, so
+`tools/` and development notes are left out by `.gitattributes`; `bin/lib/` is included, so
 the archive deploys with no network access. Anchor any check of its content on
 `^SA-acl-tools/`: the archive prefix itself contains the substring `tools/`.
 
@@ -341,18 +345,22 @@ macro names, which resolve differently; they never appear in a command name here
 ## What the inventory gives you, column by column
 
 **Read this table instead of the code.** Every column below answers one question, and the
-table says which. Eighteen columns, in the order they come out.
+table says which. Nineteen columns, in the order they come out.
 
 **Four levels, and no column mixes two.** That is what makes the table readable: some
 columns say what the **file** carries, some what the **platform** applies, some what
-**stands between** the two, and some identify the row. Knowing which level you are looking
-at is most of the work.
+**stands between** the two, and some identify the row.
 
-> **No column is ever empty without another saying why.** If the three `eai:acl.*` cells are
-> blank, `acl_effective_status` says what stopped the read. If the three `acl_file_*` cells
-> are blank, `acl_stanza_layer` says `none` - the stanza is simply not in either file. Every
-> other column is always filled, `acl_member` aside, which is empty only when the platform
-> would not give its own name.
+> **Start with `acl_write_effect`.** It is the column that tells you whether the write you
+> are about to launch can be undone. Everything else describes a state; that one describes
+> the consequence of an action.
+
+> **No column is ever empty without another saying why - nor without another saying whether
+> the empty means "absent" or "empty set".** If the three `eai:acl.*` cells are blank,
+> `acl_effective_status` says what stopped the read. If the two `acl_file_perms_*` cells are
+> blank, `acl_perms_source` says which of the two emptinesses it is: `none` means the
+> permissions are written **nowhere**, `local` or `default` mean they are written **there
+> and are empty**. Those two states are opposites, and they decide different writes.
 
 ### Identification - which stanza is this row about, and why is it here
 
@@ -360,13 +368,13 @@ at is most of the work.
 |---|---|---|
 | `eai:acl.app` | Which application | a name |
 | `acl_stanza_kind` | Is this the application default, or one family | `app_default`, `family_default` |
-| `acl_stanza` | Which stanza, written as it is written in the file | `[]` on an application row, the family name otherwise |
+| `acl_stanza` | Which stanza, written as the file writes it, brackets included | `[]`, `[views]`, `[commands]` |
 | `acl_handler` | Which REST path the tool reaches this family by | a path, or empty |
 | `acl_row_reason` | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
 
-An empty `acl_handler` means one of two things, and the row says which: on an application
-row the `[]` address needs no handler, and `acl_stanza_kind` says so; on a family row the
-family is not in the tool's table, and `acl_effective_status` says `no_handler`.
+An empty `acl_handler` means the tool has no route to this family, and `acl_write_effect`
+says so with `no_route`. On an application row it is empty because a `[]` address needs no
+handler, and `acl_stanza_kind` says that.
 
 `acl_row_reason` is the column to read first when a row surprises you. `stanza_exists` means
 the stanza is written in a metadata file. **`objects_exist` means it is not** - the family is
@@ -380,41 +388,35 @@ family worth showing. `requested` means you asked for it with `families=`.
 | `eai:acl.perms.read` | Which roles read, today | roles, comma-separated |
 | `eai:acl.perms.write` | Which roles write, today | roles, comma-separated |
 | `eai:acl.sharing` | Which scope applies, today | `app`, `global`, `user` |
-| `acl_effective_status` | Were those three read, **and if not why** | `ok`, `no_handler`, `app_disabled`, `unreadable` |
+| `acl_effective_status` | Were those three **read**, and if not why | `ok`, `app_disabled`, `unreadable` |
 
-`no_handler` means the tool has no REST path for this family - it can report on it, not act
-on it. `app_disabled` and `unreadable` mean the read failed, for two different reasons.
+This column answers one question only: could the platform be read. When there is no route to
+read through, it says `unreadable` and `acl_write_effect` says why.
 
-### File - what the metadata carries, literally
-
-| Column | The question it answers | Values |
-|---|---|---|
-| `acl_stanza_layer` | In which file the stanza is written - **so which layer the three cells below quote** | `local`, `default`, `none` |
-| `acl_file_perms_read` | What that stanza writes for reading | the text, as written |
-| `acl_file_perms_write` | What it writes for writing | the text, as written |
-| `acl_file_export` | What it writes for `export` | the text, as written |
-| `acl_file_read` | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
-
-**These columns quote the file; the `eai:acl.*` columns above show what splunkd applies.**
-When the two disagree, something else is deciding - the other layer, or a generic stanza one
-level up. That comparison is the reason both are here.
-
-`acl_stanza_layer` says **where the stanza is written**, and nothing more. It does not say
-where the effective permissions come from: a stanza can sit in `default.meta` carrying only
-`export` while its permissions are inherited. Answering that would mean replaying Splunk's
-own inheritance resolution, which this tool deliberately never does.
-
-`acl_file_read` is about the **files**, not the stanza. `partial:<n>` means `n` lines were
-skipped while parsing, so the counters below may understate; `unreadable` means no count on
-this row can be trusted.
-
-### Decision - what stands between this stanza and the objects
+### Decision - what a write would do, and what stands in its way
 
 | Column | The question it answers | Values |
 |---|---|---|
+| `acl_write_effect` | **What a write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible`, `no_route` |
 | `acl_objects_with_own_perms` | How many objects carry **their own permissions** and therefore escape this stanza | a count |
 | `acl_families_with_own_perms` | How many families of this application carry their own permissions and therefore escape `[]` | a count |
-| `acl_reach` | **The verdict**: does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
+| `acl_reach` | Does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
+
+**`acl_write_effect` is the safety column.**
+
+- `overwrite_reversible` - the stanza already carries its permissions in the **local** layer.
+  A write replaces them, and `` `app_acl_rollback(<sid>)` `` can put them back.
+- `create_irreversible` - the permissions are **not** in the local layer, whether they sit in
+  the default layer or nowhere. A write **materialises** them there, and **nothing removes
+  them afterwards**: no rollback, no REST path. `editappacl` refuses such a target unless you
+  pass `allow_create=true`. **This is the common case on a freshly installed application**,
+  whose stanzas are all shipped in the default layer.
+- `no_route` - the tool has no handler for this family and cannot write to it by name.
+
+`acl_reach` reads `all` only when nothing stands in the way **and** a route exists. It reads
+`unknown` when the metadata could not be read in full, or when there is no route - a scope
+the tool cannot act on is not known to be reached. Both causes are named by the column beside
+it: `acl_file_read` for the first, `acl_write_effect` for the second.
 
 The scope of `acl_objects_with_own_perms` is the scope of the row: the family on a family
 row, the whole application on an application row. `acl_families_with_own_perms` is an
@@ -424,18 +426,42 @@ application fact and is repeated on every row of that application - do not sum i
 for every object you create or edit, carrying `owner`, `version` and `modtime` and nothing
 else; such an object still inherits, and is not counted.
 
-`acl_reach` recomputes from the two counts beside it, so you can check it: `all` when both
-are zero (only the object count matters on a family row), `partial` otherwise, `unknown`
-when `acl_file_read` is not `ok`.
+### File - what the metadata carries, literally
+
+| Column | The question it answers | Values |
+|---|---|---|
+| `acl_perms_source` | **Where this stanza's permissions are written** - so which layer the two cells below quote, and what a write would do | `local`, `default`, `none` |
+| `acl_file_perms_read` | What that stanza writes for reading | roles, or empty |
+| `acl_file_perms_write` | What it writes for writing | roles, or empty |
+| `acl_file_export` | What the stanza writes for `export` | the text, or empty |
+| `acl_file_read` | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
+
+`acl_perms_source` is decided by one thing: whether an `access` key exists, and in which
+layer. `none` means **no `access` key anywhere** - the stanza may still exist and carry an
+`export`, which is why `acl_file_export` can be filled while the two permission cells are
+empty.
+
+**These columns quote the file; the `eai:acl.*` columns show what splunkd applies.** When the
+two disagree, something else is deciding - the other layer, or a generic stanza one level up.
+That comparison is the reason both are here.
+
+`acl_perms_source` says **where the permissions are written**, and nothing more. It does not
+say where the effective permissions come from: answering that would mean replaying Splunk's
+own inheritance resolution, which this tool deliberately never does.
+
+`acl_file_read` is about the **files**, not the stanza. `partial:<n>` means `n` lines were
+skipped while parsing, so the counts may understate; `unreadable` means no count on this row
+can be trusted.
 
 ### Context
 
 | Column | The question it answers | Values |
 |---|---|---|
-| `acl_member` | Which member the metadata was read on | a name, or empty |
+| `acl_member` | Which member the metadata was read on | a name, or `unknown` |
 
-Empty means the platform did not give its own name; discriminate on `splunk_server`
-instead.
+`unknown` means the platform would not give its own name. Run the inventory on each member
+and compare the tables: a difference is a metadata replication gap, which no configuration
+audit sees.
 
 ### Which rows come out
 
@@ -452,8 +478,6 @@ and saved in the interface will appear, with `acl_objects_with_own_perms = 0` an
 `acl_reach = all` - the row then says exactly that. A family matching none of the three does
 not appear, which does not mean it cannot be governed: only that today it is neither
 governed nor frozen.
-
----
 
 ## The application-level write command
 
@@ -710,8 +734,8 @@ already written come out `noop` through idempotence, so there is no double write
 
 ## Before you use it
 
-Limits that change what you have to do. The reasoning behind each one is in
-[`DEVNOTES.md`](DEVNOTES.md).
+Limits that change what you have to do. Each one says what to do about it; where the
+reason is short enough to matter here, it is given.
 
 - **Read access to the journal index is a prerequisite** of the view, of both rollback
   macros and of the change-journal search. Grant it before the first run.

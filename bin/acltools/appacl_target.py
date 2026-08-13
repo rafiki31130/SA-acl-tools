@@ -66,6 +66,25 @@ def build_family_default_path(app, handler_path):
     )
 
 
+def strip_brackets(name):
+    """`[views]` and `views` designate the same family (v4.6 section 8.3).
+
+    `appaclinventory` now quotes a stanza as the file writes it, **brackets included**, so
+    that a reader sees `[commands]` and `[]` in the same register. Chaining without any
+    parameter has to keep working, so the brackets are removed here - and **here only**.
+
+    **No other normalization is admitted**: no trimming of inner spaces, no case folding,
+    no plural. The family name follows the underlying configuration file byte for byte
+    (measured, Q0-2), and a resolver that "helps" is a resolver that eventually resolves
+    something else than what was asked. A name that is not exactly a key of the table is
+    rejected with its own name, brackets removed, in `unresolved_family:<stanza>`.
+    """
+    text = str(name or "").strip()
+    if len(text) >= 2 and text.startswith("[") and text.endswith("]"):
+        return text[1:-1].strip()
+    return text
+
+
 def check_designation(event):
     """Ranks 0 to 2 of section 8.7. Returns `(app, stanza_kind)`, or raises.
 
@@ -126,6 +145,8 @@ def resolve_target(event, table):
             handler="",
             endpoint=build_app_default_path(app),
         )
+
+    stanza = strip_brackets(stanza)
 
     resolved = None                                                       # rank 4
     if handler:

@@ -99,8 +99,16 @@ FALLBACK_DIRNAME_LEVELS = 3
 META_ACCESS_KEY = "access"
 META_EXPORT_KEY = "export"
 
-#: Closed domain of `acl_stanza_layer` (v4.5 section 7.4): which file the stanza is
-#: written in, and therefore which layer the `acl_file_*` columns quote.
+#: Closed domain of `acl_perms_source` (v4.6 section 7.4): **where the permissions of this
+#: stanza are written** - therefore which layer the `acl_file_perms_*` columns quote, and
+#: therefore what an write would do to the target.
+#:
+#: **It is the access key that decides, not the presence of the stanza**, and that is the
+#: v4.6 redefinition. The independent reading trial could not tell "the `access` key is
+#: absent" from "the key is there and the permission is empty" - two states this contract
+#: holds to be **opposite** everywhere else (Q0-3: an empty permission leaves the object
+#: unreachable, an absent stanza makes it inherit), and the two states that decide
+#: `updated` against `created` on a write.
 LAYER_LOCAL = "local"
 LAYER_DEFAULT = "default"
 LAYER_NONE = "none"
@@ -485,6 +493,11 @@ class AppProvenance(object):
     def materialized_local(self, stanza):
         """Does the stanza carry the **permissions** in `local.meta`?
 
+        **The single predicate of section 9.2**, and the one the inventory publishes as
+        `acl_write_effect` through `perms_source`. The write command asks it before writing,
+        the inventory asks it before the operator decides to write, and both get the same
+        answer because both call the same function.
+
         The question `editappacl` has to answer before writing, and the one that decides
         whether the write is reversible. A stanza that exists without an `access` line does
         not carry the permissions: writing them **materializes** them, which masks the
@@ -516,33 +529,58 @@ class AppProvenance(object):
         """Literal keys of the stanza in `local.meta`, empty dict when absent."""
         return self.local.get(stanza)
 
-    def stanza_layer(self, stanza):
-        """Which file the stanza is **written in** - `local`, `default`, or neither.
+    def perms_source(self, stanza):
+        """**Where the permissions of this stanza are written** - `local`, `default`, or
+        nowhere at all.
 
-        `local` wins when both carry it, and that is not a preference: at equal
-        specificity the local layer is the one splunkd applies (measured, HY-2). The
-        column built on this answer therefore names the layer the literal values beside it
-        are quoted from, which is all it promises.
+        The predicate is `materializes_permissions`, that is the `access` key - **the very
+        one section 9.2 uses to decide whether a write is reversible**, and the very one
+        `materialized_local` below applies to the local layer alone. One rule, three
+        callers: the write command through `materialized_local`, the inventory through this
+        method and through `write_effect`. A second implementation would be a second answer
+        to a question the two commands must answer identically.
 
-        **It does not say where the effective value comes from**, and the v4.5 contract
-        withdrew that promise rather than repairing it: a `[commands]` stanza carrying only
-        `export` lives in `default.meta` while its permissions are inherited from `[]`.
-        Answering the real question would mean replaying the platform's inheritance
-        resolution, which bound 2 of section 6.2 forbids.
+        `local` wins when both layers carry the key, and that is not a preference: at equal
+        specificity the local layer is the one splunkd applies (measured, HY-2).
+
+        `none` means **no `access` key anywhere** - not "no stanza". A stanza can exist and
+        carry only `export`, which is the `[commands]` case, and the reading trial could
+        not tell that from a stanza carrying an empty permission.
+
+        **It does not say where the effective value comes from.** That promise was withdrawn
+        in v4.5 rather than repaired: answering it would mean replaying the platform's
+        inheritance resolution, which bound 2 of section 6.2 forbids.
         """
-        if self.present_local(stanza):
+        if materializes_permissions(self.local.get(stanza)):
             return LAYER_LOCAL
-        if self.present_default(stanza):
+        if materializes_permissions(self.default.get(stanza)):
             return LAYER_DEFAULT
         return LAYER_NONE
 
-    def literal_any(self, stanza):
-        """Literal keys of the stanza, from the layer `stanza_layer` names.
+    def access_literal(self, stanza):
+        """The literal keys carrying the permissions, from the layer `perms_source` names.
 
-        **The correction of the measured defect**: reading `local.meta` alone produced
-        zero non-empty literal on 124 rows, while 97 of them carried a filled stanza in
-        `default.meta` that nobody looked at. It was never "the stanza does not exist" - it
-        was "we read one layer out of two".
+        Empty mapping when no layer carries an `access` key - which the column beside it
+        reports as `none`, so an empty cell is never mute about which of the two states it
+        is in.
+        """
+        source = self.perms_source(stanza)
+        if source == LAYER_LOCAL:
+            return self.local.get(stanza)
+        if source == LAYER_DEFAULT:
+            return self.default.get(stanza)
+        return {}
+
+    def literal_any(self, stanza):
+        """Literal keys of the stanza, from the layer that **carries the stanza**.
+
+        Distinct from `access_literal` on purpose: `export` lives in a stanza that may carry
+        no `access` key at all - `[commands]` carries only `export = system` - and dropping
+        it would leave the row without its only witness of the scope written in the file.
+
+        **The correction of the measured defect**: reading `local.meta` alone produced zero
+        non-empty literal on 124 rows, while 97 of them carried a filled stanza in
+        `default.meta` that nobody looked at.
         """
         if self.present_local(stanza):
             return self.local.get(stanza)
