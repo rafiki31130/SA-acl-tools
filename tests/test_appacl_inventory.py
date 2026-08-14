@@ -27,8 +27,9 @@ from acltools.appacl_inventory import (
     EFFECTIVE_OK,
     EFFECTIVE_UNREADABLE,
     MEMBER_UNKNOWN,
-    FILE_VALUE_ABSENT,
+    VALUE_ABSENT,
     INVENTORY_OUTPUT_FIELDS,
+    counted_or_absent,
     REACH_ALL,
     REACH_PARTIAL,
     REACH_UNKNOWN,
@@ -280,7 +281,7 @@ class NoColumnIsEmptyWithoutAnotherSayingWhyTest(unittest.TestCase):
                     self.assertNotEqual(
                         row["acl_perms_source"], LAYER_NOWHERE,
                         "%s is empty while nothing writes the key - it should read %s"
-                        % (column, FILE_VALUE_ABSENT),
+                        % (column, VALUE_ABSENT),
                     )
 
     def test_the_handler_has_one_definition_and_only_one(self):
@@ -440,9 +441,9 @@ class TheFileColumnsReadBothLayersTest(unittest.TestCase):
     def test_an_absent_stanza_says_nowhere_and_marks_the_literals_absent(self):
         row = builder().family_row("my_app", "views", provenance())
         self.assertEqual(row["acl_perms_source"], LAYER_NOWHERE)
-        self.assertEqual(row["acl_file_perms_read"], FILE_VALUE_ABSENT)
-        self.assertEqual(row["acl_file_perms_write"], FILE_VALUE_ABSENT)
-        self.assertEqual(row["acl_file_export"], FILE_VALUE_ABSENT)
+        self.assertEqual(row["acl_file_perms_read"], VALUE_ABSENT)
+        self.assertEqual(row["acl_file_perms_write"], VALUE_ABSENT)
+        self.assertEqual(row["acl_file_export"], VALUE_ABSENT)
 
     def test_a_stanza_carrying_only_export_sources_its_permissions_nowhere(self):
         """**The `[commands]` case, and the v4.6 redefinition.**
@@ -458,7 +459,7 @@ class TheFileColumnsReadBothLayersTest(unittest.TestCase):
             "my_app", "views", provenance(default=scoped_stanza("views"))
         )
         self.assertEqual(row["acl_perms_source"], LAYER_NOWHERE)
-        self.assertEqual(row["acl_file_perms_read"], FILE_VALUE_ABSENT)
+        self.assertEqual(row["acl_file_perms_read"], VALUE_ABSENT)
         self.assertEqual(row["acl_file_export"], "system")
 
     def test_no_token_of_ours_can_be_read_as_a_value_of_the_platform(self):
@@ -744,14 +745,14 @@ class TheLiteralValuesTest(unittest.TestCase):
         """**v4.7.** The three file columns say their own absence. The token cannot be
         confused with a value: no role name and no platform `export` value is written
         between parentheses."""
-        self.assertEqual(export_of(None), FILE_VALUE_ABSENT)
-        self.assertEqual(export_of({}), FILE_VALUE_ABSENT)
-        self.assertEqual(export_of({"owner": "nobody"}), FILE_VALUE_ABSENT)
+        self.assertEqual(export_of(None), VALUE_ABSENT)
+        self.assertEqual(export_of({}), VALUE_ABSENT)
+        self.assertEqual(export_of({"owner": "nobody"}), VALUE_ABSENT)
         self.assertEqual(export_of({"export": ""}), "")
         self.assertEqual(split_access({"owner": "nobody"}),
-                         (FILE_VALUE_ABSENT, FILE_VALUE_ABSENT))
+                         (VALUE_ABSENT, VALUE_ABSENT))
         self.assertEqual(split_access({"access": "read : [ power ]"}),
-                         ("power", FILE_VALUE_ABSENT))
+                         ("power", VALUE_ABSENT))
 
 
 class TheOutputCarriesCountsAndNeverObjectNamesTest(unittest.TestCase):
@@ -993,7 +994,7 @@ class TheReadmeFieldTableIsADeliverableTest(unittest.TestCase):
                       EFFECTIVE_UNREADABLE, WRITE_EFFECT_OVERWRITE, WRITE_EFFECT_CREATE,
                       LAYER_LOCAL, LAYER_DEFAULT, LAYER_NOWHERE,
                       REACH_ALL, REACH_PARTIAL, REACH_UNKNOWN, FILE_READ_OK,
-                      FILE_READ_UNREADABLE, MEMBER_UNKNOWN, FILE_VALUE_ABSENT):
+                      FILE_READ_UNREADABLE, MEMBER_UNKNOWN, VALUE_ABSENT):
             with self.subTest(value=value):
                 self.assertIn("`%s`" % value, self.section)
 
@@ -1218,7 +1219,7 @@ class TheEmptyCellSaysWhichKindOfEmptyTest(unittest.TestCase):
         neighbour. `acl_perms_source` still says where the permissions live, and it says
         `nowhere` here, but the file column no longer depends on it to be read."""
         row = builder().family_row("my_app", "views", provenance())
-        self.assertEqual(row["acl_file_perms_read"], FILE_VALUE_ABSENT)
+        self.assertEqual(row["acl_file_perms_read"], VALUE_ABSENT)
         self.assertEqual(row["acl_perms_source"], LAYER_NOWHERE)
 
     def test_a_present_key_with_an_empty_permission_stays_empty(self):
@@ -1235,7 +1236,7 @@ class TheEmptyCellSaysWhichKindOfEmptyTest(unittest.TestCase):
             "my_app", "views",
             provenance(local="[views]\naccess = read : [  ], write : [  ]\n"))
         self.assertNotEqual(absent["acl_file_perms_read"], empty["acl_file_perms_read"])
-        self.assertEqual(absent["acl_file_perms_read"], FILE_VALUE_ABSENT)
+        self.assertEqual(absent["acl_file_perms_read"], VALUE_ABSENT)
         self.assertEqual(empty["acl_file_perms_read"], "")
 
     def test_the_scope_is_decidable_too_and_that_is_what_v46_left_open(self):
@@ -1247,7 +1248,7 @@ class TheEmptyCellSaysWhichKindOfEmptyTest(unittest.TestCase):
             "my_app", "views", provenance(local=touched_stanza("views")))
         exported_to_nobody = builder().family_row(
             "my_app", "views", provenance(local=frozen_stanza("views")))
-        self.assertEqual(no_key["acl_file_export"], FILE_VALUE_ABSENT)
+        self.assertEqual(no_key["acl_file_export"], VALUE_ABSENT)
         self.assertEqual(exported_to_nobody["acl_file_export"], "none")
 
     def test_and_they_decide_opposite_write_effects(self):
@@ -1511,6 +1512,171 @@ class ReversibilitySpeaksWithOneVoiceTest(unittest.TestCase):
                       "creating a stanza is reversible"):
             with self.subTest(sentence=wrong):
                 self.assertNotIn(wrong, flat)
+
+
+class ACounterNeverReturnsANumberItDidNotCountTest(unittest.TestCase):
+    """**v4.8, and it is the doctrine of `(absent)` carried to the counters.**
+
+    They returned `0` where the metadata file could not be read in full: *zero measured*
+    and *zero for want of being able to count* were the same cell, on a column that
+    carries a decision. The third reading trial raised it, and a lower bound reassures in
+    the dangerous direction - an operator reads `0` as *nothing escapes this stanza* and
+    launches the write.
+    """
+
+    def test_a_complete_read_publishes_the_integer_and_zero_means_zero(self):
+        row = builder().app_default_row("my_app", provenance(local=GOVERNED_META))
+        self.assertEqual(row["acl_file_read"], FILE_READ_OK)
+        self.assertEqual(row["acl_objects_with_own_perms"], 0)
+        self.assertNotEqual(row["acl_objects_with_own_perms"], VALUE_ABSENT)
+
+    def test_an_unreadable_file_makes_both_counters_absent(self):
+        row = builder().app_default_row(
+            "my_app", provenance(local_error="PermissionError"))
+        self.assertEqual(row["acl_file_read"], FILE_READ_UNREADABLE)
+        self.assertEqual(row["acl_objects_with_own_perms"], VALUE_ABSENT)
+        self.assertEqual(row["acl_families_with_own_perms"], VALUE_ABSENT)
+
+    def test_a_partial_read_makes_both_counters_absent_too(self):
+        """A skipped line is an unknown gap, not a small one."""
+        prov = provenance(local=GOVERNED_META + "this line has no equals sign\n")
+        row = builder().app_default_row("my_app", prov)
+        self.assertTrue(str(row["acl_file_read"]).startswith(FILE_READ_PARTIAL_PREFIX))
+        self.assertEqual(row["acl_objects_with_own_perms"], VALUE_ABSENT)
+        self.assertEqual(row["acl_families_with_own_perms"], VALUE_ABSENT)
+
+    def test_absent_and_zero_are_never_interchangeable(self):
+        readable = builder().app_default_row("my_app", provenance(local=GOVERNED_META))
+        unreadable = builder().app_default_row(
+            "my_app", provenance(local_error="PermissionError"))
+        self.assertNotEqual(readable["acl_objects_with_own_perms"],
+                            unreadable["acl_objects_with_own_perms"])
+
+    def test_the_domain_of_the_two_counters_is_integer_or_absent(self):
+        rows = list(
+            builder(prov=provenance(local=FROZEN_META)).rows(
+                make_params(), applications=["my_app"])
+        ) + list(
+            builder(prov=provenance(local_error="PermissionError")).rows(
+                make_params(), applications=["my_app"])
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            for column in ("acl_objects_with_own_perms",
+                           "acl_families_with_own_perms"):
+                with self.subTest(stanza=row["acl_stanza"], column=column):
+                    value = row[column]
+                    self.assertTrue(
+                        value == VALUE_ABSENT or isinstance(value, int),
+                        "%s carries %r, which is neither an integer nor the token"
+                        % (column, value),
+                    )
+
+    def test_a_family_with_no_route_still_counts_and_counts_zero(self):
+        """**What the clause explicitly does not do.** The counting happens in the file,
+        through the freeze predicate, and reaches no handler: on a family outside the
+        shipped table, `0` is a measured zero and `(absent)` would be plainly false."""
+        row = builder().family_row("my_app", "searchbnf", provenance(local=GOVERNED_META))
+        self.assertEqual(row["acl_handler"], "")
+        self.assertEqual(row["acl_objects_with_own_perms"], 0)
+
+    def test_the_rule_is_one_function_and_it_reads_the_file_status(self):
+        self.assertEqual(counted_or_absent(FILE_READ_OK, 0), 0)
+        self.assertEqual(counted_or_absent(FILE_READ_OK, 3), 3)
+        self.assertEqual(counted_or_absent(FILE_READ_UNREADABLE, 3), VALUE_ABSENT)
+        self.assertEqual(counted_or_absent(FILE_READ_PARTIAL_PREFIX + "2", 0),
+                         VALUE_ABSENT)
+
+    def test_the_verdict_and_the_counters_go_absent_together(self):
+        """One fact, one cause: an incomplete read makes `acl_reach` unknown and the two
+        counters absent. A row saying `partial` with a figure would invite the arithmetic
+        the verdict refuses to do."""
+        rows = list(
+            builder(prov=provenance(local_error="PermissionError")).rows(
+                make_params(), applications=["my_app"])
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(stanza=row["acl_stanza"]):
+                self.assertEqual(row["acl_reach"], REACH_UNKNOWN)
+                self.assertEqual(row["acl_objects_with_own_perms"], VALUE_ABSENT)
+
+
+class TwoPredicatesNeverConfusedTest(unittest.TestCase):
+    """**v4.8 section 7.4** - *« porter ses propres permissions »* has one sense, and it
+    is not the sense of *« l'écriture serait défaisable »*.
+
+        carries its own permissions   an `access` key, IN EITHER LAYER
+                                      -> the two counters, and `acl_reach`
+        the write would be undoable   an `access` key, IN `local.meta`
+                                      -> `acl_write_effect`, through `acl_perms_source`
+
+    No calculation changes: both predicates are already the ones the columns apply. What
+    changes is that they are **named apart**, and that a test checks each column calls its
+    own rather than the other.
+    """
+
+    #: A stanza frozen in `default.meta` alone: it escapes the generic - the counters must
+    #: see it - and a write on it would still be a creation - the effect must say so. The
+    #: two predicates disagree here, which is the whole point of the fixture.
+    DEFAULT_ONLY = None
+
+    def setUp(self):
+        self.prov = provenance(
+            local=frozen_stanza(""),
+            default=frozen_stanza("views/frozen_in_default"),
+        )
+
+    def test_the_counters_see_a_freeze_written_in_the_default_layer(self):
+        row = builder().app_default_row("my_app", self.prov)
+        self.assertEqual(row["acl_objects_with_own_perms"], 1,
+                         "the counters must apply the freeze predicate, which is "
+                         "indifferent to the layer")
+
+    def test_the_write_effect_does_not_see_it_and_that_is_correct(self):
+        """Same row, other question: the `[]` stanza carries `access` in `local.meta`, so
+        a write there replaces rather than creates."""
+        row = builder().app_default_row("my_app", self.prov)
+        self.assertEqual(row["acl_write_effect"], WRITE_EFFECT_OVERWRITE)
+
+    def test_the_two_predicates_disagree_on_the_same_row_by_design(self):
+        row = builder().family_row(
+            "my_app", "views",
+            provenance(default=frozen_stanza("views")
+                       + frozen_stanza("views/frozen_in_default")),
+        )
+        # The family stanza freezes: a write there would create in `local.meta`...
+        self.assertEqual(row["acl_write_effect"], WRITE_EFFECT_CREATE)
+        # ... while the object below it escapes the family stanza all the same.
+        self.assertEqual(row["acl_objects_with_own_perms"], 1)
+
+    def test_each_column_calls_its_own_predicate_and_none_is_rewritten(self):
+        """Read on the source of the two modules that carry them."""
+        import os
+
+        from . import BIN_DIR
+
+        with open(os.path.join(BIN_DIR, "acltools", "appacl_provenance.py"),
+                  encoding="utf-8") as handle:
+            provenance_source = "".join(
+                line for line in handle if not line.strip().startswith("#")
+            )
+        # One definition of the freeze predicate, and the two consumers call it.
+        self.assertEqual(provenance_source.count("def materializes_permissions("), 1)
+        self.assertIn("def frozen_count(", provenance_source)
+        self.assertIn("def materialized_local(", provenance_source)
+        for consumer in ("frozen_count", "family_header_count", "perms_source",
+                         "materialized_local"):
+            with self.subTest(method=consumer):
+                self.assertIn("def %s(" % consumer, provenance_source)
+
+    def test_the_freeze_predicate_ignores_the_layer_and_the_reversibility_one_does_not(
+            self):
+        prov = provenance(default=frozen_stanza("views"))
+        self.assertTrue(prov.has_family_header("views"),
+                        "the freeze predicate must see an access key wherever it is")
+        self.assertFalse(prov.materialized_local("views"),
+                         "the reversibility predicate must require local.meta")
 
 
 if __name__ == "__main__":                                       # pragma: no cover

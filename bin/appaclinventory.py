@@ -16,9 +16,24 @@ protocol versions - and **not** by a key of `commands.conf` (HY-1). Nothing was 
 the normative key set of the repository, which is what the test that freezes that set
 would have caught either way.
 
-It writes nothing, anywhere: no POST, no journal, no diagnostic file. It reads REST, it
-reads two `.meta` files per application inside the bounds of section 6.2, and it emits
-rows.
+It writes nothing, anywhere: no POST and **no journal of operations** (section 7.7). It
+reads REST, it reads two `.meta` files per application inside the bounds of section 6.2,
+and it emits rows.
+
+**What it does say, since v4.8: why it stopped.** The v4.5 contract forbade this command
+both a journal and a diagnostic, on one motive - it mutates nothing. The motive holds for
+the journal and **not** for the diagnostic: a command that mutates nothing fails exactly
+like any other, and its operator needs exactly as much to know why. Measured (friction
+#435): on a fresh installation with no `local/editacl.conf`, this command failed **mute**
+where `editacl` returned cause, remedy and certificate detail.
+
+**The cause was the route, not the message**, and it is the reason the fatal preflight now
+runs in `prepare()`. Declared `type="reporting"`, a generating command becomes a collation
+point for splunkd, and the chunk carrying a message written during the execute phase is
+lost - measured, with the negative control that establishes it: remove `type` and the
+message comes back, restore it and it goes. The `getinfo` reply is **before** any of that,
+so a diagnostic written there reaches the job whatever the declared nature. Both
+requirements are then held together, which the contract asks for explicitly.
 """
 
 import os
@@ -60,6 +75,7 @@ from acltools.appacl_preflight import (  # noqa: E402
 )
 from acltools.appacl_provenance import ProvenanceReader, resolve_apps_root  # noqa: E402
 from acltools.errors import FatalError, FatalFamilyTableError  # noqa: E402
+from acltools.fatal import fatal_diagnostic  # noqa: E402
 from acltools.preflight import (  # noqa: E402
     AppStateCache,
     check_capability,
@@ -237,8 +253,31 @@ class AppAclInventoryCommand(GeneratingCommand):
             pass
 
     def prepare(self):
+        """Called by the SDK **during the getinfo exchange**, before any row is asked for.
+
+        **This is where the fatal preflight of section 13.1 runs, and that is the whole
+        v4.8 correction.** It used to run at the head of `generate()`, that is during the
+        execute phase - where this command's declared nature makes splunkd collate, and
+        where the chunk carrying a fatal message is lost (measured, friction #435). The
+        `getinfo` reply carries an `inspector` block that splunkd reads before the
+        pipeline exists; a diagnostic written here arrives.
+
+        Nothing else moves: the same checks, in the same order, raising the same errors.
+        What changes is **when** they run, and therefore whether the operator reads them.
+        """
         super(AppAclInventoryCommand, self).prepare()
         self._declare_output_fields()
+        try:
+            self._setup()
+        except FatalError as exc:
+            # Single recording point of the fatal errors of section 13.1: an invalid
+            # parameter, unavailable platform credentials, a session that cannot be
+            # established - the self-signed certificate at the head of the list -, the
+            # missing capability, a real-time search, and the ambiguous or unresolved read
+            # root. The unreadable family table is NOT one of them for this command:
+            # section 13.1 scopes that error to `editappacl` and makes it a degraded mode
+            # here.
+            self._fatal_exit(exc)
 
     # -- wiring ------------------------------------------------------------- #
 
@@ -316,44 +355,78 @@ class AppAclInventoryCommand(GeneratingCommand):
     # -- generation --------------------------------------------------------- #
 
     def generate(self):
+        """The rows, the preflight having already run in `prepare()`.
+
+        The `_setup()` call is kept as a fallback and is a no-op on the nominal path: it
+        runs only if `prepare()` was not called - protocol v1, or a caller of this class
+        that is not the SDK. Removing it would make the command depend on an ordering it
+        does not control.
+        """
         try:
-            self._setup()
+            if self._builder is None:
+                self._setup()
             for row in self._builder.rows(self._params):
                 yield row
         except FatalError as exc:
-            # Single recording point of the fatal errors of section 13.1: the missing
-            # capability, an invalid parameter, a real-time search, unavailable platform
-            # credentials, and the ambiguous or unresolved read root. The unreadable
-            # family table is NOT one of them for this command - section 13.1 scopes that
-            # error to `editappacl`.
             self._fatal_exit(exc)
 
     def _fatal_exit(self, exc):
-        """Interrupt the search **marking the job as failed**.
+        """Interrupt the search **marking the job as failed, and saying why** (PA, 13.2).
 
-        The SDK's `error_exit()` writes the message then raises `SystemExit`, which the
-        SDK turns into a final chunk carrying `finished: true` followed by exit code 1.
-        That chunk tells splunkd the command ended normally, and splunkd then ignores the
-        return code: the job comes out `dispatchState=DONE`, `isFailed=false`, and a
-        scheduler built on that pipeline could not tell an interruption from an empty
-        inventory - which for this command would read as *no application at all*.
+        Two things have to be true at once, and each of them was once obtained at the
+        expense of the other.
 
-        The message is therefore emitted in a **non-final** chunk, then the process exits
-        with a non-zero code without ever sending `finished: true`.
+        **The job must be failed.** The SDK's `error_exit()` writes the message then
+        raises `SystemExit`, which the SDK turns into a final chunk carrying
+        `finished: true` followed by exit code 1. That chunk tells splunkd the command
+        ended normally, and splunkd then ignores the return code: the job comes out
+        `dispatchState=DONE`, `isFailed=false`, and a scheduler built on that pipeline
+        could not tell an interruption from an empty inventory - which for this command
+        would read as *no application at all*. Nothing here therefore ever sends
+        `finished: true`, and the process leaves with a non-zero code.
+
+        **The message must arrive.** Written during the execute phase, it does not:
+        `type="reporting"` makes splunkd collate this generating command, and the chunk is
+        lost (measured, friction #435, with the negative control on the declaration). The
+        `getinfo` reply, on the other hand, carries an `inspector` block that splunkd
+        reads before the pipeline is built - so on the getinfo exchange the message goes
+        out with the command's own configuration, which is what the SDK would have written
+        there anyway.
+
+        The branch is on the **exchange**, not on the error: the same fatal error must
+        come out through whichever door is open when it happens.
         """
         try:
-            self._error(str(exc))
+            self._error(fatal_diagnostic(exc))
             record_writer = getattr(self, "_record_writer", None)
-            write_chunk = getattr(record_writer, "write_chunk", None)
-            if write_chunk is not None:
-                write_chunk(finished=False)
-            else:                                                    # pragma: no cover
-                self.flush()
+            if self._on_getinfo_exchange():
+                # The getinfo reply, carrying the configuration AND the message. It is
+                # the last thing this process writes: no `finished` flag is ever sent,
+                # so splunkd keeps the non-zero exit as the verdict on the job.
+                record_writer.write_metadata(self._configuration)
+            else:
+                write_chunk = getattr(record_writer, "write_chunk", None)
+                if write_chunk is not None:
+                    write_chunk(finished=False)
+                else:                                                # pragma: no cover
+                    self.flush()
         except Exception:                                            # noqa: BLE001
             # No failure of the output must prevent the failure marking: that is the only
             # thing this method has to guarantee.
             pass
         _abort_process(1)
+
+    def _on_getinfo_exchange(self):
+        """Is the command still answering the `getinfo` chunk?
+
+        Read from the metadata the SDK fills in from the chunk it is processing, never
+        from a flag of our own: a state we maintained ourselves would be one more thing to
+        keep in step with the protocol.
+        """
+        metadata = getattr(self, "_metadata", None)
+        if metadata is None or getattr(self, "_record_writer", None) is None:
+            return False
+        return str(getattr(metadata, "action", "") or "") == "getinfo"
 
 
 dispatch(AppAclInventoryCommand, sys.argv, sys.stdin, sys.stdout, __name__)

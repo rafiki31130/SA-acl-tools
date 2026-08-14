@@ -7,7 +7,7 @@ is tested by substitution - no HTTP mock, no socket.
 import json
 
 from .endpoint import encode_namespace_segment
-from .errors import FatalCapabilityError, FatalConfigError
+from .errors import FatalCapabilityError, FatalConfigError, FatalSessionError
 from .model import DEFAULT_FIELD_NAMES, FieldNames, Params
 # Relative import of a **pure predicate**: `preflight` still consumes nothing but a
 # `RestPort` port and stays substitutable without a socket. See `rest.is_tls_failure`.
@@ -223,7 +223,11 @@ def check_capability(rest, capability=REQUIRED_CAPABILITY):
         # "HTTP 0" on an authentication endpoint and looks at permissions, not at the
         # certificate.
         if is_tls_failure(response):
-            raise FatalCapabilityError(
+            # **A session error, and not a capability error** (v4.8 section 13.1). The
+            # call that fails is the capability probe only because it is the first REST
+            # call of the run; what failed is the transport. Raising it as a capability
+            # error sent the operator to the role editor for a certificate problem.
+            raise FatalSessionError(
                 "%s (detail: %s)" % (TLS_REMEDIATION, response.error)
             )
         raise FatalCapabilityError(

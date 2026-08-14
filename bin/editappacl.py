@@ -67,6 +67,7 @@ from acltools.appacl_provenance import ProvenanceReader, resolve_apps_root  # no
 from acltools.binding import build_app_event  # noqa: E402
 from acltools.diag import NullDiagnostics, open_app_diagnostics  # noqa: E402
 from acltools.errors import FatalError  # noqa: E402
+from acltools.fatal import fatal_diagnostic  # noqa: E402
 from acltools.journal import JournalWriter, app_journal_path  # noqa: E402
 from acltools.normalize import serialize_roles  # noqa: E402
 from acltools.preflight import (  # noqa: E402
@@ -658,8 +659,14 @@ class EditAppAclCommand(StreamingCommand):
         `os._exit` short-circuits the `finally` blocks: the cleanup is done by the caller
         **before** this call. The journal loses nothing for all that - each line is
         already flushed on write, and the `intent` line fsynced.
+
+        **The text comes from the shared diagnostic** (v4.8 section 13.2): one function
+        builds it for both contracted commands, so a fatal error can neither lose its
+        remedy nor grow a second wording depending on which command met it. This command
+        is streaming, so its message reaches the job through the ordinary chunk - measured
+        - and the route is the only thing the two commands do not share.
         """
-        message = str(exc)
+        message = fatal_diagnostic(exc)
         try:
             self._error(message)
             record_writer = getattr(self, "_record_writer", None)

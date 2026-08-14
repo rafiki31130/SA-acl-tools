@@ -3,7 +3,11 @@
 import json
 import unittest
 
-from acltools.errors import FatalCapabilityError, FatalConfigError
+from acltools.errors import (
+    FatalCapabilityError,
+    FatalConfigError,
+    FatalSessionError,
+)
 from acltools.model import DEFAULT_FIELD_NAMES
 from acltools.preflight import (
     DEFAULT_MAX_OBJECTS,
@@ -252,12 +256,28 @@ class CapabilityTest(unittest.TestCase):
                 )
             }
         )
-        with self.assertRaises(FatalCapabilityError) as raised:
+        with self.assertRaises(FatalSessionError) as raised:
             check_capability(rest)
         message = str(raised.exception)
         self.assertIn("TLS", message)
         self.assertIn("verify_ssl", message)
         self.assertIn("local/editacl.conf", message)
+
+    def test_a_tls_failure_is_a_session_error_and_not_a_capability_one(self):
+        """**v4.8 section 13.1**, which writes the session line. The call that fails is
+        the capability probe only because it is the first REST call of the run; what
+        failed is the transport. Raised as a capability error, it sent the operator to
+        the role editor for a certificate problem."""
+        rest = FakeRest(
+            json_responses={
+                self.PATH: RestResponse(
+                    0, b"", "transport:SSLError: certificate verify failed"
+                )
+            }
+        )
+        with self.assertRaises(FatalSessionError):
+            check_capability(rest)
+        self.assertFalse(issubclass(FatalSessionError, FatalCapabilityError))
 
     def test_a_non_tls_transport_failure_does_not_mention_a_certificate(self):
         rest = FakeRest(

@@ -9,8 +9,8 @@ block, and six alternative REST sources were probed, six negative. The answer co
 the file, and only from the file - which is why `appaclinventory` is a **command** and not
 a macro, an SPL macro being unable to read one (section 6.1).
 
-**The output is organised in four named levels, and no column mixes two of them.** That is
-the correction of the v4.5 revision, made after the command was first opened in the
+**The output is organised in four named groups, and no column mixes two of them.** That
+is the correction of the v4.5 revision, made after the command was first opened in the
 interface: the columns had been side by side with nothing separating them, and that is
 where the two most serious findings came from.
 
@@ -18,6 +18,11 @@ where the two most serious findings came from.
     platform         what splunkd applies right now          eai:acl.*
     file             what the .meta carries, literally       acl_file_*
     decision         what stands between this stanza and the objects
+
+**They are `groups`, and not `levels`** (v4.8): *level* is the storey of the inheritance
+chain - application, family, object - and this contract uses it for nothing else. The
+third reading trial found the word carrying both senses two paragraphs apart, and a reader
+who has to choose a reading is a reader the table has failed.
 
 **One rule governs the whole table, and v4.7 completes it: no column is ever empty without
 another saying why - nor without something saying whether that emptiness is an absence or
@@ -99,8 +104,8 @@ def stanza_label(name):
 WRITE_EFFECT_OVERWRITE = "overwrite_reversible"
 WRITE_EFFECT_CREATE = "create_irreversible"
 
-#: The token the three `acl_file_*` columns publish when **the key is not written** (v4.7
-#: section 7.4).
+#: The token a column publishes when **it has nothing measured to publish** (v4.7 for the
+#: three `acl_file_*` columns, v4.8 for the two counters).
 #:
 #: The v4.6 arrangement made `acl_perms_source` carry the *absence / empty set* distinction
 #: for the permissions. It worked there and **left the scope unanswered**: an empty
@@ -109,10 +114,17 @@ WRITE_EFFECT_CREATE = "create_irreversible"
 #: themselves**. A column that answers alone beats a pair that has to be interpreted, and
 #: this removes a rule instead of adding one.
 #:
-#: The token cannot be confused with a real value: neither a role name nor a platform
-#: `export` value is written between parentheses. An empty cell in those three columns
-#: therefore means **one thing only** - the key is written and carries no value.
-FILE_VALUE_ABSENT = "(absent)"
+#: The token cannot be confused with a real value: neither a role name, nor a platform
+#: `export` value, nor an integer is written between parentheses. An empty cell in those
+#: three columns therefore means **one thing only** - the key is written and carries no
+#: value.
+#:
+#: **The same token, the same doctrine, extended to the counters in v4.8.** They used to
+#: return `0` when the metadata file could not be read in full: *zero measured* and *zero
+#: for want of being able to count* were the same cell. It is exactly the ambiguity this
+#: token closed for the file columns, on a column that carries a decision - and a lower
+#: bound reassures in the dangerous direction.
+VALUE_ABSENT = "(absent)"
 
 #: Closed domain of `acl_row_reason` (section 7.4) - *why is this row here?*
 #:
@@ -385,7 +397,7 @@ def split_access(literal):
     """
     keys = literal or {}
     if META_ACCESS_KEY not in keys:
-        return FILE_VALUE_ABSENT, FILE_VALUE_ABSENT
+        return VALUE_ABSENT, VALUE_ABSENT
     text = str(keys.get(META_ACCESS_KEY) or "")
     found = {}
     for chunk in _split_top_level(text):
@@ -395,8 +407,8 @@ def split_access(literal):
         key = key.strip().lower()
         if key in ("read", "write"):
             found[key] = _strip_brackets(value)
-    return (found.get("read", FILE_VALUE_ABSENT),
-            found.get("write", FILE_VALUE_ABSENT))
+    return (found.get("read", VALUE_ABSENT),
+            found.get("write", VALUE_ABSENT))
 
 
 def _split_top_level(text):
@@ -441,7 +453,7 @@ def export_of(literal):
     """
     keys = literal or {}
     if META_EXPORT_KEY not in keys:
-        return FILE_VALUE_ABSENT
+        return VALUE_ABSENT
     return str(keys.get(META_EXPORT_KEY) or "").strip()
 
 
@@ -464,6 +476,19 @@ def write_effect_of(perms_source):
     two commands answer the same question with the same rule, and the inventory stops
     obliging the operator to reconstitute it.
 
+    **It is NOT the predicate the two counters use, and v4.8 names the gap rather than
+    leaving it to be deduced** (section 7.4):
+
+        "carries its own permissions"  an `access` key, IN EITHER LAYER
+                                       -> the counters, and `acl_reach`
+        "the write would be undoable"  an `access` key, IN `local.meta`
+                                       -> this column, through `acl_perms_source`
+
+    Two neighbouring predicates, two disjoint questions, and their gap is a fact of the
+    platform: nothing removes a key from a stanza of `local.meta`, while a key sitting in
+    `default.meta` freezes just as hard without any write of this tool having put it
+    there.
+
     **The domain is exhaustive and the column answers on every row**, out-of-table families
     included - it takes no argument about the route, and that is the v4.7 correction: the
     row where the tool guides least is the row that most needs to be told a write there
@@ -472,6 +497,26 @@ def write_effect_of(perms_source):
     if perms_source == LAYER_LOCAL:
         return WRITE_EFFECT_OVERWRITE
     return WRITE_EFFECT_CREATE
+
+
+def counted_or_absent(file_read, count):
+    """A counter publishes an integer **only** when it counted the whole of its scope.
+
+    v4.8 section 7.4, and it is the doctrine of `(absent)` applied to the two counters:
+
+        acl_file_read = ok            the integer counted. `0` is then a MEASURED zero
+        acl_file_read = unreadable    `(absent)` - nothing was read, so nothing was counted
+        acl_file_read = partial:<n>   `(absent)` - lines were skipped, so the count would
+                                      be a lower bound of an unknown gap
+
+    **What this rule is not**: it does not consult the route. The counting is done in the
+    file, through the freeze predicate of section 6.4, and reaches no handler. On a family
+    outside the shipped table, `0` is a measured zero and saying `(absent)` there would be
+    plainly false.
+    """
+    if str(file_read or "") != FILE_READ_OK:
+        return VALUE_ABSENT
+    return int(count or 0)
 
 
 def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_perms):
@@ -495,6 +540,9 @@ def reach_of(stanza_kind, file_read, objects_with_own_perms, families_with_own_p
     rule of the empty cell requires.
     """
     if str(file_read or "") != FILE_READ_OK:
+        # Read first, and that order is load-bearing since v4.8: past this point the two
+        # counters are integers, because a file that is not `ok` has already returned.
+        # The verdict and the counters go absent together, from the same fact.
         return REACH_UNKNOWN
     if int(objects_with_own_perms or 0) > 0:
         return REACH_PARTIAL
@@ -624,8 +672,8 @@ class InventoryBuilder(object):
         perms_source = provenance.perms_source(stanza)
         read_literal, write_literal = split_access(provenance.access_literal(stanza))
         file_read = provenance.read_status()
-        objects = provenance.frozen_count(scope)
-        families = provenance.family_header_count()
+        objects = counted_or_absent(file_read, provenance.frozen_count(scope))
+        families = counted_or_absent(file_read, provenance.family_header_count())
         write_effect = write_effect_of(perms_source)
 
         return {
@@ -647,6 +695,8 @@ class InventoryBuilder(object):
             "acl_objects_with_own_perms": objects,
             "acl_families_with_own_perms": families,
             "acl_reach": reach_of(stanza_kind, file_read, objects, families),
+            # `objects` and `families` are integers here or the verdict above returned
+            # `unknown` first: the two facts have one cause, and one guard.
             "acl_member": self._member,
         }
 

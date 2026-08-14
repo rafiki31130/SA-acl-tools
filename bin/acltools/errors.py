@@ -32,6 +32,20 @@ class FatalCapabilityError(FatalError):
     """Capability `edit_acl_bulk` missing, or execution inside a real-time search."""
 
 
+class FatalSessionError(FatalError):
+    """**The REST session could not be established** (v4.8 section 13.1).
+
+    Written as its own line of section 13.1 in v4.8, and it is the error a **first**
+    deployment meets: a platform with a self-signed certificate, `verify_ssl` at its
+    default of `true`, and every REST call failing at the transport.
+
+    Distinct from `FatalCapabilityError`, which answers *the session works and the account
+    lacks a right*. Confusing the two sends the operator to the role editor for a
+    certificate problem - measured behaviour before v4.8, where the TLS failure was raised
+    as a capability error because that is where the first REST call happens to live.
+    """
+
+
 class FatalMappingError(FatalError):
     """Mapping table unreadable or malformed."""
 

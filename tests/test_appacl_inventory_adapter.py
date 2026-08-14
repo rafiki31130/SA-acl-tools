@@ -360,15 +360,84 @@ class TheFatalErrorsAreTheContractualOnesTest(unittest.TestCase):
         self.assertIn("write_chunk(finished=False)", source)
         self.assertIn("_abort_process(1)", source)
 
-    def test_it_neither_journals_nor_writes_a_diagnostic_file(self):
-        """The command mutates nothing, so there is nothing to journal and no write-ahead
-        line to persist. Section 11.1 gives the journal and the diagnostic to `editappacl`
-        and to it alone; inventing a third pair here would add two monitor stanzas and two
-        sourcetypes that no shipped search reads."""
+    def test_it_opens_no_journal_of_operations(self):
+        """**Half of what the v4.5 test froze, and v4.8 keeps only this half.**
+
+        The command mutates nothing, so there is no intention to record before the act,
+        no state to restore and no write-ahead property to hold. Section 11.1 gives the
+        journal to `editappacl` and to it alone; a third journal set would add a monitor
+        stanza and a sourcetype that no shipped search reads.
+
+        **The other half - the ban on a diagnostic file - is withdrawn in v4.8**, and the
+        test follows: the motive covered the journal and never covered the diagnostic. A
+        test that freezes a lifted ban turns a correction into a suite failure, which is
+        exactly how a contract stops being amendable.
+        """
         source = _source()
-        for forbidden in ("JournalWriter", "app_journal_path", "open_app_diagnostics"):
+        for forbidden in ("JournalWriter", "app_journal_path"):
             with self.subTest(symbol=forbidden):
                 self.assertNotIn(forbidden, source)
+
+
+class TheFatalDiagnosticLeavesByTheDoorThatIsOpenTest(unittest.TestCase):
+    """**The arrival property PA of section 13.2, in what a unit test can hold of it.**
+
+    Measured (friction #435): this command failed **mute** on the commonest fatal error of
+    a first deployment - a self-signed certificate - while `editacl` returned cause,
+    remedy and detail. The message was built correctly and never arrived: declared
+    `type="reporting"`, a generating command becomes a collation point and the chunk
+    carrying it is lost.
+
+    **This test does not prove PA** - only the lab can, and scenario 16 does it with the
+    negative control on the declaration. It holds the prerequisite: the preflight runs on
+    the exchange whose reply reaches the job, and the message leaves through the shared
+    diagnostic. Its failure spares a trip to the lab.
+    """
+
+    def test_the_fatal_preflight_runs_during_the_getinfo_exchange(self):
+        """`prepare()` is called by the SDK while it answers `getinfo`, and the reply to
+        that chunk carries an `inspector` block splunkd reads before the pipeline exists.
+        The preflight therefore lives there, and not at the head of `generate()`."""
+        tree = ast.parse(_source())
+        command = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "AppAclInventoryCommand"
+        )
+        prepare = next(
+            node for node in command.body
+            if isinstance(node, ast.FunctionDef) and node.name == "prepare"
+        )
+        calls = [
+            node.func.attr for node in ast.walk(prepare)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        self.assertIn("_setup", calls,
+                      "the fatal preflight no longer runs on the getinfo exchange - the "
+                      "message would be collated away again (friction #435)")
+        self.assertIn("_fatal_exit", calls,
+                      "a preflight that raises without reaching _fatal_exit leaves the "
+                      "operator the generic message of splunkd, and nothing else")
+
+    def test_the_getinfo_reply_is_the_route_and_it_is_read_from_the_protocol(self):
+        """The branch is on the **exchange**, taken from the metadata the SDK fills in -
+        never from a flag of our own, which would be one more thing to keep in step."""
+        source = _source()
+        self.assertIn("write_metadata(self._configuration)", source)
+        self.assertIn('"getinfo"', source)
+
+    def test_no_finished_flag_is_ever_sent_on_the_fatal_path(self):
+        """Both halves of PA at once: `finished: true` would make splunkd ignore the
+        non-zero exit and report the job DONE - assertion 1 lost to save assertion 2."""
+        source = _source()
+        self.assertNotIn("write_chunk(finished=True)", source)
+        self.assertIn("write_chunk(finished=False)", source)
+
+    def test_the_message_carries_cause_and_remedy_through_the_shared_function(self):
+        source = _source()
+        self.assertIn("from acltools.fatal import fatal_diagnostic", source)
+        self.assertEqual(source.count("fatal_diagnostic(exc)"), 1,
+                         "one call, in the single fatal exit, or the two commands stop "
+                         "answering with one voice")
 
 
 if __name__ == "__main__":                                       # pragma: no cover
