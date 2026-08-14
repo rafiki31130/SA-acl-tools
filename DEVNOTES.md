@@ -3007,6 +3007,59 @@ they freeze the **properties** that made the values wrong: one definition per co
 meaning per token, domains disjoint from the platform's vocabulary, and a document that never
 sends the operator somewhere it did not ship.
 
+### 27.13 A command that fails says why - and the declaration that made one mute
+
+**The measured fact, and it is the reason the v4.8 amendment exists.** On a fresh
+installation with no `local/editacl.conf` - a platform with a self-signed certificate,
+`verify_ssl` at its default of `true`, which is what a first deployment looks like -
+`editacl` failed **returning cause, remedy and the certificate detail**, while
+`appaclinventory` failed **mute**: `isFailed=True` and, for its whole diagnosis, splunkd's
+*"External search command exited unexpectedly with non-zero error code 1"*. That sentence
+is what splunkd writes in the **absence** of any message from the command. Reading it as a
+diagnosis is taking silence for an answer.
+
+**Both halves of the cause are established, and one of them was a clause of the contract.**
+
+The technical half: a generating command **declared `type="reporting"`** becomes a
+collation point for splunkd, and the chunk carrying a message written during the *execute*
+phase is lost. Measured with its negative control, three variants, everything else
+identical:
+
+    route of the preflight   type="reporting"   the message
+    execute (pre-v4.8)       declared           LOST - the generic sentence only
+    execute (pre-v4.8)       removed            arrives, in full
+    getinfo  (v4.8)          declared           arrives, in full
+
+The contractual half: v4.5 refused the inventory both a journal **and** a diagnostic, on
+one motive - the command mutates nothing. The motive holds for the journal, where there is
+no intention to record before an act, and does not hold for the diagnostic: a command that
+mutates nothing fails exactly like any other, and its operator needs exactly as much to
+know why. v4.8 splits the two notions and lifts only the second.
+
+**What was done, and why not something else.** The declaration is **kept** - it corrects a
+measured defect of its own (Splunk Web opening the command on the Events tab, section
+27.11), and the contract asks for both properties together or not at all. So the fatal
+preflight moved from `generate()` to `prepare()`, that is from the execute phase to the
+**getinfo exchange**, whose reply carries an `inspector` block splunkd reads before the
+pipeline - and therefore before any collation - exists. The message goes out with the
+command's own configuration, which the SDK writes there anyway. Nothing sends
+`finished: true` on that path: that flag would make splunkd ignore the non-zero exit and
+report the job DONE, trading assertion 1 of the property for assertion 2.
+
+**One function builds the text for both commands** (`bin/acltools/fatal.py`): a cause
+segment, a separator, a remedy segment. The remedy is keyed by fatal class and the class
+list is **derived from the taxonomy**, so a fatal error added without a remedy fails the
+suite rather than reaching an operator with half a message. The route is the only thing the
+two commands do not share, and it is the only thing that genuinely differs.
+
+> **Non-regression rule, and read it before touching the decorator.** **Any change to the
+> declared nature of a command reopens scenario 16**: the value of `type`, the `generating`
+> character, the protocol version, a version bump of the vendored SDK, a move away from
+> `chunked`. The motive is the fact itself - `type="reporting"` was added to correct a real
+> defect, correctly, and it **broke the fatal-error path without a single test or gate
+> noticing**. A unit test cannot see it: the message is built correctly and never arrives.
+> Only a job, on an instance, can tell.
+
 ---
 
 ## Reading order for a cold start
