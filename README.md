@@ -14,8 +14,9 @@ apart:
 Read first, write second: `appaclinventory` is the command you run before either of the
 other two.
 
-It also ships an inventory macro, five rollback and reporting macros, six saved searches
-and a run monitoring view. Driving use case: decommissioning legacy roles, by
+It also ships **eleven macros** and **six saved searches**, named one by one under
+[What is shipped, named one by one](#what-is-shipped-named-one-by-one), plus a run
+monitoring view. Driving use case: decommissioning legacy roles, by
 **substitution** with the roles of a new entitlement structure, or by **deprecation**
 (renaming to `deprecated_<name>`).
 
@@ -28,7 +29,8 @@ and a run monitoring view. Driving use case: decommissioning legacy roles, by
 > the command refuses it unless you pass `allow_create=true`, and why `appaclinventory`
 > tells you which of the two you are about to do **before** you do it. The write-ahead
 > journal and the rollback macros are the only safety net there is: read
-> [Rollback](#the-other-shipped-objects) **before** the first real write.
+> [The other shipped objects](#the-other-shipped-objects) **before** the first real
+> write - the rollback macros are described there.
 
 > ### Order of use, and it is not a preference
 >
@@ -95,24 +97,30 @@ produces exactly one output event.
 
 ## Installation
 
-Build the archive from a **git reference**, never from the working tree. `tests/`,
-`tools/` and development notes are left out by `.gitattributes`; `bin/lib/` is included, so
-the archive deploys with no network access. Anchor any check of its content on
+Build the archive from a **git reference**, never from the working tree. `tests/` and
+the development notes are left out by `.gitattributes`; `bin/lib/` is included, so the
+archive deploys with no network access. **Of `tools/`, exactly two files ship** - the two
+re-validation procedures of step 5, which the app cannot honestly call a prerequisite while
+putting them out of your reach. Anchor any check of the archive's content on
 `^SA-acl-tools/`: the archive prefix itself contains the substring `tools/`.
 
 ```sh
 git archive --format=tar.gz --prefix=SA-acl-tools/ \
     -o SA-acl-tools-$(git rev-parse --short HEAD).tar.gz HEAD
-tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/(tests|tools)/'   # empty
+tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/tests/'           # empty
+tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/tools/'
+# SA-acl-tools/tools/revalidate_app_acl_mapping.py
+# SA-acl-tools/tools/revalidate_mapping.py
 ```
 
 1. Drop `SA-acl-tools/` under `$SPLUNK_HOME/etc/apps/` of the **search head** - never on
    an indexer, the command is declared `local = true`.
 2. Restart `splunkd`. Without it the three capabilities do not enter the repository and
    cannot be granted, and the search assistant ignores the three commands.
-3. Check the vendored SDK: `sh tools/verify_vendor.sh $SPLUNK_HOME/bin/python3`. `tools/`
-   is not in the archive; fetch it from the repository into
-   `$SPLUNK_HOME/etc/apps/SA-acl-tools/tools/`, where it finds the app as installed.
+3. Check the vendored SDK, **from the repository**: `sh tools/verify_vendor.sh
+   $SPLUNK_HOME/bin/python3`. This script is **not** one of the two that ship - it is a
+   maintenance tool, not a prerequisite - so run it from a clone, pointing it at the
+   installed app.
 4. **Grant the three capabilities.** `default/authorize.conf` declares
    `edit_acl_bulk`, `edit_app_acl_bulk` and `list_app_acl`, and grants all three to the
    `admin` role, so the tool works as deployed for accounts that already hold
@@ -157,6 +165,45 @@ using `$SPLUNK_HOME/etc/auth/cacert.pem` when present. Failing that, create
 every run. That file is not in the archive, so an upgrade cannot overwrite it.
 
 ---
+
+## When a command stops: where the reason appears
+
+**A command that stops says why, and it says it in the job.** Open the job - the message
+bar of the search, or `Job > Inspect` - and you will find a line prefixed by the name of
+the command that stopped: `editacl:`, `appaclinventory:` or `editappacl:`. It carries **the
+cause** and **the remedy**, in that order, separated by ` -- remedy: `.
+
+**This holds for all three commands and for every fatal error**, whatever the command's
+mode. `appaclinventory` opens a pipeline and the two others transform one; the message
+arrives all the same.
+
+**Do not go looking in a log file for the reason a run stopped.** The journal of
+`editacl`/`editappacl` records what those commands *did*, not why one of them refused to
+start; the inventory writes no journal at all. The job is where the answer is.
+
+> ### The first error of a fresh installation, and its remedy
+>
+> On a platform whose `splunkd` carries a **self-signed certificate**, the first run of any
+> of the three commands fails, because certificate verification is on by default. The job
+> then reads, in substance:
+>
+> ```
+> appaclinventory: TLS verification of the splunkd certificate failed. On a platform
+> with a self-signed certificate: create the file local/editacl.conf of the SA-acl-tools
+> app with [editacl] then verify_ssl = false, or install the platform CA in
+> $SPLUNK_HOME/etc/auth/cacert.pem. (detail: ...) -- remedy: check that splunkd answers
+> on its management port, that the session is still valid, and - on a platform with a
+> self-signed certificate - set verify_ssl = false under [editacl] in local/editacl.conf
+> of this app, or install the platform CA in $SPLUNK_HOME/etc/auth/cacert.pem.
+> ```
+>
+> Do one of the two things it names, and run the search again. **The setting is shared by
+> the three commands**, deliberately: the certificate describes the platform, not a command.
+>
+> If a job comes out failed carrying **only** *"External search command exited unexpectedly
+> with non-zero error code 1"*, that is not a diagnosis - it is what splunkd writes when the
+> command said nothing. Report it: it is a defect of this app, and the answer is not
+> somewhere else.
 
 ## The command
 
@@ -356,11 +403,15 @@ macro names, which resolve differently; they never appear in a command name here
 ## What the inventory gives you, column by column
 
 **Read this table instead of the code.** Every column below answers one question, and the
-table says which. Nineteen columns, in the order they come out.
+table says which. **Nineteen columns, listed in the order they come out** - the order of
+the table is the order of the output, and a test compares the two rather than trusting
+either.
 
-**Four levels, and no column mixes two.** That is what makes the table readable: some
+**Four groups, and no column mixes two.** That is what makes the table readable: some
 columns say what the **file** carries, some what the **platform** applies, some what
-**stands between** the two, and some identify the row.
+**stands between** the two, and some identify the row. They are called *groups* and not
+*levels* on purpose: in this app, a **level** is a storey of the inheritance chain -
+application, family, object - and nothing else.
 
 > **Start with `acl_write_effect`.** It is the column that tells you whether the write you
 > are about to launch can be undone. Everything else describes a state; that one describes
@@ -368,29 +419,53 @@ columns say what the **file** carries, some what the **platform** applies, some 
 
 > **No column is ever empty without another saying why - nor without saying whether the
 > empty means "absent" or "empty set".** If the three `eai:acl.*` cells are blank,
-> `acl_effective_status` says what stopped the read. The three `acl_file_*` cells say their
-> own absence: a key that is **not written** comes out as `(absent)`, so a blank there means
-> one thing only - the key is written and holds no value. Those two states are opposites,
-> and they decide different writes.
+> `acl_effective_status` says what stopped the read. The three `acl_file_*` cells and the
+> two counters say their own absence: what is **not written**, or **not counted**, comes out
+> as `(absent)`. A blank in a file cell therefore means one thing only - the key is written
+> and holds no value.
+
+| # | Column | Group | The question it answers | Values |
+|---|---|---|---|---|
+| 1 | `eai:acl.app` | identification | Which application | a name |
+| 2 | `acl_stanza_kind` | identification | Is this the application default, or one family | `app_default`, `family_default` |
+| 3 | `acl_stanza` | identification | Which stanza, written as the file writes it, brackets included | `[]`, `[views]`, `[commands]` |
+| 4 | `acl_handler` | tool | Which REST path the tool reaches this **family** by, **by name** | a path, or empty |
+| 5 | `eai:acl.perms.read` | platform | Which roles read, today | roles, comma-separated |
+| 6 | `eai:acl.perms.write` | platform | Which roles write, today | roles, comma-separated |
+| 7 | `eai:acl.sharing` | platform | Which scope applies, today | `app`, `global`, `user` |
+| 8 | `acl_effective_status` | platform | Were those three **read**, and if not why | `ok`, `app_disabled`, `unreadable` |
+| 9 | `acl_row_reason` | identification | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
+| 10 | `acl_write_effect` | decision | **What an `editappacl` write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible` |
+| 11 | `acl_perms_source` | file | **Where this stanza's permissions are written** - so which layer the three cells below quote, and what an `editappacl` write would do | `local`, `default`, `nowhere` |
+| 12 | `acl_file_perms_read` | file | What that stanza writes for reading | roles, empty, or `(absent)` |
+| 13 | `acl_file_perms_write` | file | What it writes for writing | roles, empty, or `(absent)` |
+| 14 | `acl_file_export` | file | What the stanza writes for `export`, literally | any text splunkd writes there - `none`, `system`, `global` - or empty, or `(absent)` |
+| 15 | `acl_file_read` | file | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
+| 16 | `acl_objects_with_own_perms` | decision | How many objects carry **their own permissions** and therefore escape this stanza | a count, or `(absent)` |
+| 17 | `acl_families_with_own_perms` | decision | How many families of this application carry their own permissions and therefore escape `[]` | a count, or `(absent)` |
+| 18 | `acl_reach` | decision | Does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
+| 19 | `acl_member` | context | Which member the metadata was read on | a name, or `unknown` |
+
+**`acl_file_export` has an open domain, and that is a fact about Splunk, not a gap here**:
+the cell carries the text of the `export` key **as the file writes it**, whatever splunkd
+chose to write. `none`, `system` and `global` are what you will see in practice. The two
+reserved tokens are the ones this app adds: `(absent)` for a key that is not written, and a
+blank for a key written with no value.
 
 ### Identification - which stanza is this row about, and why is it here
 
-| Column | The question it answers | Values |
-|---|---|---|
-| `eai:acl.app` | Which application | a name |
-| `acl_stanza_kind` | Is this the application default, or one family | `app_default`, `family_default` |
-| `acl_stanza` | Which stanza, written as the file writes it, brackets included | `[]`, `[views]`, `[commands]` |
-| `acl_handler` | Which REST path the tool reaches this **family** by, **by name** | a path, or empty |
-| `acl_row_reason` | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
-
-**An empty `acl_handler` means one thing, and one thing only: this family is not in the
-table shipped with the tool.** It does not mean the family cannot be written to - the table
-bounds resolution **by name**, never the write perimeter, and passing `acl_handler=` yourself
-addresses any handler (see [the `acl_handler` door](#acl_handler-addresses-any-handler-and-that-door-is-deliberate)).
+**An empty `acl_handler` on a `family_default` row means one thing, and one thing only:
+this family is not in the table shipped with the tool.** It does not mean the family cannot
+be written to - the table bounds resolution **by name**, never the write perimeter, and
+passing `acl_handler=` yourself addresses any handler (see
+[`acl_handler` addresses any handler, and that door is deliberate](#acl_handler-addresses-any-handler-and-that-door-is-deliberate)).
 The rest of the row keeps answering: `acl_write_effect` still says what a write there would
-do, and `acl_reach` still says how far the stanza carries. Application rows describe no
-family and carry no handler at all: `[]` is addressed by the application name alone, and
-`acl_stanza_kind` says which kind of row you are on.
+do, `acl_reach` still says how far the stanza carries, and the two counters still count.
+
+**On an `app_default` row the column does not apply at all**, and it is empty for that
+reason: `[]` is addressed by the application name alone and needs no handler. Read
+`acl_stanza_kind` first - it says which of the two kinds of row you are on, and therefore
+which of these two readings of an empty handler is the right one.
 
 `acl_row_reason` is the column to read first when a row surprises you. `stanza_exists` means
 the stanza is written in a metadata file. **`objects_exist` means it is not** - the family is
@@ -399,25 +474,11 @@ family worth showing. `requested` means you asked for it with `families=`.
 
 ### Platform - what splunkd applies right now
 
-| Column | The question it answers | Values |
-|---|---|---|
-| `eai:acl.perms.read` | Which roles read, today | roles, comma-separated |
-| `eai:acl.perms.write` | Which roles write, today | roles, comma-separated |
-| `eai:acl.sharing` | Which scope applies, today | `app`, `global`, `user` |
-| `acl_effective_status` | Were those three **read**, and if not why | `ok`, `app_disabled`, `unreadable` |
-
 `acl_effective_status` answers one question only: could the platform be read. `unreadable`
 covers its two causes, and **`acl_handler` tells them apart** - **empty**, there is no route
 to this family by name; **filled**, the call was made and it failed.
 
 ### Decision - what a write would do, and what stands in its way
-
-| Column | The question it answers | Values |
-|---|---|---|
-| `acl_write_effect` | **What an `editappacl` write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible` |
-| `acl_objects_with_own_perms` | How many objects carry **their own permissions** and therefore escape this stanza | a count |
-| `acl_families_with_own_perms` | How many families of this application carry their own permissions and therefore escape `[]` | a count |
-| `acl_reach` | Does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
 
 **`acl_write_effect` is the safety column**, and it answers on **every** row - two values,
 no third.
@@ -441,23 +502,33 @@ It reads `unknown` for one reason only - the metadata could not be read in full 
 escapes it: nothing stands in the way, and the missing route is a fact about the tool that
 `acl_handler` states on its own.
 
+**The two counters are counted in the file, and the route has nothing to do with it.** They
+come from the `.meta` files, through one predicate, and reach no REST handler: on a family
+the shipped table does not know, a `0` is a **measured zero** exactly as it is anywhere else.
+
+> **`0` and `(absent)` are not the same answer, and the difference decides.** `0` means
+> *counted, and nothing escapes this stanza*. `(absent)` means *the count could not be made*
+> - the metadata file was unreadable, or was read with lines skipped, which `acl_file_read`
+> says on the same row. A count that cannot be complete is not published as a small number:
+> a lower bound reassures in the dangerous direction.
+
+**"Carries its own permissions" means one thing here: the stanza writes an `access` key** -
+in `local.meta` or in `default.meta`, it makes no difference at this question. Splunk writes
+a stanza for every object you create or edit, carrying `owner`, `version` and `modtime` and
+nothing else; such an object still inherits, and is **not** counted.
+
+> **That is not the predicate `acl_write_effect` uses, and the two are neighbours.** The
+> counters ask *what escapes this stanza* - an `access` key **in either layer**. The write
+> effect asks *would a write here be undoable* - an `access` key **in `local.meta`**. A
+> family frozen in `default.meta` alone therefore counts as carrying its own permissions
+> **and** would take an irreversible write. Both answers are right; they answer different
+> questions.
+
 The scope of `acl_objects_with_own_perms` is the scope of the row: the family on a family
 row, the whole application on an application row. `acl_families_with_own_perms` is an
 application fact and is repeated on every row of that application - do not sum it.
 
-**An object only counts if its stanza actually carries permissions.** Splunk writes a stanza
-for every object you create or edit, carrying `owner`, `version` and `modtime` and nothing
-else; such an object still inherits, and is not counted.
-
 ### File - what the metadata carries, literally
-
-| Column | The question it answers | Values |
-|---|---|---|
-| `acl_perms_source` | **Where this stanza's permissions are written** - so which layer the two cells below quote, and what an `editappacl` write would do | `local`, `default`, `nowhere` |
-| `acl_file_perms_read` | What that stanza writes for reading | roles, empty, or `(absent)` |
-| `acl_file_perms_write` | What it writes for writing | roles, empty, or `(absent)` |
-| `acl_file_export` | What the stanza writes for `export` | the text, empty, or `(absent)` |
-| `acl_file_read` | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
 
 `acl_perms_source` is decided by one thing: whether an `access` key exists, and in which
 layer. `nowhere` means **no `access` key anywhere** - the stanza may still exist and carry an
@@ -485,18 +556,14 @@ say where the effective permissions come from: answering that would mean replayi
 own inheritance resolution, which this tool deliberately never does.
 
 `acl_file_read` is about the **files**, not the stanza. `partial:<n>` means `n` lines were
-skipped while parsing, so the counts may understate; `unreadable` means no count on this row
-can be trusted.
+skipped while parsing, so the two counters come out `(absent)` rather than understated;
+`unreadable` means nothing on this row was read from the file at all.
 
 ### Context
 
-| Column | The question it answers | Values |
-|---|---|---|
-| `acl_member` | Which member the metadata was read on | a name, or `unknown` |
-
-`unknown` means the platform would not give its own name. Run the inventory on each member
-and compare the tables: a difference is a metadata replication gap, which no configuration
-audit sees.
+`acl_member` says which member the metadata was read on, and `unknown` means the platform
+would not give its own name. Run the inventory on each member and compare the tables: a
+difference is a metadata replication gap, which no configuration audit sees.
 
 ### Which rows come out
 
@@ -768,6 +835,40 @@ already written come out `noop` through idempotence, so there is no double write
 ```
 
 ---
+
+## What is shipped, named one by one
+
+**Eleven macros**, and this list is exhaustive - `macros.conf` declares these names and no
+others. The arity is written as Splunk writes it: `(1)` takes one argument.
+
+| Macro | What it gives you | Level |
+|---|---|---|
+| `acl_inventory` | The object inventory the `editacl` pipelines are built on. Twenty-seven arities, one per combination of filters | object |
+| `acl_inventory_base` | The base search `acl_inventory` delegates to. **Internal**: you have no reason to call it yourself | object |
+| `acl_journal_source` | The source of the `editacl` journal, index and sourcetype in one place | object |
+| `acl_diag_source` | The source of the `editacl` diagnostic | object |
+| `editacl_rollback(1)` | Rollback set of an `editacl` run, as a **preview**. Writes nothing | object |
+| `editacl_rollback_apply(1)` | The same set followed by the `editacl` invocation. It **writes** | object |
+| `app_acl_journal_source` | The source of the `editappacl` journal | application |
+| `app_acl_diag_source` | The source of the `editappacl` diagnostic | application |
+| `app_acl_rollback(1)` | Rollback set of an `editappacl` run, as a **preview**. Writes nothing | application |
+| `app_acl_rollback_apply(1)` | The same set followed by the `editappacl` invocation. It **writes** | application |
+| `app_acl_irreversible(1)` | The written targets the rollback does **not** cover | application |
+
+**Six saved searches**, none of them scheduled:
+
+| Saved search | What it answers |
+|---|---|
+| `ACL - inventory by role` | Which objects a role reads or writes today |
+| `ACL - references to decommissioned roles` | Where a role being retired is still named |
+| `ACL - eventtype / derived object divergences` | Which derived objects no longer match their carrier |
+| `ACL - change journal` | The indexed history by `sid`, status, application and type |
+| `App ACL - irreversible writes` | The creations per run, with their target and estimated impact |
+| `App ACL - governability of the estate` | The inventory output ventilated by `acl_reach` |
+
+**The counts above are the counts of the lists above**, and a test compares both to what
+`macros.conf` and `savedsearches.conf` actually declare. A document that miscounts what it
+ships cannot be believed on what it explains.
 
 ## Before you use it
 
