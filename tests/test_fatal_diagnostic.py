@@ -45,9 +45,9 @@ def _source(name):
 
 
 class TheErrorListComesFromTheCoreTest(unittest.TestCase):
-    """Section 14.2: *l'énumération des erreurs est dérivée du cœur, jamais recopiée dans
-    le test*. A class added to the taxonomy without a remedy must fail here, not reach an
-    operator with half a message."""
+    """Section 14.2 asks for the error list to be **derived from the core** and never
+    recopied into the test. A class added to the taxonomy without a remedy must fail here,
+    rather than reach an operator with half a message."""
 
     def test_the_enumeration_walks_the_taxonomy_rather_than_listing_it(self):
         classes = fatal_error_classes()
@@ -120,8 +120,9 @@ class TheMessageCarriesBothSegmentsTest(unittest.TestCase):
 
 
 class TheTwoCommandsStopThroughOneFunctionTest(unittest.TestCase):
-    """Section 14.2: *l'arrêt passe par une seule fonction partagée*, read on the syntax
-    tree. Two wordings of one rule are two answers to a question both commands answer."""
+    """Section 14.2 asks that the stop pass through **one shared function**, read on the
+    syntax tree. Two wordings of one rule are two answers to a question both commands must
+    answer identically."""
 
     def test_both_adapters_import_the_shared_diagnostic(self):
         for name in CONTRACTED_ADAPTERS:

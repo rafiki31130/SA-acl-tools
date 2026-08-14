@@ -1603,8 +1603,8 @@ class ACounterNeverReturnsANumberItDidNotCountTest(unittest.TestCase):
 
 
 class TwoPredicatesNeverConfusedTest(unittest.TestCase):
-    """**v4.8 section 7.4** - *« porter ses propres permissions »* has one sense, and it
-    is not the sense of *« l'écriture serait défaisable »*.
+    """**v4.8 section 7.4** - "carries its own permissions" has one sense, and it is not
+    the sense of "the write would be undoable".
 
         carries its own permissions   an `access` key, IN EITHER LAYER
                                       -> the two counters, and `acl_reach`
