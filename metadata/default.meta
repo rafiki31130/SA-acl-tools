@@ -124,3 +124,14 @@ export = none
 [views/editacl_runs]
 access = read : [ editacl_auditor ], write : [ admin ]
 export = system
+
+# The application-level audit view, declared exactly like its neighbour and for the same
+# reasons. The read role is **reused, not duplicated**: it is the same person who audits
+# the two levels, and a second role attributed to nobody would add a line to the role
+# management chain without opening anything. The name is now narrower than what it
+# governs - stated rather than fixed, since renaming a role breaks every grant an
+# operator has already made.
+
+[views/appacl_runs]
+access = read : [ editacl_auditor ], write : [ admin ]
+export = system

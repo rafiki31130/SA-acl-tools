@@ -1356,6 +1356,12 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
         "lookups": ("system", "read : [ * ], write : [ admin ]"),
         "savedsearches": ("none", "read : [ * ], write : [ admin ]"),
         "views/%s" % VIEW_NAME: ("system", "read : [ %s ], write : [ admin ]" % ROLE_NAME),
+        # The application-level audit view, declared like this one and **reusing its read
+        # role**: the same person audits the two levels, and a second role attributed to
+        # nobody would add a line to the role management chain without opening anything.
+        # Its own controls live in `tests/test_appacl_dashboard.py`; what is frozen here
+        # is that the metadata of this app declares these stanzas and no others.
+        "views/appacl_runs": ("system", "read : [ %s ], write : [ admin ]" % ROLE_NAME),
     }
 
     def test_the_metadata_declares_exactly_this_and_nothing_more(self):

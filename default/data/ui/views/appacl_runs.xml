@@ -1,0 +1,469 @@
+<form version="1.1">
+  <label>App ACL - write audit</label>
+  <description>What was changed at application level, by whom, when - and what will never be undone. Read the entitlement check first: an empty view does not prove that no write took place.</description>
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="tr">
+      <label>Time range</label>
+      <default>
+        <earliest>-7d@d</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <!-- No <default> here, and it is normative. An empty <default> DEFINES the token to
+         the empty string, and a token defined to the empty string SATISFIES depends: the
+         five detail panels would run at first load, filtered on sid="". With no default
+         the token stays undefined, and the <change> below closes them again when the
+         operator empties the field. -->
+    <input type="text" token="sid_in" searchWhenChanged="true">
+      <label>Run (sid)</label>
+      <change>
+        <condition match="$value$ == &quot;&quot;">
+          <unset token="sid"/>
+        </condition>
+        <condition>
+          <set token="sid">$value$</set>
+        </condition>
+      </change>
+    </input>
+  </fieldset>
+
+  <row>
+    <!-- ROW 0 - CAN I SEE ANYTHING AT ALL?
+
+         The only panel of this view allowed to name an index or a sourcetype literally,
+         and it must: it asks whether the journal is readable at all, which cannot be
+         asked through a macro that presumes it is.
+
+         FOUR states, and the fourth is the one that matters. A guard rail that only
+         knows how to say "nothing here" misses the failure that costs the most:
+         MEASURED on the neighbouring project, redirecting the journal in
+         `local/inputs.conf` WITHOUT overriding `local/macros.conf` left the panel
+         answering OK - lines older than the redirection were still in reach - while the
+         run list silently stopped at the date of the switch. A view that displays stale
+         figures and declares itself healthy asks no question at all. With four index
+         configuration points in this app, that case is more likely, not less.
+
+         THE SOURCETYPE OF THIS PROBE IS NORMATIVE: `editappacl:journal`, never a
+         wildcard, never the neighbouring `editacl:journal`. The app ships four
+         sourcetypes; a probe written on the wrong one would answer OK while THIS view is
+         blind - a guard rail that reassures about the wrong object is worse than none.
+
+         Named exemption to the sixty-character rule: the five case() strings exceed it.
+         Deliberate - the guard rail must direct an action, not merely qualify a state. -->
+    <panel>
+      <title>Entitlement check</title>
+      <table>
+        <search>
+          <query>`app_acl_journal_source`
+| stats count AS journal_events, max(_time) AS last_journal_event, values(index) AS journal_read_from
+| appendcols
+    [| eventcount summarize=false index=* index=_*
+     | stats count AS searchable_index_count, values(index) AS searchable_indexes]
+| appendcols
+    [| tstats count AS ingested_events WHERE (index=* OR index=_*) sourcetype=editappacl:journal BY index
+     | stats sum(ingested_events) AS ingested_events, values(index) AS journal_found_in]
+| eval searchable_index_count = coalesce(searchable_index_count, 0)
+| eval journal_events = coalesce(journal_events, 0)
+| eval ingested_events = coalesce(ingested_events, 0)
+| eval unread_events = ingested_events - journal_events
+| eval read_index_count = coalesce(mvcount(journal_read_from), 0)
+| eval found_index_count = coalesce(mvcount(journal_found_in), 0)
+| eval state = case(
+      searchable_index_count == 0,
+        "NO SEARCHABLE INDEX - your role has no index entitlement",
+      unread_events &gt; 0 OR found_index_count &gt; read_index_count,
+        "JOURNAL LINES SIT OUTSIDE WHAT THIS VIEW READS - the index was redirected in inputs.conf without overriding the source macro",
+      journal_events == 0,
+        "NO EVENT IN THIS WINDOW - no run recorded, or this journal lands where you cannot search",
+      1==1,
+        "OK - the application-level journal is readable and carries events in this window")
+| table state, journal_events, unread_events, journal_read_from, journal_found_in, searchable_index_count, searchable_indexes</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">1</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <!-- ROW 1 - WHAT WILL NEVER BE UNDONE. Permanent, independent of any selection, and
+         placed BEFORE the run list: this is the only information in the view whose
+         window for acting is already closed when it is read.
+
+         THE PANEL INVOKES THE SHIPPED MACRO, it does not restate its predicate. Two
+         definitions of one notion always drift - the defect this project paid for on
+         2026-08-10, where a safety net and a view did not pair on the same key.
+
+         It does not judge. An irreversible creation can be perfectly deliberate; it is
+         even the only way to govern an application for the first time. The panel counts
+         and names.
+
+         When there is nothing, it shows an empty table under its title. It does not
+         disappear: an absent irreversible panel reads as "no risk" just as well as
+         "broken panel". -->
+    <panel>
+      <title>Irreversible writes in this window</title>
+      <html>
+        <p>These writes are <b>not</b> covered by <tt>app_acl_rollback</tt>, by construction. <tt>why</tt> tells the two cases apart: permissions were materialised where none existed, or the provenance could not be established at write time. Click a row to inspect the run that produced it.</p>
+      </html>
+      <table>
+        <search>
+          <query>`app_acl_irreversible(*)`
+| eval created_value = "read=[" . coalesce('acl_after_perms_read',"") . "] write=[" . coalesce('acl_after_perms_write',"") . "] sharing=" . coalesce('acl_after_sharing',"")
+| eval masked_value = "read=[" . coalesce('acl_inherited_perms_read',"") . "] write=[" . coalesce('acl_inherited_perms_write',"") . "] sharing=" . coalesce('acl_inherited_sharing',"")
+| eval target = coalesce('eai:acl.app',"(no app)") . "  " . if(acl_stanza_kind=="app_default", "[]", "[" . coalesce(acl_stanza,"?") . "]")
+| eval why = if(acl_reversible=="false", "permissions were materialised", "provenance was unreadable")
+| table _time, sid, user, target, why, created_value, masked_value, acl_impacted_estimate, endpoint
+| sort - _time</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">row</option>
+        <option name="count">20</option>
+        <drilldown>
+          <set token="sid">$row.sid$</set>
+          <set token="form.sid_in">$row.sid$</set>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <!-- ROW 2 - WHICH RUNS TOOK PLACE.
+
+         Every count here is a count of TARGETS - generic stanzas - and the column names
+         say so. The word "objects" appears on one column only, the estimate, and always
+         next to the word "estimate": it is the one quantity of this view that speaks of
+         knowledge objects, and the one that is not measured.
+
+         No dc(endpoint) anywhere. A target presented twice produces TWO outcome lines
+         and ONE write - the contract refuses the duplicate - so counting distinct
+         endpoints and counting lines gives two different numbers, both right, under
+         names that do not distinguish them. The view counts lines; the duplicate shows
+         up in plain sight in the refusals panel. -->
+    <panel>
+      <title>Runs</title>
+      <html>
+        <p>Click a row to inspect it. <tt>targets processed</tt> counts <b>generic stanzas</b>, never knowledge objects. <tt>run_state</tt> comes from the end-of-run line: its absence is the signal of an interruption, not a gap.</p>
+      </html>
+      <table>
+        <search>
+          <query>`app_acl_journal_source`
+| stats
+    min(_time) AS started,
+    max(_time) AS ended,
+    values(user) AS user,
+    values(dryrun) AS mode,
+    count(eval(phase=="outcome")) AS targets_processed,
+    count(eval(phase=="outcome" AND (status=="updated" OR status=="created"))) AS stanzas_written,
+    count(eval(phase=="outcome" AND status=="created")) AS irreversible,
+    count(eval(phase=="outcome" AND (status=="noop" OR status=="noop_inherited"))) AS noop,
+    count(eval(phase=="outcome" AND (status=="rejected" OR status=="not_found" OR status=="forbidden" OR status=="invalid_role" OR status=="skipped_ceiling" OR status=="skipped_impact_ceiling"))) AS refused,
+    count(eval(phase=="outcome" AND status=="error")) AS errors,
+    count(eval(phase=="summary")) AS summary_lines,
+    dc(app) AS apps,
+    sum(eval(if(phase=="intent", impacted_estimate, 0))) AS objects_moved_estimate
+  BY sid
+| eval run_state = case(
+      summary_lines == 1, "completed",
+      summary_lines == 0, "INTERRUPTED - no end-of-run line",
+      1==1, "ANOMALY - several end-of-run lines")
+| eval mode = if(mvcount(mode) &gt; 1, "MIXED - anomaly", if(mode=="true", "simulation", "real"))
+| table started, sid, user, mode, run_state, targets_processed, stanzas_written, irreversible, noop, refused, errors, apps, objects_moved_estimate
+| sort - started
+| convert ctime(started)</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">row</option>
+        <option name="count">20</option>
+        <drilldown>
+          <set token="sid">$row.sid$</set>
+          <set token="form.sid_in">$row.sid$</set>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <!-- ROW 3 - runs that left no journal, beside the note on the estimate.
+
+         The two populations are read by a MULTISEARCH with one branch per source macro,
+         never by an OR. MEASURED on the previous project, same instance, same window:
+         the parenthesised OR form returned 9 diagnostic lines and 1 403 journal lines
+         where the multisearch returned 2 268 and 17 770. The panel then listed nine runs
+         that HAD written a complete journal as having written none - and gave each of
+         them a cause. An empty panel is noticed; a panel that diagnoses wrongly with the
+         authority of a dashboard is not.
+
+         The diagnostic fields are re-extracted by `rex` here, on purpose: search-time
+         extractions only apply in the namespaces where props is exported, so a view that
+         relied on them would lose its fields depending on the app context, without an
+         error. `\S+` anchors the sid - a `.+` absorbs the sentence that follows and
+         produces two rows for one run, the usable one carrying the wrong cause.
+
+         `no_write_recorded` is the value that means NOTHING WAS ESTABLISHED, never a
+         default diagnosis, and the last two columns are the evidence the cause derives
+         from: a cause the reader cannot check is a verdict. -->
+    <panel>
+      <title>Runs started with no journal line</title>
+      <html>
+        <p>Present in the diagnostic, absent from the journal. <tt>journal_disabled</tt>: the run was launched with <tt>journal=false</tt>. <tt>journal_not_openable</tt>: the file could not be opened. <tt>fatal_error</tt>: the run stopped before writing. <tt>no_write_recorded</tt>: <b>nothing was established</b> - the two columns beside it are the evidence, and they are empty here.</p>
+        <p>Only one direction is a signal. A run may appear in the journal and not in the diagnostic: that file is rotated, and it may not have opened.</p>
+      </html>
+      <table>
+        <search>
+          <query>| multisearch
+    [search `app_acl_journal_source`]
+    [search `app_acl_diag_source`]
+| eval diag_raw = if(sourcetype=="editappacl:diag", _raw, null())
+| rex field=diag_raw "^\S+\s+(?&lt;diag_level&gt;[A-Z]+)\s+sid=(?&lt;diag_sid&gt;\S+)"
+| rex field=diag_raw "\bversion=\S+\s+user=(?&lt;diag_user&gt;\S+)\s"
+| rex field=diag_raw "\bjournal=(?&lt;diag_journal&gt;\S+)\s"
+| rex field=diag_raw "(?&lt;diag_journal_file&gt;editappacl_journal\S*\.log)"
+| eval sid = coalesce(diag_sid, sid)
+| stats count(eval(sourcetype=="editappacl:journal")) AS journal_lines,
+        count(eval(sourcetype=="editappacl:diag")) AS diag_lines,
+        min(eval(if(sourcetype=="editappacl:diag", _time, null()))) AS started,
+        values(diag_user) AS run_user,
+        values(diag_journal) AS journal_param,
+        count(eval(diag_level=="CRITICAL")) AS fatal_lines,
+        count(eval(diag_level=="WARNING" AND isnotnull(diag_journal_file))) AS journal_open_failures
+  BY sid
+| where journal_lines == 0 AND diag_lines &gt; 0
+| eval cause = case(
+      journal_param=="false", "journal_disabled",
+      journal_open_failures &gt; 0, "journal_not_openable",
+      fatal_lines &gt; 0, "fatal_error",
+      1==1, "no_write_recorded")
+| sort - started
+| convert ctime(started)
+| table started, sid, run_user, cause, fatal_lines, journal_open_failures</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">10</option>
+      </table>
+    </panel>
+    <panel>
+      <!-- The note is a permanent panel, not a tooltip: it is visible without any
+           interaction. A dashboard lends a number the authority of the screen; showing
+           this one without its nature would repeat, on the reading side, the defect that
+           cost a gate on the writing side - the same estimate was measured at ZERO in
+           the nominal case, an under-count of 100 %, in the direction that reassures. -->
+      <title>About the estimate</title>
+      <html>
+        <p><b><tt>objects moved (estimate)</tt> is an estimate, never a count.</b></p>
+        <p>It <b>under-counts</b>: a stanza naming a private or deleted object removes one unit with no enumerated object to match it.</p>
+        <p>On a target describing the application default, only the families of the tool's table can be enumerated - a <b>lower bound</b>.</p>
+        <p>An account without <tt>admin_all_objects</tt> sees a truncated population - a <b>lower bound</b>.</p>
+        <p><b>Private objects are excluded from the count</b>, and whether they inherit from the generic stanzas has not been measured.</p>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Selected run</title>
+      <table>
+        <search>
+          <query>`app_acl_journal_source` | search sid="$sid$"
+| stats
+    min(_time) AS started, max(_time) AS ended,
+    values(user) AS user, values(dryrun) AS mode,
+    count(eval(phase=="outcome")) AS targets_processed,
+    count(eval(phase=="outcome" AND status=="created")) AS irreversible,
+    count(eval(phase=="summary")) AS summary_lines,
+    sum(eval(if(phase=="intent", impacted_estimate, 0))) AS objects_moved_estimate,
+    values(eval(if(phase=="summary", impacted_estimate_total, null()))) AS declared_estimate_total
+| eval run_state = case(summary_lines == 1, "completed", summary_lines == 0, "INTERRUPTED - no end-of-run line", 1==1, "ANOMALY - several end-of-run lines")
+| eval mode = if(mvcount(mode) &gt; 1, "MIXED - anomaly", if(mode=="true", "simulation", "real"))
+| eval duration_s = round(ended - started, 3)
+| convert ctime(started)
+| table started, user, mode, run_state, targets_processed, irreversible, objects_moved_estimate, declared_estimate_total, duration_s</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">1</option>
+      </table>
+    </panel>
+    <panel rejects="$sid$">
+      <title>Select a run above</title>
+      <html>
+        <p>Click a row in <b>Runs</b> or in <b>Irreversible writes in this window</b>, or paste a <tt>sid</tt> in the field at the top, to open the five detail panels.</p>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <!-- The positive filter after the transpose is not a precaution: it is the
+         correction of a measured defect. `| fields count_*` does NOT drop the internal
+         fields - _time, _raw, _indextime and their kin go through, the transpose turns
+         them into rows, and the panel displays them AS STATUSES. Measured on the
+         neighbouring project, on the healthiest run of the campaign: three rows carrying
+         "MISMATCH - lines are missing from the journal", which is exactly the message
+         this panel exists to emit, on an intact journal.
+
+         null == null is FALSE in SPL: an unguarded comparison invents a discrepancy. The
+         coalesce to 0 and the guard on declared_total cover both directions. -->
+    <panel depends="$sid$">
+      <title>Status breakdown - observed vs declared</title>
+      <html>
+        <p><tt>observed</tt> counts the output lines of the run; <tt>declared</tt> reads the counters of its end-of-run line. <tt>n/a</tt> means the run was interrupted and declared nothing - never a discrepancy of zero.</p>
+      </html>
+      <table>
+        <search>
+          <query>`app_acl_journal_source` | search sid="$sid$"
+| eval observed_status = if(phase=="outcome", status, null())
+| stats count(eval(isnotnull(observed_status))) AS observed BY observed_status
+| rename observed_status AS status
+| append
+    [search `app_acl_journal_source` | search sid="$sid$" phase="summary"
+    | transpose 0 column_name="counter"
+    | rename "row 1" AS declared
+    | where substr(counter, 1, 6) == "count_"
+    | eval status = replace(counter, "^count_", "")
+    | fields status, declared]
+| stats sum(observed) AS observed, sum(declared) AS declared BY status
+| eval observed = coalesce(observed, 0), declared = coalesce(declared, 0)
+| eventstats sum(declared) AS declared_total
+| where observed &gt; 0 OR declared &gt; 0
+| eval consistency = case(declared_total == 0, "n/a - no end-of-run line",
+                          observed == declared, "=",
+                          1==1, "MISMATCH - lines are missing from the journal")
+| table status, observed, declared, consistency
+| sort - observed</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <!-- The panel that answers the last third of the audit question: what can be
+         retrieved?
+
+         Paired BY endpoint with earliest() aggregates - THE SAME KEY AND THE SAME
+         AGGREGATION AS app_acl_rollback(1). Measured on the neighbouring project:
+         values() on a state column returns a multivalue when a target is presented
+         twice, and the most-read column of the view then displayed "no change" on an
+         object that had changed. values() is kept on status and http_code alone, where
+         showing both values is information.
+
+         before_* and inherited_* are NEVER merged. Displaying an inherited value in a
+         "before" column would suggest a restorable state that never existed - the hole
+         of the 515 objects, on the reading side. -->
+    <panel depends="$sid$">
+      <title>Stanzas written - before, after, and what a rollback covers</title>
+      <html>
+        <p><tt>before</tt> shows the previous value when the write is reversible, and the <b>inherited</b> value it masks when it is not - the two are never mixed. <tt>write_asserted</tt> reads <tt>unknown</tt> when a non-2xx answer leaves the state of the target undetermined: no column here claims that a failure means nothing moved.</p>
+      </html>
+      <table>
+        <search>
+          <query>`app_acl_journal_source` | search sid="$sid$"
+| where isnotnull(endpoint) AND endpoint != ""
+| stats
+    values(app) AS app, values(stanza_kind) AS stanza_kind, values(stanza) AS stanza,
+    values(handler) AS handler, values(reversible) AS reversible,
+    values(impacted_estimate) AS objects_moved_estimate,
+    earliest(before_perms_read) AS before_read, earliest(before_perms_write) AS before_write, earliest(before_sharing) AS before_sharing,
+    earliest(inherited_perms_read) AS inherited_read, earliest(inherited_perms_write) AS inherited_write,
+    earliest(after_perms_read) AS after_read, earliest(after_perms_write) AS after_write, earliest(after_sharing) AS after_sharing,
+    values(eval(if(phase=="outcome", status, null()))) AS status,
+    values(eval(if(phase=="outcome", http_code, null()))) AS http_code,
+    values(eval(if(phase=="outcome", write_asserted, null()))) AS write_asserted
+  BY endpoint
+| eval target = coalesce(app,"(no app)") . "  " . if(stanza_kind=="app_default", "[]", "[" . coalesce(stanza,"?") . "]")
+| eval rollback = case(
+      reversible == "true", "covered by app_acl_rollback",
+      reversible == "false", "NOT COVERED - permissions were materialised",
+      reversible == "unknown", "NOT COVERED - provenance was unreadable",
+      1==1, "n/a")
+| eval before = if(reversible=="true",
+      "read=[" . coalesce(before_read,"") . "] write=[" . coalesce(before_write,"") . "] sharing=" . coalesce(before_sharing,""),
+      "(inherited) read=[" . coalesce(inherited_read,"") . "] write=[" . coalesce(inherited_write,"") . "]")
+| eval after = "read=[" . coalesce(after_read,"") . "] write=[" . coalesce(after_write,"") . "] sharing=" . coalesce(after_sharing,"")
+| table target, stanza_kind, status, rollback, before, after, objects_moved_estimate, http_code, write_asserted, endpoint
+| sort target</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Targets refused or skipped</title>
+      <html>
+        <p>Targets on which <b>no write was attempted</b>. A duplicate target appears here in plain sight, as <tt>rejected</tt> with a reason - which is why no column of this view counts distinct endpoints. An empty <tt>endpoint</tt> means the target was refused before it could be resolved.</p>
+      </html>
+      <table>
+        <search>
+          <query>`app_acl_journal_source` | search sid="$sid$" phase="outcome"
+| where status IN ("rejected","not_found","forbidden","invalid_role","skipped_ceiling","skipped_impact_ceiling","noop","noop_inherited")
+| eval target = coalesce(app,"(no app)") . "  " . if(stanza_kind=="app_default", "[]", "[" . coalesce(stanza,"?") . "]")
+| eval reason = coalesce(error, "")
+| table _time, target, stanza_kind, status, reason, endpoint
+| sort target</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$sid$">
+      <title>Errors</title>
+      <html>
+        <p>Grouped by a <b>stable class</b> rather than by raw message: the message carries a response body truncated at 512 characters and does not group. <tt>http_code</tt> <tt>0</tt> means no HTTP exchange took place at all, which is its own class rather than a code.</p>
+      </html>
+      <table>
+        <search>
+          <query>`app_acl_journal_source` | search sid="$sid$" phase="outcome"
+| where status=="error" OR (isnum(http_code) AND http_code &gt;= 400)
+| eval error_class = case(
+      isnum(http_code) AND http_code &gt;= 500, "5xx - server",
+      http_code == 403, "403 - forbidden",
+      http_code == 404, "404 - not found",
+      http_code == 400, "400 - refused by handler",
+      http_code == 0, "no HTTP exchange",
+      1==1, "other")
+| stats count AS events, values(write_asserted) AS write_asserted, values(app) AS apps, latest(error) AS sample_message BY error_class
+| sort - events</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>What this view cannot show</title>
+      <html>
+        <p><b>Targets filtered upstream of the pipeline.</b> They never reached the command.</p>
+        <p><b>Output warnings</b> (<tt>acl_warning</tt>). They are not journalled, and cannot be reconstituted.</p>
+        <p><b>The calling SPL, and the intent of the batch</b> - a write or a rollback. The SPL lives in the platform audit index, out of reach of this role; the intent is journalled nowhere.</p>
+        <p><b>What a write really moved.</b> The journal carries an <b>estimate</b>; the real count would require an enumeration the command does not perform.</p>
+        <p><b>Concurrent runs on the same target.</b> Two runs may both classify a target as a creation and only one journal it as such.</p>
+        <p><b>The state of a target after a non-2xx answer.</b> <tt>write_asserted</tt> reads <tt>unknown</tt>: the failure is not atomic, and that is measured.</p>
+      </html>
+    </panel>
+  </row>
+</form>

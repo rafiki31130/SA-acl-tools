@@ -1,4 +1,5 @@
 <nav>
   <view name="search" default="true" />
   <view name="editacl_runs" />
+  <view name="appacl_runs" />
 </nav>

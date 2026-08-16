@@ -50,6 +50,7 @@ class LayoutTest(unittest.TestCase):
         ("default", "props.conf"),
         ("default", "data", "ui", "nav", "default.xml"),
         ("default", "data", "ui", "views", "editacl_runs.xml"),
+        ("default", "data", "ui", "views", "appacl_runs.xml"),
         ("metadata", "default.meta"),
         ("bin", "editacl.py"),
         ("bin", "editappacl.py"),
