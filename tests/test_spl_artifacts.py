@@ -1147,15 +1147,24 @@ class AppLevelSavedSearchesTest(unittest.TestCase):
                 self.assertIn(name, self.conf)
                 self.assertTrue(self.conf[name]["description"].strip())
 
-    def test_the_irreversible_search_names_its_source_by_the_macro(self):
+    def test_the_irreversible_search_names_its_source_by_a_macro(self):
+        """It reaches the journal through `app_acl_irreversible`, which itself reaches it
+        through `app_acl_journal_source`: still no index literal, one indirection more."""
         search = self.conf[self.IRREVERSIBLE]["search"]
-        self.assertIn("`app_acl_journal_source`", search)
+        self.assertIn("`app_acl_irreversible(", search)
         self.assertNotRegex(search, r"(?<![\w])index\s*=")
 
-    def test_the_irreversible_search_selects_the_creations(self):
+    def test_the_irreversible_search_and_the_macro_count_one_population(self):
+        """**Two shipped artefacts answered one question with two predicates.** The
+        search took `phase=intent reversible=false`; the macro also requires a POST to
+        have been emitted, and also keeps `reversible=unknown`. Two numbers, and nothing
+        told the operator which to believe. The search now **invokes** the macro, so the
+        predicate is written once - and the dashboard, which invokes it too, cannot
+        diverge from either."""
         search = self.conf[self.IRREVERSIBLE]["search"]
-        self.assertIn("reversible=false", search)
-        self.assertIn("impacted_estimate", search)
+        self.assertNotIn("phase=intent", search)
+        self.assertNotIn("reversible=false", search)
+        self.assertIn("acl_impacted_estimate", search)
 
     def test_the_irreversible_search_carries_the_macro_call(self):
         """The operator has nothing to type at the moment they need the detail."""
