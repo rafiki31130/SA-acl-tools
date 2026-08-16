@@ -15,8 +15,8 @@ Read first, write second: `appaclinventory` is the command you run before either
 other two.
 
 It also ships **eleven macros** and **six saved searches**, named one by one under
-[What is shipped, named one by one](#what-is-shipped-named-one-by-one), plus a run
-monitoring view. Driving use case: decommissioning legacy roles, by
+[What is shipped, named one by one](#what-is-shipped-named-one-by-one), plus **two
+audit views** - one per level. Driving use case: decommissioning legacy roles, by
 **substitution** with the roles of a new entitlement structure, or by **deprecation**
 (renaming to `deprecated_<name>`).
 
@@ -866,9 +866,46 @@ others. The arity is written as Splunk writes it: `(1)` takes one argument.
 | `App ACL - irreversible writes` | The creations per run, with their target and estimated impact |
 | `App ACL - governability of the estate` | The inventory output ventilated by `acl_reach` |
 
+**Two views**, one per level, both read by the `editacl_auditor` role:
+
+| View | What it audits |
+|---|---|
+| `editacl_runs` - *editacl - run monitor* | Object-level runs: which took place, and how the selected one went |
+| `appacl_runs` - *App ACL - write audit* | Application-level runs: what was written, by whom, when - and **what will never be undone** |
+
 **The counts above are the counts of the lists above**, and a test compares both to what
 `macros.conf` and `savedsearches.conf` actually declare. A document that miscounts what it
 ships cannot be believed on what it explains.
+
+### Reading the application-level audit view
+
+**A dashboard that shows nothing does not prove that no write took place.** Read the
+*Entitlement check* panel first: it tells *no run was recorded* from *this journal is not
+readable by your role* from *the journal lines are elsewhere than where this view reads*,
+and it names the indexes it could search.
+
+The view is designed to be read top down, and the order is a decision rather than a
+layout. **What a rollback will not cover comes before the list of runs**: it is the only
+information here whose window for acting is already closed when you read it.
+
+> **`objects moved (estimate)` is an estimate, never a count - and it under-counts.** A
+> stanza naming a private or deleted object removes one unit with no enumerated object to
+> match it. On a target describing the application default, only the families of the tool's
+> table can be enumerated, which is a **lower bound**. An account without
+> `admin_all_objects` sees a truncated population, which is a **lower bound** again. And
+> private objects are excluded from the count, whether or not they inherit from the generic
+> stanzas - which has not been measured.
+
+**Prerequisites, and none of them is inside this app.** The `editacl_auditor` role is
+**declared and granted to nobody**: granting it, and entitling it to read the index the
+application-level journal lands in, belong to the role management chain. An account
+**without** the role gets a **`404`** on the view, not a `403` - a missing role, not a
+broken deployment. `admin_all_objects` short-circuits the restriction: *readable by one
+role* means *by that role and by any administrator*.
+
+**A `nav` entry does not make the view visible from another app.** It is listed in the
+dashboards page of any app context, since it is exported to the system, but it appears in
+no menu but this app's without an entry added by you.
 
 ## Before you use it
 
@@ -887,6 +924,10 @@ reason is short enough to matter here, it is given.
   and the two sets are independent.
 - **A run launched with `journal=false` appears in no panel built on the journal**; the
   *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype.
+  **Both views carry that panel**, each on its own journal.
+- **An empty audit view proves nothing.** Read the entitlement check of the view before
+  concluding that no write took place - and read the index list it publishes beside its
+  verdict.
 - **Writing an `eventtype` aligns its derived objects by cascade, and that alignment
   cannot be rolled back.** Run the divergence search before a campaign; it pairs objects
   **by application** and misses a carrier shared globally from another one.

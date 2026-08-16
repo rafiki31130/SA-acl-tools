@@ -270,5 +270,54 @@ class TheReadmeSaysWhereAFatalErrorAppearsTest(unittest.TestCase):
         self.assertIn("that is not a diagnosis", self.flat)
 
 
+class TheReadmeCarriesTheAuditViewStatementsTest(unittest.TestCase):
+    """The five statements the dashboard spec adds to the README, all of them facts the
+    operator cannot discover from the app itself.
+
+    They are exigible here for the same reason as the rest: a clause that assigns content
+    to the README without creating a verifiable obligation produces nothing."""
+
+    def setUp(self):
+        self.readme = _readme()
+        self.flat = " ".join(self.readme.split())
+
+    def test_the_role_is_declared_and_granted_to_nobody(self):
+        self.assertIn("granted to nobody", self.flat)
+        self.assertIn("role management chain", self.flat)
+
+    def test_an_account_without_the_role_gets_a_404(self):
+        self.assertIn("gets a **`404`** on the view, not a `403`", self.flat)
+
+    def test_admin_all_objects_short_circuits_the_restriction(self):
+        self.assertIn("`admin_all_objects` short-circuits the restriction", self.flat)
+
+    def test_redirecting_the_journal_takes_two_places_and_the_app_has_four(self):
+        self.assertIn("local/inputs.conf", self.flat)
+        self.assertIn("local/macros.conf", self.flat)
+        self.assertIn("four in all", self.flat)
+
+    def test_the_estimate_sentence_is_carried_over_word_for_word(self):
+        """The panel of the view and the README say the same thing, so an operator who
+        reads one has read the other."""
+        for fact in ("is an estimate, never a count",
+                     "under-counts",
+                     "lower bound",
+                     "private objects are excluded from the count",
+                     "has not been measured"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, self.flat.lower())
+
+    def test_the_sentence_that_summarises_the_guard_rail_is_there(self):
+        """Written as the spec asks: an empty dashboard does not prove that no write
+        took place."""
+        self.assertIn("A dashboard that shows nothing does not prove that no write took "
+                      "place", self.flat)
+
+    def test_both_views_are_named_with_what_they_audit(self):
+        for view in ("editacl_runs", "appacl_runs"):
+            with self.subTest(view=view):
+                self.assertIn("`%s`" % view, self.flat)
+
+
 if __name__ == "__main__":                                       # pragma: no cover
     unittest.main()
