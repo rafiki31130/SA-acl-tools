@@ -58,7 +58,7 @@ class TheAnnouncedColumnOrderIsTheEmittedOrderTest(unittest.TestCase):
 
     def setUp(self):
         section = _readme()
-        start = section.index("## What the inventory gives you")
+        start = section.index("### What it gives you, column by column")
         self.section = section[start:]
         self.rows = [
             match.group(1)
@@ -104,7 +104,7 @@ class EveryColumnPublishesItsDomainTest(unittest.TestCase):
 
     def setUp(self):
         readme = _readme()
-        start = readme.index("## What the inventory gives you")
+        start = readme.index("### What it gives you, column by column")
         self.section = readme[start:]
         self.cells = {}
         for match in re.finditer(r"^\| *\d+ *\| `([^`]+)` *\|([^|]*)\|([^|]*)\|([^|]*)\|",
@@ -268,6 +268,160 @@ class TheReadmeSaysWhereAFatalErrorAppearsTest(unittest.TestCase):
     def test_it_names_the_generic_sentence_as_a_defect_rather_than_a_diagnosis(self):
         self.assertIn("External search command exited unexpectedly", self.flat)
         self.assertIn("that is not a diagnosis", self.flat)
+
+
+class TheContentsListIsTheDocumentTest(unittest.TestCase):
+    """**The contents list names exactly the headings of the document, and in order.**
+
+    A list written by hand desynchronises at the first section added, and this README has
+    already produced three statements of that family: a column order announced wrong, five
+    macros announced for seven described, and a pointer at a file that was not shipped. A
+    false contents list would be the fourth, this time at the top of the page - the first
+    thing a reader trusts.
+
+    The control is an equality **both ways** plus the order: a heading missing from the
+    list, a line of the list naming no heading, or two that have drifted apart, all fail.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.readme = _readme()
+
+    def _headings(self):
+        """Every heading of the document, code fences excluded - a `#` at the start of a
+        line inside a shell block is a comment, not a section."""
+        found, fenced = [], False
+        for line in self.readme.split("\n"):
+            if line.startswith("```"):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            match = re.match(r"^(#{2,4}) (.+)$", line)
+            if match and match.group(2).strip() != "Contents":
+                found.append((len(match.group(1)) - 2, match.group(2).strip()))
+        return found
+
+    def _listed(self):
+        """The entries of the contents list, with their indentation level."""
+        start = self.readme.index("## Contents")
+        end = self.readme.index("\n## ", start + 5)
+        entries = []
+        for line in self.readme[start:end].split("\n"):
+            match = re.match(r"^( *)- \[(.+)\]\(#([^)]+)\)$", line)
+            if match:
+                entries.append((len(match.group(1)) // 2, match.group(2), match.group(3)))
+        return entries
+
+    def test_the_document_has_a_contents_list(self):
+        self.assertIn("## Contents", self.readme)
+        self.assertTrue(self._listed())
+
+    def test_it_lists_every_heading_and_no_other(self):
+        listed = [(depth, title) for depth, title, _a in self._listed()]
+        self.assertEqual(listed, self._headings(),
+                         "the contents list and the headings have drifted apart")
+
+    def test_every_entry_resolves_to_its_section(self):
+        for _depth, title, target in self._listed():
+            with self.subTest(entry=title):
+                self.assertEqual(_anchor(title), target)
+
+    def test_the_three_commands_are_listed_as_a_numbered_suite(self):
+        """The order of use is visible in the contents list itself: decide, govern the
+        generic, then the exception at object level."""
+        titles = [title for _d, title, _a in self._listed()]
+        numbered = [t for t in titles if re.match(r"^\d\. ", t)]
+        self.assertEqual(len(numbered), 3)
+        for rank, command in enumerate(("appaclinventory", "editappacl", "editacl"), 1):
+            with self.subTest(command=command):
+                self.assertTrue(
+                    numbered[rank - 1].startswith("%d. `%s`" % (rank, command)),
+                    "the suite is not in the order of use: %s" % numbered)
+
+    def test_the_rule_of_use_comes_before_the_three_commands(self):
+        titles = [title for _d, title, _a in self._listed()]
+        rule = next(i for i, t in enumerate(titles) if "orders everything" in t)
+        first = next(i for i, t in enumerate(titles) if t.startswith("1. "))
+        self.assertLess(rule, first)
+
+    def test_the_document_has_three_levels_of_heading(self):
+        """A thousand lines under fifteen headings is a document nobody navigates."""
+        depths = {depth for depth, _t in self._headings()}
+        self.assertEqual(depths, {0, 1, 2})
+
+    def test_no_section_runs_longer_than_the_eye(self):
+        """The two blocks the reader stumbled on ran 120 and 180 lines with nothing
+        between them. Nothing here is allowed back to that length."""
+        positions, fenced = [], False
+        for number, line in enumerate(self.readme.split("\n")):
+            if line.startswith("```"):
+                fenced = not fenced
+                continue
+            if not fenced and re.match(r"^#{2,4} ", line):
+                positions.append((number, line.strip()))
+        positions.append((len(self.readme.split("\n")), "(end)"))
+        for (start, title), (end, _next) in zip(positions, positions[1:]):
+            with self.subTest(section=title):
+                self.assertLess(end - start, 115,
+                                "%s runs %d lines without a heading" % (title,
+                                                                        end - start))
+
+
+class TheSeventeenStatementsSurviveTheRestructuringTest(unittest.TestCase):
+    """**Deliverable 9 of the contract lists seventeen statements the README must carry**,
+    and it is the only source of the README's obligations.
+
+    A restructuring that lost one would trade a defect of plan for a defect of substance,
+    and the existing tests would not all see it: several of them look inside a section **by
+    name**, so a statement that fell out with its section would take its own test with it.
+    This class checks the seventeen on the **whole document**, by markers, wherever they
+    now live.
+    """
+
+    #: Two markers per statement: the words that carry the obligation, not the sentence
+    #: around them. A reformulation must not fail this test; a disappearance must.
+    STATEMENTS = {
+        1: ("Writes?", "appaclinventory"),
+        2: ("`acl_inventory`", "macro"),
+        3: ("cannot be undone", "allow_create"),
+        4: ("Generic first, specific by exception", "Never the other way round"),
+        5: ("searchbnf", "unreachable"),
+        6: ("search head cluster", "replication is healthy"),
+        7: ("local/inputs.conf", "local/macros.conf"),
+        8: ("not transactional", "rollback"),
+        9: ("acl_handler", "any handler"),
+        10: ("at a time on a given application", "nothing enforces it"),
+        11: ("back your override up", "upgrad"),
+        12: ("splunk_server", "unknown"),
+        13: ("inherited", "materialise"),
+        14: ("ceiling", "choice"),
+        15: ("private", "blind"),
+        16: ("Nineteen columns", "in the order they come out"),
+        17: ("says it in the job", "self-signed certificate"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.flat = " ".join(_readme().split()).lower()
+
+    def test_every_statement_of_the_deliverable_is_still_carried(self):
+        missing = []
+        for number, markers in sorted(self.STATEMENTS.items()):
+            for marker in markers:
+                if marker.lower() not in self.flat:
+                    missing.append("%d: %r" % (number, marker))
+        self.assertEqual([], missing,
+                         "statement(s) of deliverable 9 lost in the restructuring: %s"
+                         % missing)
+
+    def test_the_status_enumeration_is_still_the_anchor_of_the_document(self):
+        """The README anchors on the enumeration of statuses rather than on prose, and a
+        control watches it: the statuses must stay named, wherever the sections moved."""
+        for status in ("updated", "created", "noop_inherited", "rejected",
+                       "skipped_ceiling", "not_found", "forbidden", "invalid_role"):
+            with self.subTest(status=status):
+                self.assertIn("`%s`" % status, self.flat)
 
 
 class TheReadmeCarriesTheAuditViewStatementsTest(unittest.TestCase):

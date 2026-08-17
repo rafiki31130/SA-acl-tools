@@ -29,69 +29,80 @@ audit views** - one per level. Driving use case: decommissioning legacy roles, b
 > the command refuses it unless you pass `allow_create=true`, and why `appaclinventory`
 > tells you which of the two you are about to do **before** you do it. The write-ahead
 > journal and the rollback macros are the only safety net there is: read
-> [The other shipped objects](#the-other-shipped-objects) **before** the first real
-> write - the rollback macros are described there.
-
-> ### Order of use, and it is not a preference
->
-> **Generic first, specific by exception. Never the other way round.**
->
-> An object that `editacl` writes carries its **own** metadata stanza from then on, and
-> **no measured REST path removes one**. That object stops inheriting the generic
-> permissions of its application **for good**. So:
->
-> 1. **Governing an application starts with its generic stanzas.** Every object treated
->    by `editacl` beforehand is an object permanently removed from that governance.
-> 2. **`editacl` is the instrument of the exception** - an object whose rights must
->    differ from the default of its family - not the instrument of the rule.
-> 3. **On an estate already treated by `editacl`, writing the generic changes nothing for
->    the objects already treated**, and there is no REST path to free them. Two ways out
->    only: rewrite them one by one with `editacl`, or accept that they stay out of reach
->    of the generic.
-> 4. **`appaclinventory` is the instrument of the decision.** Run it **before** either
->    write tool: `acl_objects_with_own_perms` and `acl_reach` say, per application and
->    per family, how much generic governance is still possible.
->
-> Setting **empty** permissions is not a removal: a stanza with empty permissions leaves
-> the object **unreachable**; a removed stanza makes it **inherit again**. Two opposite
-> states, not two spellings of one.
+> [The macros, searches and view built on it](#the-macros-searches-and-view-built-on-it)
+> **before** the first real write.
 
 This document is for whoever **runs** the tool, and it is meant to be sufficient: every
 answer you need while operating is here or in the output of the commands. Nothing sends you
 to a file that is not installed alongside them.
 
-```mermaid
-flowchart LR
-  SPL["SPL pipeline<br/>one event = one object"] --> CMD
-  subgraph CMD["editacl (search head, local)"]
-    direction TB
-    RES["Preflight once per run, then per event:<br/>endpoint resolution from id, otherwise from eai:type"]
-    GET["GET current state<br/>(the platform is authoritative)"]
-    MER["Merge: the PRESENCE of a column decides WHAT,<br/>the cell decides THE VALUE"]
-    CTL["Ordered checks: private, derived, immutable,<br/>rejections, roles, idempotence, simulation"]
-    WAL["Journal: intent line, write + flush + fsync"]
-    POST["POST /acl"]
-    OUT["Journal: outcome line<br/>+ one output event"]
-    RES --> GET --> MER --> CTL --> WAL --> POST --> OUT
-    CTL -- "abstention or rejection: no POST" --> OUT
-  end
-  GET -. "read" .-> SPLUNKD[("splunkd<br/>REST API")]
-  POST -. "write" .-> SPLUNKD
-  WAL --> FILE[["editacl_journal_&lt;sid&gt;.log"]]
-  OUT --> FILE
-  FILE -- "monitor + dedicated sourcetype" --> IDX[("index _internal<br/>sourcetype editacl:journal")]
-  IDX --> RB["rollback macros"]
-  IDX --> DASH["run monitoring view"]
-  CMD --> RESULT["Output events, acl_* fields"]
-```
+---
 
-The intent line precedes the POST and is synchronised to disk: if it cannot be written,
-the POST is cancelled. That is what makes an **`editacl` write to an object's ACL**
-undoable - the prior state is on disk before anything changes, and
-`` `editacl_rollback_apply(<sid>)` `` replays it. It is a property of the **journal**, not
-of the write: an `editappacl` **creation** of a generic stanza stays irreversible however
-completely the journal records it. Nothing runs in parallel, and one input event always
-produces exactly one output event.
+## Contents
+
+- [The rule that orders everything](#the-rule-that-orders-everything)
+- [Installation](#installation)
+  - [Build the archive from a git reference](#build-the-archive-from-a-git-reference)
+  - [The seven steps](#the-seven-steps)
+- [When a command stops: where the reason appears](#when-a-command-stops-where-the-reason-appears)
+- [1. `appaclinventory` - decide what to write, and whether it can be undone](#1-appaclinventory---decide-what-to-write-and-whether-it-can-be-undone)
+  - [Why it is a command, and what it answers](#why-it-is-a-command-and-what-it-answers)
+  - [What it gives you, column by column](#what-it-gives-you-column-by-column)
+    - [Identification - which stanza is this row about, and why is it here](#identification---which-stanza-is-this-row-about-and-why-is-it-here)
+    - [Platform - what splunkd applies right now](#platform---what-splunkd-applies-right-now)
+    - [Decision - what a write would do, and what stands in its way](#decision---what-a-write-would-do-and-what-stands-in-its-way)
+    - [File - what the metadata carries, literally](#file---what-the-metadata-carries-literally)
+    - [Context](#context)
+    - [Which rows come out](#which-rows-come-out)
+- [2. `editappacl` - govern an application through its generic stanzas](#2-editappacl---govern-an-application-through-its-generic-stanzas)
+  - [What it writes, and what that costs](#what-it-writes-and-what-that-costs)
+  - [Parameters, and the doors they open](#parameters-and-the-doors-they-open)
+    - [`acl_handler` addresses any handler, and that door is deliberate](#acl_handler-addresses-any-handler-and-that-door-is-deliberate)
+    - [Creating a stanza with `editappacl` cannot be undone](#creating-a-stanza-with-editappacl-cannot-be-undone)
+    - [Run one `editappacl` at a time on a given application](#run-one-editappacl-at-a-time-on-a-given-application)
+  - [Statuses and output](#statuses-and-output)
+  - [The macros and searches built on it](#the-macros-and-searches-built-on-it)
+- [3. `editacl` - the exception, one object at a time](#3-editacl---the-exception-one-object-at-a-time)
+  - [What it writes](#what-it-writes)
+  - [Statuses and output](#statuses-and-output)
+  - [The macros, searches and view built on it](#the-macros-searches-and-view-built-on-it)
+  - [How a write is made undoable](#how-a-write-is-made-undoable)
+- [What is shipped, named one by one](#what-is-shipped-named-one-by-one)
+    - [Reading the application-level audit view](#reading-the-application-level-audit-view)
+- [Examples](#examples)
+- [Before you use it](#before-you-use-it)
+  - [Seeing what happened, and what an empty view proves](#seeing-what-happened-and-what-an-empty-view-proves)
+  - [Writing at object level](#writing-at-object-level)
+  - [What the tool can and cannot see](#what-the-tool-can-and-cannot-see)
+  - [Ceilings, failures, and what a failure does not prove](#ceilings-failures-and-what-a-failure-does-not-prove)
+  - [Journals, indexes and retention](#journals-indexes-and-retention)
+- [Licence](#licence)
+
+---
+
+## The rule that orders everything
+
+**Generic first, specific by exception. Never the other way round.**
+
+An object that `editacl` writes carries its **own** metadata stanza from then on, and
+**no measured REST path removes one**. That object stops inheriting the generic
+permissions of its application **for good**. So:
+
+1. **Governing an application starts with its generic stanzas.** Every object treated
+   by `editacl` beforehand is an object permanently removed from that governance.
+2. **`editacl` is the instrument of the exception** - an object whose rights must
+   differ from the default of its family - not the instrument of the rule.
+3. **On an estate already treated by `editacl`, writing the generic changes nothing for
+   the objects already treated**, and there is no REST path to free them. Two ways out
+   only: rewrite them one by one with `editacl`, or accept that they stay out of reach
+   of the generic.
+4. **`appaclinventory` is the instrument of the decision.** Run it **before** either
+   write tool: `acl_objects_with_own_perms` and `acl_reach` say, per application and
+   per family, how much generic governance is still possible.
+
+Setting **empty** permissions is not a removal: a stanza with empty permissions leaves
+the object **unreachable**; a removed stanza makes it **inherit again**. Two opposite
+states, not two spellings of one.
 
 ---
 
@@ -104,6 +115,8 @@ re-validation procedures of step 5, which the app cannot honestly call a prerequ
 putting them out of your reach. Anchor any check of the archive's content on
 `^SA-acl-tools/`: the archive prefix itself contains the substring `tools/`.
 
+### Build the archive from a git reference
+
 ```sh
 git archive --format=tar.gz --prefix=SA-acl-tools/ \
     -o SA-acl-tools-$(git rev-parse --short HEAD).tar.gz HEAD
@@ -112,6 +125,8 @@ tar tzf SA-acl-tools-<ref>.tar.gz | grep -E '^SA-acl-tools/tools/'
 # SA-acl-tools/tools/revalidate_app_acl_mapping.py
 # SA-acl-tools/tools/revalidate_mapping.py
 ```
+
+### The seven steps
 
 1. Drop `SA-acl-tools/` under `$SPLUNK_HOME/etc/apps/` of the **search head** - never on
    an indexer, the command is declared `local = true`.
@@ -166,6 +181,8 @@ every run. That file is not in the archive, so an upgrade cannot overwrite it.
 
 ---
 
+---
+
 ## When a command stops: where the reason appears
 
 **A command that stops says why, and it says it in the job.** Open the job - the message
@@ -205,7 +222,472 @@ start; the inventory writes no journal at all. The job is where the answer is.
 > command said nothing. Report it: it is a defect of this app, and the answer is not
 > somewhere else.
 
-## The command
+---
+
+## 1. `appaclinventory` - decide what to write, and whether it can be undone
+
+### Why it is a command, and what it answers
+
+```
+| appaclinventory [apps=<string>] [families=<string>]
+```
+
+| Parameter | Default | Role |
+|---|---|---|
+| `apps` | `*` | Comma-separated applications, `*` patterns allowed. Characters outside `A-Za-z0-9_,*-` are dropped |
+| `families` | *(none)* | Families to emit **even** when they carry neither a stanza nor a frozen object |
+
+### What it gives you, column by column
+
+**Read this table instead of the code.** Every column below answers one question, and the
+table says which. **Nineteen columns, listed in the order they come out** - the order of
+the table is the order of the output, and a test compares the two rather than trusting
+either.
+
+**Four groups, and no column mixes two.** That is what makes the table readable: some
+columns say what the **file** carries, some what the **platform** applies, some what
+**stands between** the two, and some identify the row. They are called *groups* and not
+*levels* on purpose: in this app, a **level** is a storey of the inheritance chain -
+application, family, object - and nothing else.
+
+> **Start with `acl_write_effect`.** It is the column that tells you whether the write you
+> are about to launch can be undone. Everything else describes a state; that one describes
+> the consequence of an action.
+
+> **No column is ever empty without another saying why - nor without saying whether the
+> empty means "absent" or "empty set".** If the three `eai:acl.*` cells are blank,
+> `acl_effective_status` says what stopped the read. The three `acl_file_*` cells and the
+> two counters say their own absence: what is **not written**, or **not counted**, comes out
+> as `(absent)`. A blank in a file cell therefore means one thing only - the key is written
+> and holds no value.
+
+| # | Column | Group | The question it answers | Values |
+|---|---|---|---|---|
+| 1 | `eai:acl.app` | identification | Which application | a name |
+| 2 | `acl_stanza_kind` | identification | Is this the application default, or one family | `app_default`, `family_default` |
+| 3 | `acl_stanza` | identification | Which stanza, written as the file writes it, brackets included | `[]`, `[views]`, `[commands]` |
+| 4 | `acl_handler` | tool | Which REST path the tool reaches this **family** by, **by name** | a path, or empty |
+| 5 | `eai:acl.perms.read` | platform | Which roles read, today | roles, comma-separated |
+| 6 | `eai:acl.perms.write` | platform | Which roles write, today | roles, comma-separated |
+| 7 | `eai:acl.sharing` | platform | Which scope applies, today | `app`, `global`, `user` |
+| 8 | `acl_effective_status` | platform | Were those three **read**, and if not why | `ok`, `app_disabled`, `unreadable` |
+| 9 | `acl_row_reason` | identification | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
+| 10 | `acl_write_effect` | decision | **What an `editappacl` write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible` |
+| 11 | `acl_perms_source` | file | **Where this stanza's permissions are written** - so which layer the three cells below quote, and what an `editappacl` write would do | `local`, `default`, `nowhere` |
+| 12 | `acl_file_perms_read` | file | What that stanza writes for reading | roles, empty, or `(absent)` |
+| 13 | `acl_file_perms_write` | file | What it writes for writing | roles, empty, or `(absent)` |
+| 14 | `acl_file_export` | file | What the stanza writes for `export`, literally | any text splunkd writes there - `none`, `system`, `global` - or empty, or `(absent)` |
+| 15 | `acl_file_read` | file | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
+| 16 | `acl_objects_with_own_perms` | decision | How many objects carry **their own permissions** and therefore escape this stanza | a count, or `(absent)` |
+| 17 | `acl_families_with_own_perms` | decision | How many families of this application carry their own permissions and therefore escape `[]` | a count, or `(absent)` |
+| 18 | `acl_reach` | decision | Does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
+| 19 | `acl_member` | context | Which member the metadata was read on | a name, or `unknown` |
+
+**`acl_file_export` has an open domain, and that is a fact about Splunk, not a gap here**:
+the cell carries the text of the `export` key **as the file writes it**, whatever splunkd
+chose to write. `none`, `system` and `global` are what you will see in practice. The two
+reserved tokens are the ones this app adds: `(absent)` for a key that is not written, and a
+blank for a key written with no value.
+
+#### Identification - which stanza is this row about, and why is it here
+
+**An empty `acl_handler` on a `family_default` row means one thing, and one thing only:
+this family is not in the table shipped with the tool.** It does not mean the family cannot
+be written to - the table bounds resolution **by name**, never the write perimeter, and
+passing `acl_handler=` yourself addresses any handler (see
+[`acl_handler` addresses any handler, and that door is deliberate](#acl_handler-addresses-any-handler-and-that-door-is-deliberate)).
+The rest of the row keeps answering: `acl_write_effect` still says what a write there would
+do, `acl_reach` still says how far the stanza carries, and the two counters still count.
+
+**On an `app_default` row the column does not apply at all**, and it is empty for that
+reason: `[]` is addressed by the application name alone and needs no handler. Read
+`acl_stanza_kind` first - it says which of the two kinds of row you are on, and therefore
+which of these two readings of an empty handler is the right one.
+
+`acl_row_reason` is the column to read first when a row surprises you. `stanza_exists` means
+the stanza is written in a metadata file. **`objects_exist` means it is not** - the family is
+listed because some of its objects carry a stanza of their own, which is enough to make the
+family worth showing. `requested` means you asked for it with `families=`.
+
+#### Platform - what splunkd applies right now
+
+`acl_effective_status` answers one question only: could the platform be read. `unreadable`
+covers its two causes, and **`acl_handler` tells them apart** - **empty**, there is no route
+to this family by name; **filled**, the call was made and it failed.
+
+#### Decision - what a write would do, and what stands in its way
+
+**`acl_write_effect` is the safety column**, and it answers on **every** row - two values,
+no third.
+
+- `overwrite_reversible` - the stanza already carries its permissions in the **local** layer.
+  An `editappacl` write **replaces** them, and `` `app_acl_rollback(<sid>)` `` can put the
+  previous values back.
+- `create_irreversible` - the permissions are **not** in the local layer, whether they sit in
+  the default layer or nowhere at all. An `editappacl` write **materialises** them there, and
+  **nothing removes them afterwards**: no rollback, no REST path. `editappacl` refuses such a
+  target unless you pass `allow_create=true`. **This is the common case on a freshly
+  installed application**, whose stanzas are all shipped in the default layer.
+
+`acl_write_effect` does **not** consult the route, and that is deliberate: a family outside
+the shipped table is still writable with `editappacl` through an explicit `acl_handler`, so it
+is precisely the row where you most need to be told that the write cannot be undone.
+
+`acl_reach` reads `all` when nothing stands between this stanza and the objects of its scope.
+It reads `unknown` for one reason only - the metadata could not be read in full - and
+`acl_file_read` names it. A family with no route in the shipped table reads `all` when nothing
+escapes it: nothing stands in the way, and the missing route is a fact about the tool that
+`acl_handler` states on its own.
+
+**The two counters are counted in the file, and the route has nothing to do with it.** They
+come from the `.meta` files, through one predicate, and reach no REST handler: on a family
+the shipped table does not know, a `0` is a **measured zero** exactly as it is anywhere else.
+
+> **`0` and `(absent)` are not the same answer, and the difference decides.** `0` means
+> *counted, and nothing escapes this stanza*. `(absent)` means *the count could not be made*
+> - the metadata file was unreadable, or was read with lines skipped, which `acl_file_read`
+> says on the same row. A count that cannot be complete is not published as a small number:
+> a lower bound reassures in the dangerous direction.
+
+**"Carries its own permissions" means one thing here: the stanza writes an `access` key** -
+in `local.meta` or in `default.meta`, it makes no difference at this question. Splunk writes
+a stanza for every object you create or edit, carrying `owner`, `version` and `modtime` and
+nothing else; such an object still inherits, and is **not** counted.
+
+> **That is not the predicate `acl_write_effect` uses, and the two are neighbours.** The
+> counters ask *what escapes this stanza* - an `access` key **in either layer**. The write
+> effect asks *would a write here be undoable* - an `access` key **in `local.meta`**. A
+> family frozen in `default.meta` alone therefore counts as carrying its own permissions
+> **and** would take an irreversible write. Both answers are right; they answer different
+> questions.
+
+The scope of `acl_objects_with_own_perms` is the scope of the row: the family on a family
+row, the whole application on an application row. `acl_families_with_own_perms` is an
+application fact and is repeated on every row of that application - do not sum it.
+
+#### File - what the metadata carries, literally
+
+`acl_perms_source` is decided by one thing: whether an `access` key exists, and in which
+layer. `nowhere` means **no `access` key anywhere** - the stanza may still exist and carry an
+`export`, which is why `acl_file_export` can be filled while the two permission cells read
+`(absent)`.
+
+> **The word is `nowhere` and not `none`, and that is not a nicety.** `none` is a literal
+> `export` value on the Splunk side, and you will read it in `acl_file_export` two columns
+> away. One token for two opposite meanings on the same row is one token too many; the
+> platform's vocabulary wins, and it is our column that changes word.
+
+**`(absent)` means the key is not written; a blank means the key is written and carries
+nothing.** The two are opposites: a permission written empty leaves the objects
+**unreachable**, while an unwritten one leaves them **inheriting** from one level up. They
+are also the two states that decide whether an `editappacl` write **updates** or **creates**.
+No role name and no `export` value of the platform is spelled between parentheses, so the
+token cannot be mistaken for a value read from the file.
+
+**These columns quote the file; the `eai:acl.*` columns show what splunkd applies.** When the
+two disagree, something else is deciding - the other layer, or a generic stanza one level up.
+That comparison is the reason both are here.
+
+`acl_perms_source` says **where the permissions are written**, and nothing more. It does not
+say where the effective permissions come from: answering that would mean replaying Splunk's
+own inheritance resolution, which this tool deliberately never does.
+
+`acl_file_read` is about the **files**, not the stanza. `partial:<n>` means `n` lines were
+skipped while parsing, so the two counters come out `(absent)` rather than understated;
+`unreadable` means nothing on this row was read from the file at all.
+
+#### Context
+
+`acl_member` says which member the metadata was read on, and `unknown` means the platform
+would not give its own name. Run the inventory on each member and compare the tables: a
+difference is a metadata replication gap, which no configuration audit sees.
+
+#### Which rows come out
+
+One row per application, always. Then one row per family, when **any** of these is true -
+and `acl_row_reason` tells you which:
+
+1. the family header is written in one of the two metadata files (`stanza_exists`);
+2. at least one object of that family carries a stanza of its own - **it exists, whether or
+   not it freezes anything** (`objects_exist`);
+3. you named the family in `families=` (`requested`).
+
+Condition 2 is about **presence, not freezing**. A family whose objects were merely opened
+and saved in the interface will appear, with `acl_objects_with_own_perms = 0` and
+`acl_reach = all` - the row then says exactly that. A family matching none of the three does
+not appear, which does not mean it cannot be governed: only that today it is neither
+governed nor frozen.
+
+---
+
+## 2. `editappacl` - govern an application through its generic stanzas
+
+### What it writes, and what that costs
+
+A Splunk application carries a metadata file whose **generic stanzas** decide the
+permissions of every object that has none of its own:
+
+```
+[]                     <-- the application default: every object with nothing above it
+[views]                <-- the family default: every view of the application
+[views/my_dashboard]   <-- one object. `editacl` writes these; nothing removes them
+```
+
+The chain is measured in all three of its levels: `[<family>/<object>]` wins over
+`[<family>]`, which wins over `[]`. Specificity wins over the layer the stanza lives in,
+so `default.meta` and `local.meta` are read as **one set of stanzas**.
+
+```mermaid
+flowchart LR
+  INV["| appaclinventory<br/>reads REST AND the file"] --> DEC{"acl_reach"}
+  DEC -- "all" --> GOV["govern the generic<br/>| editappacl"]
+  DEC -- "partial" --> MIX["the frozen objects will not move:<br/>editacl one by one, or leave them"]
+  DEC -- "unknown" --> READ["the metadata could not be read:<br/>no conclusion is emitted"]
+  GOV --> WAL[["editappacl_journal_&lt;sid&gt;.log"]]
+  WAL --> RB["app_acl_rollback / app_acl_rollback_apply"]
+  WAL --> IRR["app_acl_irreversible<br/>what the rollback will NOT undo"]
+```
+
+**Why the inventory is a command and not a macro.** Through REST, an object that
+**inherits** and an object carrying its **own** stanza of the same value return a strictly
+identical ACL block. Provenance has no REST answer at all, and an SPL macro cannot read a
+file. So `appaclinventory` is a **command**, invoked with a leading pipe and **never
+between backticks**, whereas `acl_inventory` is a macro and is invoked between backticks.
+
+**The commands of this app carry no underscore, and that is not a style rule.** Measured on
+Splunk 9.4.6: the search parser **ends a command name at the first underscore**. A command
+declared `a_b_c` is looked up as `a`, and answers `Unknown search command 'a'` - in leading
+position as well as downstream, with no escaping that gets round it. Underscores belong to
+macro names, which resolve differently; they never appear in a command name here.
+
+```
+| appaclinventory        <-- correct: it is a command
+| `appaclinventory`      <-- fails: it is not a macro
+| `acl_inventory`        <-- correct: that one IS a macro
+```
+
+---
+
+### Parameters, and the doors they open
+
+```
+| editappacl [app=<field>] [stanza_kind=<field>] [handler=<field>] [stanza=<field>]
+             [new_perms_read=<field>] [new_perms_write=<field>] [new_sharing=<field>]
+             [dryrun=<bool>] [allow_create=<bool>] [validate_roles=<bool>]
+             [journal=<bool>] [max_stanzas=<int>] [max_impacted_objects=<int>]
+```
+
+| Parameter | Default | Role |
+|---|---|---|
+| `app` | `eai:acl.app` | Target application. Required, with a value. `system` is rejected |
+| `stanza_kind` | `acl_stanza_kind` | `app_default` or `family_default`. **Required, never deduced** |
+| `handler` | `acl_handler` | Handler path, **primary** resolution route. Does not go through the shipped table |
+| `stanza` | `acl_stanza` | Family name, secondary route, through the table |
+| `new_perms_read` | `eai:acl.perms.read` | Target `perms.read` |
+| `new_perms_write` | `eai:acl.perms.write` | Target `perms.write` |
+| `new_sharing` | `eai:acl.sharing` | Target `sharing`, **`app` or `global` only** |
+| `dryrun` | `true` | No write at all |
+| `allow_create` | `false` | Authorises the **irreversible** creation of a missing stanza |
+| `validate_roles` | `true` | Checks that the **added** roles exist before writing |
+| `journal` | `true` | Records into the indexed journal |
+| `max_stanzas` | `5` | Maximum number of stanzas **written** per run. **A choice, not a measurement** |
+| `max_impacted_objects` | `200` | Maximum **sum of the estimated blast radii** of the stanzas written. **A choice, not a measurement** |
+
+The presence semantics are those of `editacl`: a column absent from the result set
+preserves the attribute, a column present with an empty cell empties it, a column present
+with a value applies it. **There is no owner parameter**: the value is inert on one write
+path and refused with `400` on the other, so exposing one would be a false promise.
+`sharing` is the only lever on the export, and `user` is refused per event.
+
+**Both permissions are always transmitted**, whatever you asked for. The write path
+replaces the whole `access` line as soon as one permission is present, so sending only
+`perms.write` **deletes** `perms.read`.
+
+#### `acl_handler` addresses any handler, and that door is deliberate
+
+The shipped family table bounds **resolution by name**, never the **write perimeter**.
+Passing `acl_handler` explicitly addresses **any handler**, including a family the table
+does not know and that nobody ever measured - writing a `[alerts]` header, for instance,
+works.
+
+**The door is kept open, for three reasons in order of weight.** One, closing it would
+bring back the defect of the previous project: a target written through an off-table
+handler would become **unrestorable**, resolution once again depending on the coverage of
+the table. Two, the table never claimed to be exhaustive - `searchbnf`, `sourcetypes`,
+`manager` and `searchscripts` exist on the reference platform without appearing in it, and
+confining writes to the table would forbid **real** families on the grounds that one
+measurement campaign did not sweep them. Three, this is not where the guard rail is: what
+bounds a write is the dedicated capability, the refusal to create by default, the two
+ceilings and the simulation-by-default - four dispositifs, all exercised on a real
+instance.
+
+**What you take on by using it.** You address a handler no measurement covered, so there
+is no guarantee that the `POST` succeeds - three families are measured **negative**, see
+the list of unreachable families below - and no guarantee that the stanza name written is
+the one you expect: **the stanza name follows the underlying configuration file, not the
+URI path**. `data/ui/workflow-actions` writes `[workflow_actions]`, with an underscore
+where the URI has a hyphen. Run the re-validation procedure, or a simulation, before
+trusting an off-table handler.
+
+#### Creating a stanza with `editappacl` cannot be undone
+
+No measured REST path removes a generic stanza, at any level. An `editappacl` write that
+**modifies** an existing generic stanza is reversible - `` `app_acl_rollback_apply(<sid>)` ``
+replays the prior state; an `editappacl` write that **creates** one is not, by any means
+this app or the platform offers. Writing `[]` into the `local.meta` of an
+application that had none masks the `[]` of its `default.meta` - the permissions shipped
+with the application - permanently.
+
+**A stanza that exists without carrying permissions counts as a creation too**, and for
+the same reason: nothing removes a key from a stanza any more than it removes the
+stanza. Writing permissions where there were none masks an inherited value for good, so
+such a target comes out `created` rather than `updated`, and `allow_create=false` refuses
+it. Reporting it as a modification would promise you a rollback that cannot work -
+replaying the previous *effective* values would write the permissions in explicitly and
+freeze the family instead of restoring it.
+
+The command therefore **refuses to create by default**: a missing target comes out
+`rejected` / `irreversible_creation`, with no call at all. `allow_create=true` is the
+deliberate act, and the cost is paid once per application - the first governance of an
+app is necessarily a creation, the following ones are modifications.
+
+**In simulation the refusal is visible**, which is the point: `dryrun=true` with
+`allow_create=false` shows you, before writing anything, which targets need the explicit
+act and which are plain modifications.
+
+**Two ceilings, counting two different things.** `max_stanzas` bounds the number of
+**acts** an `editappacl` run performs - some of which cannot be undone; `max_impacted_objects` bounds the estimated
+**blast radius**. Neither is enough alone: one write on the default of a large application
+is a single act with an immense reach, and twenty writes on empty families move nothing.
+**Neither ever fires in simulation**, which sends no POST, so a `dryrun` always covers the
+whole batch.
+
+#### Run one `editappacl` at a time on a given application
+
+**This is an operating rule, because no mechanism enforces it.** The refusal of a
+duplicate target is **within a single run**: nothing coordinates two runs launched at the
+same time against the same stanza.
+
+The scenario to avoid is precise. Both runs read the provenance before either has written;
+both classify the target as a materialisation; the second one journals empty `before_*`
+and `reversible="false"` while it has in fact **modified** an existing value. That prior
+value is then restorable by nothing - `app_acl_rollback` ignores the target, and
+`app_acl_irreversible` lists it as a creation that it was not.
+
+The risk is established by reading the code and **has not been reproduced**: an attempt to
+race two runs on the same missing stanza serialised cleanly. It is stated here because no
+technical dispositif covers it, and because the cost of the rule is nil - a campaign on
+one application is one run.
+
+**A target whose value already matches** comes out `noop` when it carries a stanza, and
+`noop_inherited` when it does not. The command deliberately does **not** materialise a
+stanza whose effect would be nil: it would change no right today and would remove the
+family from the reach of `[]` for ever.
+
+---
+
+### Statuses and output
+
+Each input event produces exactly one output event, keeping all of its fields, plus
+seventeen columns - always present, empty where a status has nothing to show.
+
+| Field | Content |
+|---|---|
+| `acl_status` (editappacl) | `updated`, `created`, `noop`, `noop_inherited`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_ceiling`, `skipped_impact_ceiling`, `error` |
+| `acl_endpoint` | Write path targeted, without scheme, host or port |
+| `acl_stanza_kind`, `acl_stanza`, `acl_handler` | Resolved target, re-emitted as it was used |
+| `acl_reversible` | `true`, `false` or `unknown` - can this write be undone |
+| `acl_impacted_estimate` | Estimated number of objects whose effective rights move. Empty when not computed |
+| `acl_http_code` | HTTP code of the POST, or of the GET on an upstream failure. `0` when no exchange took place |
+| `acl_error` | Error message, truncated at 512 characters |
+| `acl_warning` | Non-blocking warnings, joined by `;` |
+| `acl_before_*`, `acl_after_*` | `perms.read`, `perms.write` and `sharing` before and after, normalised |
+| `acl_journaled` | The `intent` line was written **and synchronised to disk** |
+
+Those are the twelve values of `acl_status` that `editappacl` produces, derived from the
+code by the test suite rather than maintained by hand. What each one means: `updated` the
+POST succeeded on a stanza that already existed; `created` the POST succeeded on a stanza
+that did **not** exist, which is the irreversible case; `noop` the target state equals the
+state read and the stanza is there, with no POST even in simulation; `noop_inherited` the
+same, except that the value is **inherited** and the command declines to materialise it;
+`dryrun` a real run **would have written** this stanza; `rejected` the row is unusable or
+the write is refused - missing or out-of-domain `stanza_kind`, missing application,
+`system`, duplicate target, unresolved family, empty or invalid `sharing`, unreadable
+provenance, or a creation without `allow_create`; `not_found` and `forbidden` the GET
+answered `404` or `403`; `invalid_role` an **added** role does not exist; `skipped_ceiling`
+`max_stanzas` was reached; `skipped_impact_ceiling` this target alone or the running total
+would exceed `max_impacted_objects`; `error` the POST failed, or the `intent` line could
+not be persisted, which cancels the POST.
+
+Warnings carried by `acl_warning` (editappacl): `irreversible_creation`,
+`provenance_unavailable`, `not_materialized`, `no_inheriting_object`, `sharing_change`,
+`stale_role_preserved:<list>`, `write_may_have_occurred`, `runtime_divergence_possible`,
+`journal_outcome_failed`, `self_app_target`, `app_disabled`.
+
+> **A non-2xx answer does not prove that nothing was written.** A `403` was measured
+> coming back from a POST that had written all the same. Such a target carries
+> `write_may_have_occurred`, the journal records `write_asserted="unknown"`, and it
+> **enters** the rollback set - rewriting the prior state of a stanza that did not move is
+> a `noop` by idempotence, so the wider selection cannot hurt while the narrower one can
+> miss a mutation.
+
+---
+
+### The macros and searches built on it
+
+`editappacl` writes **its own** journal file with **its own** sourcetype, separate from
+`editacl`: the two can share a `sid` in one search, and a line of one carries an object
+where a line of the other carries a stanza whose reach is several objects.
+
+| Macro | What it does |
+|---|---|
+| `app_acl_journal_source` | Source of the application-level journal. The single place its index is written |
+| `app_acl_diag_source` | Source of the application-level diagnostic |
+| `app_acl_rollback(<sid>)` | Rollback set of a run, as a **preview**. Writes nothing |
+| `app_acl_rollback_apply(<sid>)` | The same set followed by the complete `\| editappacl` invocation. It **writes** |
+| `app_acl_irreversible(<sid>)` | The written targets the rollback does **not** cover, with the value created and the inherited value it masked |
+
+```
+| `app_acl_rollback(1754483000.1)`          <-- look at what would be restored
+| `app_acl_irreversible(1754483000.1)`      <-- look at what will NOT be
+| `app_acl_rollback_apply(1754483000.1)`    <-- then restore
+```
+
+**Limits of the rollback, and the list is exhaustive.** It is not transactional; it does
+**not cover creations**, which is irreducible; it does not cover targets whose provenance
+could not be established at write time; it is only usable **once the journal is indexed**,
+the run's own file staying the immediate fallback; and it restores the **value** of a
+stanza, never its **absence**.
+
+`app_acl_rollback_apply` carries `allow_create=f` and that is not negotiable: a restore
+never creates anything.
+
+**Two saved searches**, neither scheduled. `App ACL - irreversible writes` lists the
+creations per run with their target and estimated reach, and carries the
+`app_acl_irreversible` call for each. `App ACL - governability of the estate` ventilates
+the applications by `acl_reach`, per member.
+
+**Redirecting both journal indexes takes FOUR overrides in all**, not two: `local/inputs.conf`
+and `local/macros.conf`, for **each** of the two journal sets. Applying one and not the
+other leaves the shipped searches reading the old index and returning an empty result
+without saying so.
+
+**Three families are known not to be reachable** and are deliberately absent from the
+shipped table, so they come out `unresolved_family` before any call: `visualizations`
+(the write answers `500 No capability specified`), `ntags` (the read answers `404`, the
+write refuses `perms.read`), and `props` addressed through `data/props/extractions` or
+`admin/props-extract` - which is harmless, `[props]` being reachable through seven other
+handlers including the one the table designates. They are not named in the code: carving a
+property of the platform into the tool would freeze something the next version may
+contradict.
+
+---
+
+---
+
+## 3. `editacl` - the exception, one object at a time
+
+### What it writes
 
 ```
 | editacl [title=<field>] [app=<field>] [id=<field>] [type=<field>] [sharing=<field>]
@@ -245,7 +727,7 @@ column rejects the event, as does a scope outside `{user, app, global}`.
 
 ---
 
-## Statuses and output
+### Statuses and output
 
 Each input event produces **exactly one** output event, keeping all of its fields, plus
 fourteen columns - always present, empty where a status has nothing to show.
@@ -281,7 +763,7 @@ Warnings carried by `acl_warning`: `sharing_change`, `owner_change`, `app_disabl
 
 ---
 
-## The other shipped objects
+### The macros, searches and view built on it
 
 **`acl_inventory`** enumerates the knowledge objects through the native endpoints, family
 by family, and normalises their output onto the input contract of the command. It is
@@ -343,496 +825,38 @@ The shipped `acl_decommissioned_roles` lookup only holds generic example identif
 
 ---
 
-## Governing an application instead of an object
-
-A Splunk application carries a metadata file whose **generic stanzas** decide the
-permissions of every object that has none of its own:
-
-```
-[]                     <-- the application default: every object with nothing above it
-[views]                <-- the family default: every view of the application
-[views/my_dashboard]   <-- one object. `editacl` writes these; nothing removes them
-```
-
-The chain is measured in all three of its levels: `[<family>/<object>]` wins over
-`[<family>]`, which wins over `[]`. Specificity wins over the layer the stanza lives in,
-so `default.meta` and `local.meta` are read as **one set of stanzas**.
+### How a write is made undoable
 
 ```mermaid
 flowchart LR
-  INV["| appaclinventory<br/>reads REST AND the file"] --> DEC{"acl_reach"}
-  DEC -- "all" --> GOV["govern the generic<br/>| editappacl"]
-  DEC -- "partial" --> MIX["the frozen objects will not move:<br/>editacl one by one, or leave them"]
-  DEC -- "unknown" --> READ["the metadata could not be read:<br/>no conclusion is emitted"]
-  GOV --> WAL[["editappacl_journal_&lt;sid&gt;.log"]]
-  WAL --> RB["app_acl_rollback / app_acl_rollback_apply"]
-  WAL --> IRR["app_acl_irreversible<br/>what the rollback will NOT undo"]
+  SPL["SPL pipeline<br/>one event = one object"] --> CMD
+  subgraph CMD["editacl (search head, local)"]
+    direction TB
+    RES["Preflight once per run, then per event:<br/>endpoint resolution from id, otherwise from eai:type"]
+    GET["GET current state<br/>(the platform is authoritative)"]
+    MER["Merge: the PRESENCE of a column decides WHAT,<br/>the cell decides THE VALUE"]
+    CTL["Ordered checks: private, derived, immutable,<br/>rejections, roles, idempotence, simulation"]
+    WAL["Journal: intent line, write + flush + fsync"]
+    POST["POST /acl"]
+    OUT["Journal: outcome line<br/>+ one output event"]
+    RES --> GET --> MER --> CTL --> WAL --> POST --> OUT
+    CTL -- "abstention or rejection: no POST" --> OUT
+  end
+  GET -. "read" .-> SPLUNKD[("splunkd<br/>REST API")]
+  POST -. "write" .-> SPLUNKD
+  WAL --> FILE[["editacl_journal_&lt;sid&gt;.log"]]
+  OUT --> FILE
+  FILE -- "monitor + dedicated sourcetype" --> IDX[("index _internal<br/>sourcetype editacl:journal")]
+  IDX --> RB["rollback macros"]
+  IDX --> DASH["run monitoring view"]
+  CMD --> RESULT["Output events, acl_* fields"]
 ```
 
-**Why the inventory is a command and not a macro.** Through REST, an object that
-**inherits** and an object carrying its **own** stanza of the same value return a strictly
-identical ACL block. Provenance has no REST answer at all, and an SPL macro cannot read a
-file. So `appaclinventory` is a **command**, invoked with a leading pipe and **never
-between backticks**, whereas `acl_inventory` is a macro and is invoked between backticks.
-
-**The commands of this app carry no underscore, and that is not a style rule.** Measured on
-Splunk 9.4.6: the search parser **ends a command name at the first underscore**. A command
-declared `a_b_c` is looked up as `a`, and answers `Unknown search command 'a'` - in leading
-position as well as downstream, with no escaping that gets round it. Underscores belong to
-macro names, which resolve differently; they never appear in a command name here.
-
-```
-| appaclinventory        <-- correct: it is a command
-| `appaclinventory`      <-- fails: it is not a macro
-| `acl_inventory`        <-- correct: that one IS a macro
-```
-
----
-
-## The inventory command
-
-```
-| appaclinventory [apps=<string>] [families=<string>]
-```
-
-| Parameter | Default | Role |
-|---|---|---|
-| `apps` | `*` | Comma-separated applications, `*` patterns allowed. Characters outside `A-Za-z0-9_,*-` are dropped |
-| `families` | *(none)* | Families to emit **even** when they carry neither a stanza nor a frozen object |
-
-## What the inventory gives you, column by column
-
-**Read this table instead of the code.** Every column below answers one question, and the
-table says which. **Nineteen columns, listed in the order they come out** - the order of
-the table is the order of the output, and a test compares the two rather than trusting
-either.
-
-**Four groups, and no column mixes two.** That is what makes the table readable: some
-columns say what the **file** carries, some what the **platform** applies, some what
-**stands between** the two, and some identify the row. They are called *groups* and not
-*levels* on purpose: in this app, a **level** is a storey of the inheritance chain -
-application, family, object - and nothing else.
-
-> **Start with `acl_write_effect`.** It is the column that tells you whether the write you
-> are about to launch can be undone. Everything else describes a state; that one describes
-> the consequence of an action.
-
-> **No column is ever empty without another saying why - nor without saying whether the
-> empty means "absent" or "empty set".** If the three `eai:acl.*` cells are blank,
-> `acl_effective_status` says what stopped the read. The three `acl_file_*` cells and the
-> two counters say their own absence: what is **not written**, or **not counted**, comes out
-> as `(absent)`. A blank in a file cell therefore means one thing only - the key is written
-> and holds no value.
-
-| # | Column | Group | The question it answers | Values |
-|---|---|---|---|---|
-| 1 | `eai:acl.app` | identification | Which application | a name |
-| 2 | `acl_stanza_kind` | identification | Is this the application default, or one family | `app_default`, `family_default` |
-| 3 | `acl_stanza` | identification | Which stanza, written as the file writes it, brackets included | `[]`, `[views]`, `[commands]` |
-| 4 | `acl_handler` | tool | Which REST path the tool reaches this **family** by, **by name** | a path, or empty |
-| 5 | `eai:acl.perms.read` | platform | Which roles read, today | roles, comma-separated |
-| 6 | `eai:acl.perms.write` | platform | Which roles write, today | roles, comma-separated |
-| 7 | `eai:acl.sharing` | platform | Which scope applies, today | `app`, `global`, `user` |
-| 8 | `acl_effective_status` | platform | Were those three **read**, and if not why | `ok`, `app_disabled`, `unreadable` |
-| 9 | `acl_row_reason` | identification | **Why this row exists at all** | `app_row`, `stanza_exists`, `objects_exist`, `requested` |
-| 10 | `acl_write_effect` | decision | **What an `editappacl` write to this stanza would do, and whether you could undo it** | `overwrite_reversible`, `create_irreversible` |
-| 11 | `acl_perms_source` | file | **Where this stanza's permissions are written** - so which layer the three cells below quote, and what an `editappacl` write would do | `local`, `default`, `nowhere` |
-| 12 | `acl_file_perms_read` | file | What that stanza writes for reading | roles, empty, or `(absent)` |
-| 13 | `acl_file_perms_write` | file | What it writes for writing | roles, empty, or `(absent)` |
-| 14 | `acl_file_export` | file | What the stanza writes for `export`, literally | any text splunkd writes there - `none`, `system`, `global` - or empty, or `(absent)` |
-| 15 | `acl_file_read` | file | Were the metadata files read **in full** | `ok`, `partial:<n>`, `unreadable` |
-| 16 | `acl_objects_with_own_perms` | decision | How many objects carry **their own permissions** and therefore escape this stanza | a count, or `(absent)` |
-| 17 | `acl_families_with_own_perms` | decision | How many families of this application carry their own permissions and therefore escape `[]` | a count, or `(absent)` |
-| 18 | `acl_reach` | decision | Does this stanza reach every object in its scope | `all`, `partial`, `unknown` |
-| 19 | `acl_member` | context | Which member the metadata was read on | a name, or `unknown` |
-
-**`acl_file_export` has an open domain, and that is a fact about Splunk, not a gap here**:
-the cell carries the text of the `export` key **as the file writes it**, whatever splunkd
-chose to write. `none`, `system` and `global` are what you will see in practice. The two
-reserved tokens are the ones this app adds: `(absent)` for a key that is not written, and a
-blank for a key written with no value.
-
-### Identification - which stanza is this row about, and why is it here
-
-**An empty `acl_handler` on a `family_default` row means one thing, and one thing only:
-this family is not in the table shipped with the tool.** It does not mean the family cannot
-be written to - the table bounds resolution **by name**, never the write perimeter, and
-passing `acl_handler=` yourself addresses any handler (see
-[`acl_handler` addresses any handler, and that door is deliberate](#acl_handler-addresses-any-handler-and-that-door-is-deliberate)).
-The rest of the row keeps answering: `acl_write_effect` still says what a write there would
-do, `acl_reach` still says how far the stanza carries, and the two counters still count.
-
-**On an `app_default` row the column does not apply at all**, and it is empty for that
-reason: `[]` is addressed by the application name alone and needs no handler. Read
-`acl_stanza_kind` first - it says which of the two kinds of row you are on, and therefore
-which of these two readings of an empty handler is the right one.
-
-`acl_row_reason` is the column to read first when a row surprises you. `stanza_exists` means
-the stanza is written in a metadata file. **`objects_exist` means it is not** - the family is
-listed because some of its objects carry a stanza of their own, which is enough to make the
-family worth showing. `requested` means you asked for it with `families=`.
-
-### Platform - what splunkd applies right now
-
-`acl_effective_status` answers one question only: could the platform be read. `unreadable`
-covers its two causes, and **`acl_handler` tells them apart** - **empty**, there is no route
-to this family by name; **filled**, the call was made and it failed.
-
-### Decision - what a write would do, and what stands in its way
-
-**`acl_write_effect` is the safety column**, and it answers on **every** row - two values,
-no third.
-
-- `overwrite_reversible` - the stanza already carries its permissions in the **local** layer.
-  An `editappacl` write **replaces** them, and `` `app_acl_rollback(<sid>)` `` can put the
-  previous values back.
-- `create_irreversible` - the permissions are **not** in the local layer, whether they sit in
-  the default layer or nowhere at all. An `editappacl` write **materialises** them there, and
-  **nothing removes them afterwards**: no rollback, no REST path. `editappacl` refuses such a
-  target unless you pass `allow_create=true`. **This is the common case on a freshly
-  installed application**, whose stanzas are all shipped in the default layer.
-
-`acl_write_effect` does **not** consult the route, and that is deliberate: a family outside
-the shipped table is still writable with `editappacl` through an explicit `acl_handler`, so it
-is precisely the row where you most need to be told that the write cannot be undone.
-
-`acl_reach` reads `all` when nothing stands between this stanza and the objects of its scope.
-It reads `unknown` for one reason only - the metadata could not be read in full - and
-`acl_file_read` names it. A family with no route in the shipped table reads `all` when nothing
-escapes it: nothing stands in the way, and the missing route is a fact about the tool that
-`acl_handler` states on its own.
-
-**The two counters are counted in the file, and the route has nothing to do with it.** They
-come from the `.meta` files, through one predicate, and reach no REST handler: on a family
-the shipped table does not know, a `0` is a **measured zero** exactly as it is anywhere else.
-
-> **`0` and `(absent)` are not the same answer, and the difference decides.** `0` means
-> *counted, and nothing escapes this stanza*. `(absent)` means *the count could not be made*
-> - the metadata file was unreadable, or was read with lines skipped, which `acl_file_read`
-> says on the same row. A count that cannot be complete is not published as a small number:
-> a lower bound reassures in the dangerous direction.
-
-**"Carries its own permissions" means one thing here: the stanza writes an `access` key** -
-in `local.meta` or in `default.meta`, it makes no difference at this question. Splunk writes
-a stanza for every object you create or edit, carrying `owner`, `version` and `modtime` and
-nothing else; such an object still inherits, and is **not** counted.
-
-> **That is not the predicate `acl_write_effect` uses, and the two are neighbours.** The
-> counters ask *what escapes this stanza* - an `access` key **in either layer**. The write
-> effect asks *would a write here be undoable* - an `access` key **in `local.meta`**. A
-> family frozen in `default.meta` alone therefore counts as carrying its own permissions
-> **and** would take an irreversible write. Both answers are right; they answer different
-> questions.
-
-The scope of `acl_objects_with_own_perms` is the scope of the row: the family on a family
-row, the whole application on an application row. `acl_families_with_own_perms` is an
-application fact and is repeated on every row of that application - do not sum it.
-
-### File - what the metadata carries, literally
-
-`acl_perms_source` is decided by one thing: whether an `access` key exists, and in which
-layer. `nowhere` means **no `access` key anywhere** - the stanza may still exist and carry an
-`export`, which is why `acl_file_export` can be filled while the two permission cells read
-`(absent)`.
-
-> **The word is `nowhere` and not `none`, and that is not a nicety.** `none` is a literal
-> `export` value on the Splunk side, and you will read it in `acl_file_export` two columns
-> away. One token for two opposite meanings on the same row is one token too many; the
-> platform's vocabulary wins, and it is our column that changes word.
-
-**`(absent)` means the key is not written; a blank means the key is written and carries
-nothing.** The two are opposites: a permission written empty leaves the objects
-**unreachable**, while an unwritten one leaves them **inheriting** from one level up. They
-are also the two states that decide whether an `editappacl` write **updates** or **creates**.
-No role name and no `export` value of the platform is spelled between parentheses, so the
-token cannot be mistaken for a value read from the file.
-
-**These columns quote the file; the `eai:acl.*` columns show what splunkd applies.** When the
-two disagree, something else is deciding - the other layer, or a generic stanza one level up.
-That comparison is the reason both are here.
-
-`acl_perms_source` says **where the permissions are written**, and nothing more. It does not
-say where the effective permissions come from: answering that would mean replaying Splunk's
-own inheritance resolution, which this tool deliberately never does.
-
-`acl_file_read` is about the **files**, not the stanza. `partial:<n>` means `n` lines were
-skipped while parsing, so the two counters come out `(absent)` rather than understated;
-`unreadable` means nothing on this row was read from the file at all.
-
-### Context
-
-`acl_member` says which member the metadata was read on, and `unknown` means the platform
-would not give its own name. Run the inventory on each member and compare the tables: a
-difference is a metadata replication gap, which no configuration audit sees.
-
-### Which rows come out
-
-One row per application, always. Then one row per family, when **any** of these is true -
-and `acl_row_reason` tells you which:
-
-1. the family header is written in one of the two metadata files (`stanza_exists`);
-2. at least one object of that family carries a stanza of its own - **it exists, whether or
-   not it freezes anything** (`objects_exist`);
-3. you named the family in `families=` (`requested`).
-
-Condition 2 is about **presence, not freezing**. A family whose objects were merely opened
-and saved in the interface will appear, with `acl_objects_with_own_perms = 0` and
-`acl_reach = all` - the row then says exactly that. A family matching none of the three does
-not appear, which does not mean it cannot be governed: only that today it is neither
-governed nor frozen.
-
-## The application-level write command
-
-```
-| editappacl [app=<field>] [stanza_kind=<field>] [handler=<field>] [stanza=<field>]
-             [new_perms_read=<field>] [new_perms_write=<field>] [new_sharing=<field>]
-             [dryrun=<bool>] [allow_create=<bool>] [validate_roles=<bool>]
-             [journal=<bool>] [max_stanzas=<int>] [max_impacted_objects=<int>]
-```
-
-| Parameter | Default | Role |
-|---|---|---|
-| `app` | `eai:acl.app` | Target application. Required, with a value. `system` is rejected |
-| `stanza_kind` | `acl_stanza_kind` | `app_default` or `family_default`. **Required, never deduced** |
-| `handler` | `acl_handler` | Handler path, **primary** resolution route. Does not go through the shipped table |
-| `stanza` | `acl_stanza` | Family name, secondary route, through the table |
-| `new_perms_read` | `eai:acl.perms.read` | Target `perms.read` |
-| `new_perms_write` | `eai:acl.perms.write` | Target `perms.write` |
-| `new_sharing` | `eai:acl.sharing` | Target `sharing`, **`app` or `global` only** |
-| `dryrun` | `true` | No write at all |
-| `allow_create` | `false` | Authorises the **irreversible** creation of a missing stanza |
-| `validate_roles` | `true` | Checks that the **added** roles exist before writing |
-| `journal` | `true` | Records into the indexed journal |
-| `max_stanzas` | `5` | Maximum number of stanzas **written** per run. **A choice, not a measurement** |
-| `max_impacted_objects` | `200` | Maximum **sum of the estimated blast radii** of the stanzas written. **A choice, not a measurement** |
-
-The presence semantics are those of `editacl`: a column absent from the result set
-preserves the attribute, a column present with an empty cell empties it, a column present
-with a value applies it. **There is no owner parameter**: the value is inert on one write
-path and refused with `400` on the other, so exposing one would be a false promise.
-`sharing` is the only lever on the export, and `user` is refused per event.
-
-**Both permissions are always transmitted**, whatever you asked for. The write path
-replaces the whole `access` line as soon as one permission is present, so sending only
-`perms.write` **deletes** `perms.read`.
-
-> ### `acl_handler` addresses any handler, and that door is deliberate
->
-> The shipped family table bounds **resolution by name**, never the **write perimeter**.
-> Passing `acl_handler` explicitly addresses **any handler**, including a family the table
-> does not know and that nobody ever measured - writing a `[alerts]` header, for instance,
-> works.
->
-> **The door is kept open, for three reasons in order of weight.** One, closing it would
-> bring back the defect of the previous project: a target written through an off-table
-> handler would become **unrestorable**, resolution once again depending on the coverage of
-> the table. Two, the table never claimed to be exhaustive - `searchbnf`, `sourcetypes`,
-> `manager` and `searchscripts` exist on the reference platform without appearing in it, and
-> confining writes to the table would forbid **real** families on the grounds that one
-> measurement campaign did not sweep them. Three, this is not where the guard rail is: what
-> bounds a write is the dedicated capability, the refusal to create by default, the two
-> ceilings and the simulation-by-default - four dispositifs, all exercised on a real
-> instance.
->
-> **What you take on by using it.** You address a handler no measurement covered, so there
-> is no guarantee that the `POST` succeeds - three families are measured **negative**, see
-> the list of unreachable families below - and no guarantee that the stanza name written is
-> the one you expect: **the stanza name follows the underlying configuration file, not the
-> URI path**. `data/ui/workflow-actions` writes `[workflow_actions]`, with an underscore
-> where the URI has a hyphen. Run the re-validation procedure, or a simulation, before
-> trusting an off-table handler.
-
-> ### Creating a stanza with `editappacl` cannot be undone
->
-> No measured REST path removes a generic stanza, at any level. An `editappacl` write that
-> **modifies** an existing generic stanza is reversible - `` `app_acl_rollback_apply(<sid>)` ``
-> replays the prior state; an `editappacl` write that **creates** one is not, by any means
-> this app or the platform offers. Writing `[]` into the `local.meta` of an
-> application that had none masks the `[]` of its `default.meta` - the permissions shipped
-> with the application - permanently.
->
-> **A stanza that exists without carrying permissions counts as a creation too**, and for
-> the same reason: nothing removes a key from a stanza any more than it removes the
-> stanza. Writing permissions where there were none masks an inherited value for good, so
-> such a target comes out `created` rather than `updated`, and `allow_create=false` refuses
-> it. Reporting it as a modification would promise you a rollback that cannot work -
-> replaying the previous *effective* values would write the permissions in explicitly and
-> freeze the family instead of restoring it.
->
-> The command therefore **refuses to create by default**: a missing target comes out
-> `rejected` / `irreversible_creation`, with no call at all. `allow_create=true` is the
-> deliberate act, and the cost is paid once per application - the first governance of an
-> app is necessarily a creation, the following ones are modifications.
->
-> **In simulation the refusal is visible**, which is the point: `dryrun=true` with
-> `allow_create=false` shows you, before writing anything, which targets need the explicit
-> act and which are plain modifications.
-
-**Two ceilings, counting two different things.** `max_stanzas` bounds the number of
-**acts** an `editappacl` run performs - some of which cannot be undone; `max_impacted_objects` bounds the estimated
-**blast radius**. Neither is enough alone: one write on the default of a large application
-is a single act with an immense reach, and twenty writes on empty families move nothing.
-**Neither ever fires in simulation**, which sends no POST, so a `dryrun` always covers the
-whole batch.
-
-> ### Run one `editappacl` at a time on a given application
->
-> **This is an operating rule, because no mechanism enforces it.** The refusal of a
-> duplicate target is **within a single run**: nothing coordinates two runs launched at the
-> same time against the same stanza.
->
-> The scenario to avoid is precise. Both runs read the provenance before either has written;
-> both classify the target as a materialisation; the second one journals empty `before_*`
-> and `reversible="false"` while it has in fact **modified** an existing value. That prior
-> value is then restorable by nothing - `app_acl_rollback` ignores the target, and
-> `app_acl_irreversible` lists it as a creation that it was not.
->
-> The risk is established by reading the code and **has not been reproduced**: an attempt to
-> race two runs on the same missing stanza serialised cleanly. It is stated here because no
-> technical dispositif covers it, and because the cost of the rule is nil - a campaign on
-> one application is one run.
-
-**A target whose value already matches** comes out `noop` when it carries a stanza, and
-`noop_inherited` when it does not. The command deliberately does **not** materialise a
-stanza whose effect would be nil: it would change no right today and would remove the
-family from the reach of `[]` for ever.
-
----
-
-## Application-level statuses and output
-
-Each input event produces exactly one output event, keeping all of its fields, plus
-seventeen columns - always present, empty where a status has nothing to show.
-
-| Field | Content |
-|---|---|
-| `acl_status` (editappacl) | `updated`, `created`, `noop`, `noop_inherited`, `dryrun`, `rejected`, `not_found`, `forbidden`, `invalid_role`, `skipped_ceiling`, `skipped_impact_ceiling`, `error` |
-| `acl_endpoint` | Write path targeted, without scheme, host or port |
-| `acl_stanza_kind`, `acl_stanza`, `acl_handler` | Resolved target, re-emitted as it was used |
-| `acl_reversible` | `true`, `false` or `unknown` - can this write be undone |
-| `acl_impacted_estimate` | Estimated number of objects whose effective rights move. Empty when not computed |
-| `acl_http_code` | HTTP code of the POST, or of the GET on an upstream failure. `0` when no exchange took place |
-| `acl_error` | Error message, truncated at 512 characters |
-| `acl_warning` | Non-blocking warnings, joined by `;` |
-| `acl_before_*`, `acl_after_*` | `perms.read`, `perms.write` and `sharing` before and after, normalised |
-| `acl_journaled` | The `intent` line was written **and synchronised to disk** |
-
-Those are the twelve values of `acl_status` that `editappacl` produces, derived from the
-code by the test suite rather than maintained by hand. What each one means: `updated` the
-POST succeeded on a stanza that already existed; `created` the POST succeeded on a stanza
-that did **not** exist, which is the irreversible case; `noop` the target state equals the
-state read and the stanza is there, with no POST even in simulation; `noop_inherited` the
-same, except that the value is **inherited** and the command declines to materialise it;
-`dryrun` a real run **would have written** this stanza; `rejected` the row is unusable or
-the write is refused - missing or out-of-domain `stanza_kind`, missing application,
-`system`, duplicate target, unresolved family, empty or invalid `sharing`, unreadable
-provenance, or a creation without `allow_create`; `not_found` and `forbidden` the GET
-answered `404` or `403`; `invalid_role` an **added** role does not exist; `skipped_ceiling`
-`max_stanzas` was reached; `skipped_impact_ceiling` this target alone or the running total
-would exceed `max_impacted_objects`; `error` the POST failed, or the `intent` line could
-not be persisted, which cancels the POST.
-
-Warnings carried by `acl_warning` (editappacl): `irreversible_creation`,
-`provenance_unavailable`, `not_materialized`, `no_inheriting_object`, `sharing_change`,
-`stale_role_preserved:<list>`, `write_may_have_occurred`, `runtime_divergence_possible`,
-`journal_outcome_failed`, `self_app_target`, `app_disabled`.
-
-> **A non-2xx answer does not prove that nothing was written.** A `403` was measured
-> coming back from a POST that had written all the same. Such a target carries
-> `write_may_have_occurred`, the journal records `write_asserted="unknown"`, and it
-> **enters** the rollback set - rewriting the prior state of a stanza that did not move is
-> a `noop` by idempotence, so the wider selection cannot hurt while the narrower one can
-> miss a mutation.
-
----
-
-## The application-level macros and searches
-
-`editappacl` writes **its own** journal file with **its own** sourcetype, separate from
-`editacl`: the two can share a `sid` in one search, and a line of one carries an object
-where a line of the other carries a stanza whose reach is several objects.
-
-| Macro | What it does |
-|---|---|
-| `app_acl_journal_source` | Source of the application-level journal. The single place its index is written |
-| `app_acl_diag_source` | Source of the application-level diagnostic |
-| `app_acl_rollback(<sid>)` | Rollback set of a run, as a **preview**. Writes nothing |
-| `app_acl_rollback_apply(<sid>)` | The same set followed by the complete `\| editappacl` invocation. It **writes** |
-| `app_acl_irreversible(<sid>)` | The written targets the rollback does **not** cover, with the value created and the inherited value it masked |
-
-```
-| `app_acl_rollback(1754483000.1)`          <-- look at what would be restored
-| `app_acl_irreversible(1754483000.1)`      <-- look at what will NOT be
-| `app_acl_rollback_apply(1754483000.1)`    <-- then restore
-```
-
-**Limits of the rollback, and the list is exhaustive.** It is not transactional; it does
-**not cover creations**, which is irreducible; it does not cover targets whose provenance
-could not be established at write time; it is only usable **once the journal is indexed**,
-the run's own file staying the immediate fallback; and it restores the **value** of a
-stanza, never its **absence**.
-
-`app_acl_rollback_apply` carries `allow_create=f` and that is not negotiable: a restore
-never creates anything.
-
-**Two saved searches**, neither scheduled. `App ACL - irreversible writes` lists the
-creations per run with their target and estimated reach, and carries the
-`app_acl_irreversible` call for each. `App ACL - governability of the estate` ventilates
-the applications by `acl_reach`, per member.
-
-**Redirecting both journal indexes takes FOUR overrides in all**, not two: `local/inputs.conf`
-and `local/macros.conf`, for **each** of the two journal sets. Applying one and not the
-other leaves the shipped searches reading the old index and returning an empty result
-without saying so.
-
-**Three families are known not to be reachable** and are deliberately absent from the
-shipped table, so they come out `unresolved_family` before any call: `visualizations`
-(the write answers `500 No capability specified`), `ntags` (the read answers `404`, the
-write refuses `perms.read`), and `props` addressed through `data/props/extractions` or
-`admin/props-extract` - which is harmless, `[props]` being reachable through seven other
-handlers including the one the table designates. They are not named in the code: carving a
-property of the platform into the tool would freeze something the next version may
-contradict.
-
----
-
-## Examples
-
-Substituting an obsolete role, **in simulation**, over the complete inventory. No
-parameter: the macro emits the native field names, which the defaults pick up.
-
-```
-| `acl_inventory`
-| search "eai:acl.perms.write"="legacy_role" OR "eai:acl.perms.read"="legacy_role"
-| eval "eai:acl.perms.read" = mvmap('eai:acl.perms.read',
-        if('eai:acl.perms.read'="legacy_role", "new_role_read", 'eai:acl.perms.read'))
-| eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
-        if('eai:acl.perms.write'="legacy_role", "new_role_admin", 'eai:acl.perms.write'))
-| editacl
-| stats count by acl_status "eai:type" "eai:acl.app"
-```
-
-**Emptying `perms.write`, writing for real** - the nominal decommissioning pipeline. An
-`mvmap` that removes the last value leaves the column in place with a null cell, and the
-attribute is emptied. The ceiling is spelled out because the batch exceeds ten objects:
-
-```
-| `acl_inventory(savedsearch)`
-| search "eai:acl.perms.write"="legacy_role"
-| eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
-        if('eai:acl.perms.write'="legacy_role", null(), 'eai:acl.perms.write'))
-| editacl dryrun=f max_objects=1000
-| where acl_status!="noop"
-```
-
-**Resuming a batch stopped by the ceiling** - replay it with a higher ceiling. Objects
-already written come out `noop` through idempotence, so there is no double write:
-
-```
-| `acl_inventory(savedsearch)` | search ... | eval ...
-| editacl dryrun=f                          <-- 10 updated, 30 skipped_ceiling
-| editacl dryrun=f max_objects=100          <-- 10 noop,    30 updated
-```
+The intent line precedes the POST and is synchronised to disk: if it cannot be written,
+the POST is cancelled. That is what makes an **`editacl` write to an object's ACL**
+undoable - the prior state is on disk before anything changes, and
+`` `editacl_rollback_apply(<sid>)` `` replays it. It is a property of the **journal**, not
+of the write: an `editappacl` **creation** of a generic stanza stays irreversible however
 
 ---
 
@@ -877,7 +901,7 @@ others. The arity is written as Splunk writes it: `(1)` takes one argument.
 `macros.conf` and `savedsearches.conf` actually declare. A document that miscounts what it
 ships cannot be believed on what it explains.
 
-### Reading the application-level audit view
+#### Reading the application-level audit view
 
 **A dashboard that shows nothing does not prove that no write took place.** Read the
 *Entitlement check* panel first: it tells *no run was recorded* from *this journal is not
@@ -907,10 +931,56 @@ role* means *by that role and by any administrator*.
 dashboards page of any app context, since it is exported to the system, but it appears in
 no menu but this app's without an entry added by you.
 
+---
+
+## Examples
+
+Substituting an obsolete role, **in simulation**, over the complete inventory. No
+parameter: the macro emits the native field names, which the defaults pick up.
+
+```
+| `acl_inventory`
+| search "eai:acl.perms.write"="legacy_role" OR "eai:acl.perms.read"="legacy_role"
+| eval "eai:acl.perms.read" = mvmap('eai:acl.perms.read',
+        if('eai:acl.perms.read'="legacy_role", "new_role_read", 'eai:acl.perms.read'))
+| eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
+        if('eai:acl.perms.write'="legacy_role", "new_role_admin", 'eai:acl.perms.write'))
+| editacl
+| stats count by acl_status "eai:type" "eai:acl.app"
+```
+
+**Emptying `perms.write`, writing for real** - the nominal decommissioning pipeline. An
+`mvmap` that removes the last value leaves the column in place with a null cell, and the
+attribute is emptied. The ceiling is spelled out because the batch exceeds ten objects:
+
+```
+| `acl_inventory(savedsearch)`
+| search "eai:acl.perms.write"="legacy_role"
+| eval "eai:acl.perms.write" = mvmap('eai:acl.perms.write',
+        if('eai:acl.perms.write'="legacy_role", null(), 'eai:acl.perms.write'))
+| editacl dryrun=f max_objects=1000
+| where acl_status!="noop"
+```
+
+**Resuming a batch stopped by the ceiling** - replay it with a higher ceiling. Objects
+already written come out `noop` through idempotence, so there is no double write:
+
+```
+| `acl_inventory(savedsearch)` | search ... | eval ...
+| editacl dryrun=f                          <-- 10 updated, 30 skipped_ceiling
+| editacl dryrun=f max_objects=100          <-- 10 noop,    30 updated
+```
+
+---
+
+---
+
 ## Before you use it
 
 Limits that change what you have to do. Each one says what to do about it; where the
 reason is short enough to matter here, it is given.
+
+### Seeing what happened, and what an empty view proves
 
 - **Read access to the journal index is a prerequisite** of the view, of both rollback
   macros and of the change-journal search. Grant it before the first run.
@@ -928,6 +998,8 @@ reason is short enough to matter here, it is given.
 - **An empty audit view proves nothing.** Read the entitlement check of the view before
   concluding that no write took place - and read the index list it publishes beside its
   verdict.
+### Writing at object level
+
 - **Writing an `eventtype` aligns its derived objects by cascade, and that alignment
   cannot be rolled back.** Run the divergence search before a campaign; it pairs objects
   **by application** and misses a carrier shared globally from another one.
@@ -935,6 +1007,8 @@ reason is short enough to matter here, it is given.
   workaround.
 - **A pipeline that only fills a field on some of its rows empties the attribute on the
   others.** Keep the current value on the `else` branch, or filter upstream instead.
+### What the tool can and cannot see
+
 - **Without `admin_all_objects` the inventory is silently truncated** of other people's
   private objects, and splunkd refuses writes on objects you do not own.
 - **`| rest .../admin/directory` sees 60.6 % of the objects** on the reference platform,
@@ -943,6 +1017,8 @@ reason is short enough to matter here, it is given.
   validated by a real GET. Re-validate it on your platform before any real use.
 - **`dryrun` defaults to `true`**: nothing is written until you pass `dryrun=f`, and only
   `acl_status` tells a simulation from a real run.
+### Ceilings, failures, and what a failure does not prove
+
 - **`max_objects` defaults to 10 and counts writes, not events**: the rest of the batch
   comes out `skipped_ceiling`, the output stays complete, and what was already written is
   **not** rolled back.
@@ -960,6 +1036,8 @@ reason is short enough to matter here, it is given.
   `| eval acl_type = if(coalesce(acl_type,"")!="", acl_type, "(type not established)")`.
   Likewise, `acl_journaled` reports the `intent` line only, so it is `false` on every
   line of a simulation, which nonetheless journals an `outcome` line.
+### Journals, indexes and retention
+
 - **Journal files are never purged automatically**, and `_internal` freezes at 28 days.
   Purge by age, once the restore window is closed:
   `find "$SPLUNK_HOME/var/log/splunk" -name 'editacl_journal_*.log' -mtime +90 -delete`.
@@ -1028,6 +1106,8 @@ Limits proper to the application level:
   reading through the API - and never Splunk's configuration change tracking, which does
   not see metadata files at all. Three successive audits of the previous project declared
   a lab back to its baseline while 1 224 stanzas were mutated.
+
+---
 
 ---
 

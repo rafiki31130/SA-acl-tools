@@ -943,7 +943,7 @@ class TheReadmeFieldTableIsADeliverableTest(unittest.TestCase):
 
         with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as handle:
             cls.readme = handle.read()
-        start = cls.readme.index("## What the inventory gives you, column by column")
+        start = cls.readme.index("### What it gives you, column by column")
         cls.section = cls.readme[start:cls.readme.index("\n## ", start + 10)]
 
     def test_the_section_exists_and_is_not_a_stub(self):
@@ -983,9 +983,9 @@ class TheReadmeFieldTableIsADeliverableTest(unittest.TestCase):
         """The levels are the reading key, not a classification for the archives: a table
         of eighteen columns with nothing separating them is what produced the two most
         serious findings."""
-        for level in ("Identification", "Platform", "File", "Decision"):
-            with self.subTest(level=level):
-                self.assertIn("### %s" % level, self.section)
+        for group in ("Identification", "Platform", "File", "Decision"):
+            with self.subTest(group=group):
+                self.assertIn("#### %s" % group, self.section)
 
     def test_the_closed_domains_are_published(self):
         """An operator filtering on a value needs to know which values exist."""
@@ -1470,8 +1470,12 @@ class ReversibilitySpeaksWithOneVoiceTest(unittest.TestCase):
         parts = self.re.split(r"^## ", self.readme, flags=self.re.M)
         sections = [("(opening)", parts[0])]
         for chunk in parts[1:]:
-            title = chunk.splitlines()[0]
-            if "application" in title.lower() or "inventory" in title.lower():
+            title = chunk.splitlines()[0].lower()
+            # The application level is now carried by sections named after the commands
+            # that write it, plus the rule that orders their use. `editacl`'s own sections
+            # keep `editacl`'s formulations, which is what the clause allows.
+            if ("appaclinventory" in title or "editappacl" in title
+                    or "application" in title or "orders everything" in title):
                 sections.append((title, chunk))
         return sections
 
