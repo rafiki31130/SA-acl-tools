@@ -351,6 +351,19 @@
     <!-- The panel that answers the last third of the audit question: what can be
          retrieved?
 
+         IT SHOWS ONLY LINES THAT COULD HAVE MUTATED THE TARGET, and the filter is the
+         NEGATION of what the refusals panel shows - the same status list, written once on
+         each side and frozen equal by a test. Every line of a run therefore appears in
+         exactly one of the two panels: no hole, no overlap.
+
+         THE FILTER IS NOT A LIST OF SUCCESSES, and that distinction is the whole point.
+         "What mutated" is not "what succeeded": a non-2xx answer CAN have written -
+         measured, a 403 observed with the file created, which is divergence DV-1 of the
+         contract and the reason the rollback macro selects on REVERSIBILITY rather than on
+         success. A filter written as status IN ("updated","created") would hide exactly the
+         most dangerous rows: those that mutated without saying so. An `error` line with an
+         HTTP 403 therefore stays here, where `write_asserted` says its state is unknown.
+
          Paired BY endpoint with earliest() aggregates - THE SAME KEY AND THE SAME
          AGGREGATION AS app_acl_rollback(1). Measured on the neighbouring project:
          values() on a state column returns a multivalue when a target is presented
@@ -364,12 +377,16 @@
     <panel depends="$sid$">
       <title>Stanzas written - before, after, and what a rollback covers</title>
       <html>
-        <p><tt>before</tt> shows the previous value when the write is reversible, and the <b>inherited</b> value it masks when it is not - the two are never mixed. <tt>write_asserted</tt> reads <tt>unknown</tt> when a non-2xx answer leaves the state of the target undetermined: no column here claims that a failure means nothing moved.</p>
+        <p>Only the targets a write was <b>attempted</b> on. What was refused or skipped before any write is in <b>Targets refused or skipped</b> below - every line of the run is in one of the two panels, and in one only.</p>
+        <p><b>This is not a list of successes.</b> A write that answered with an error may still have written - measured - so those rows stay here, where <tt>write_asserted</tt> says the state of the target is <tt>unknown</tt>. No column of this view claims that a failure means nothing moved.</p>
+        <p><tt>before</tt> shows the previous value when the write is reversible, and the <b>inherited</b> value it masks when it is not - the two are never mixed.</p>
       </html>
       <table>
         <search>
           <query>`app_acl_journal_source` | search sid="$sid$"
 | where isnotnull(endpoint) AND endpoint != ""
+| eval no_write_attempted = if(phase=="outcome" AND status IN ("rejected","not_found","forbidden","invalid_role","skipped_ceiling","skipped_impact_ceiling","noop","noop_inherited"), 1, 0)
+| where no_write_attempted == 0
 | stats
     values(app) AS app, values(stanza_kind) AS stanza_kind, values(stanza) AS stanza,
     values(handler) AS handler, values(reversible) AS reversible,
@@ -406,7 +423,7 @@
     <panel depends="$sid$">
       <title>Targets refused or skipped</title>
       <html>
-        <p>Targets on which <b>no write was attempted</b>. A duplicate target appears here in plain sight, as <tt>rejected</tt> with a reason - which is why no column of this view counts distinct endpoints. An empty <tt>endpoint</tt> means the target was refused before it could be resolved.</p>
+        <p>Targets on which <b>no write was attempted</b> - the exact complement of the panel above: every line of the run is in one of the two, and in one only. A duplicate target appears here in plain sight, as <tt>rejected</tt> with a reason, which is why no column of this view counts distinct endpoints. An empty <tt>endpoint</tt> means the target was refused before it could be resolved.</p>
       </html>
       <table>
         <search>

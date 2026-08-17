@@ -511,6 +511,101 @@ class TheSearchesAvoidTheMeasuredTrapsTest(unittest.TestCase):
         self.assertNotIn("phase=\"intent\"", query)
 
 
+class TheTwoTargetPanelsPartitionTheRunTest(unittest.TestCase):
+    """**Every line of a run belongs to exactly one of the two target panels.**
+
+    *Raised by the project lead on the delivered view*: D3, the panel of what was
+    **written**, also carried the `noop_inherited` and `rejected` lines that D4 already
+    presents, and presents better. Two panels showed one population, and the one that must
+    carry the mutations was diluted by the non-mutations.
+
+    **The filter is the negation of D4, not a list of successes**, and that is the whole
+    difficulty. *What mutated* is not *what succeeded*: a non-2xx answer **can** have
+    written - measured, a 403 observed with the file created, which is divergence DV-1 of
+    the contract and the reason `app_acl_rollback` selects on **reversibility** rather
+    than on success. A filter written `status IN ("updated","created")` would hide exactly
+    the rows that matter most: those that mutated without saying so.
+
+    The property frozen here is therefore **the partition**, not a list. A list drifts the
+    day a status is added; a partition fails loudly.
+    """
+
+    #: The statuses on which no write was attempted, read from the panel that publishes
+    #: them - never written a second time in this test.
+    def _statuses_of(self, panel_title, pattern):
+        query = queries()[panel_title]
+        found = re.search(pattern, query)
+        self.assertIsNotNone(found, "the status list of %s cannot be read" % panel_title)
+        return tuple(re.findall(r'"(\w+)"', found.group(1)))
+
+    def refused_by_d4(self):
+        return self._statuses_of("Targets refused or skipped", r"status IN \(([^)]+)\)")
+
+    def excluded_by_d3(self):
+        return self._statuses_of(
+            "Stanzas written - before, after, and what a rollback covers",
+            r"no_write_attempted = if\(phase==\"outcome\" AND status IN \(([^)]+)\)",
+        )
+
+    def test_the_two_panels_name_the_same_population(self):
+        """One list, written on each side, and equal. The day they diverge, a line falls
+        into both panels or into neither, and nobody notices."""
+        self.assertEqual(set(self.excluded_by_d3()), set(self.refused_by_d4()))
+        self.assertTrue(self.refused_by_d4())
+
+    def test_the_panels_do_not_overlap(self):
+        """D3 excludes what D4 selects: no line can be in both."""
+        d3_query = queries()["Stanzas written - before, after, and what a rollback covers"]
+        self.assertIn("no_write_attempted == 0", d3_query)
+        self.assertIn("| where no_write_attempted == 0", d3_query)
+
+    def test_the_two_panels_leave_no_line_behind(self):
+        """The union covers the whole status domain of the core: a status is refused, or
+        it is a write attempt - there is no third place for it to land."""
+        refused = set(self.refused_by_d4())
+        attempted = set(APP_ACL_STATUSES) - refused
+        self.assertEqual(refused | attempted, set(APP_ACL_STATUSES))
+        self.assertEqual(refused & attempted, set())
+        self.assertTrue(attempted, "no status left for the panel of write attempts")
+
+    def test_every_refused_status_is_one_the_core_declares(self):
+        for status in self.refused_by_d4():
+            with self.subTest(status=status):
+                self.assertIn(status, APP_ACL_STATUSES)
+
+    def test_the_statuses_that_can_have_mutated_stay_in_the_write_panel(self):
+        """**The DV-1 clause, frozen.** `error` is not a refusal: an error line can carry
+        an HTTP code that answered non-2xx **after** the platform wrote. Excluding it
+        would remove from the audit precisely the rows whose state is unknown."""
+        refused = set(self.refused_by_d4())
+        for status in ("updated", "created", "error"):
+            with self.subTest(status=status):
+                self.assertNotIn(status, refused)
+
+    def test_the_write_panel_never_filters_on_success(self):
+        """The trap this test exists to forbid: a positive list of successful statuses, or
+        a filter on the HTTP code, would hide the writes that happened despite an error."""
+        query = queries()["Stanzas written - before, after, and what a rollback covers"]
+        self.assertNotRegex(query, r'status IN \("updated"')
+        self.assertNotRegex(query, r'status\s*==\s*"updated"')
+        self.assertNotRegex(query, r"http_code\s*<\s*400")
+        self.assertNotRegex(query, r'write_asserted\s*==\s*"yes"')
+
+    def test_the_write_panel_keeps_publishing_the_undetermined_state(self):
+        """A row that may have written without saying so must remain readable as such."""
+        query = queries()["Stanzas written - before, after, and what a rollback covers"]
+        self.assertIn("write_asserted", query)
+        self.assertIn("http_code", query)
+
+    def test_both_panels_say_they_are_complementary(self):
+        """A reader must not have to deduce the partition from two SPL queries."""
+        for title in ("Stanzas written - before, after, and what a rollback covers",
+                      "Targets refused or skipped"):
+            with self.subTest(panel=title):
+                html = ElementTree.tostring(panels()[title], encoding="unicode").lower()
+                self.assertIn("one of the two", html)
+
+
 class TheCellsStayReadableTest(unittest.TestCase):
     """T15ter - the prose in a cell, unreadable, raised at the rendering audit of the
     neighbouring project. An explanation is read once, beside the table, not once per
@@ -624,8 +719,20 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
             nav = handle.read()
         self.assertIn('<view name="%s" />' % VIEW_NAME, nav)
 
-    def test_the_neighbouring_view_is_untouched(self):
-        """T23. This increment adds a view; it does not edit the other one."""
+    def test_the_neighbouring_view_changes_only_when_somebody_decides_it(self):
+        """T23, and the digest has moved **once**, deliberately.
+
+        The control exists so that the neighbouring view is never edited by ricochet. On
+        2026-08-17 it was edited on purpose: its label read *editacl - run monitor* - the
+        name of a tool, not of a subject - beside *App ACL - write audit*. The pair now
+        reads as one subject at two scales, `Object` and `App`, which is what a list of
+        dashboards shows.
+
+        **The file name and the URL are unchanged, and that is a decision too**: the view
+        has been published since August, the URL may be bookmarked, and the
+        `[views/editacl_runs]` stanza of the metadata refers to it. The label is what the
+        user reads; it is the label that had to be right.
+        """
         import hashlib
 
         path = os.path.join(REPO_ROOT, "default", "data", "ui", "views",
@@ -634,9 +741,29 @@ class TheDeclarationsAgreeWithEachOtherTest(unittest.TestCase):
             digest = hashlib.sha256(handle.read()).hexdigest()
         self.assertEqual(
             digest,
-            "eb84f6dddce76b98558ae0e8d6b776f780fae613ec4694a78328c2dab19d537a",
-            "editacl_runs.xml changed: this increment must not touch it",
+            "af6e97a6e81a9d3235e376c44623fda487bf974dbda4ee6321d87cf83afdf6ce",
+            "editacl_runs.xml changed: this increment must not touch it by ricochet",
         )
+
+    def test_the_two_views_are_named_as_one_pair(self):
+        """A list of dashboards shows labels, not file names: the two must read as one
+        subject at two scales."""
+        neighbour = ElementTree.parse(
+            os.path.join(REPO_ROOT, "default", "data", "ui", "views",
+                         "editacl_runs.xml")).getroot()
+        labels = (neighbour.find("label").text.strip(),
+                  parse_view().find("label").text.strip())
+        self.assertEqual(labels, ("Object ACL - write audit", "App ACL - write audit"))
+        for label in labels:
+            with self.subTest(label=label):
+                self.assertTrue(label.endswith("ACL - write audit"))
+
+    def test_the_file_name_and_the_url_of_the_neighbour_are_untouched(self):
+        """Renaming the label is not renaming the view: the metadata stanza and any
+        bookmark point at the file name."""
+        self.assertTrue(os.path.exists(os.path.join(
+            REPO_ROOT, "default", "data", "ui", "views", "editacl_runs.xml")))
+        self.assertIn("views/editacl_runs", MetadataTest.read_meta())
 
 
 if __name__ == "__main__":                                       # pragma: no cover

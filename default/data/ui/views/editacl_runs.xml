@@ -1,5 +1,5 @@
 <form version="1.1">
-  <label>editacl - run monitor</label>
+  <label>Object ACL - write audit</label>
   <description>Which editacl runs took place, and how the selected one went. Neither an empty view nor a populated one proves that the list below is complete: read the entitlement check first, including the date of the most recent journal line.</description>
 
   <fieldset submitButton="false" autoRun="true">

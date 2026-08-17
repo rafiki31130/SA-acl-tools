@@ -317,7 +317,7 @@ journal file (`editacl_journal_<sid>.log`).
 > range of the calling search must cover the run, whose journal must already be indexed:
 > run over the last fifteen minutes, the macro restores nothing, with no error.
 
-**`editacl - run monitor`** is a Simple XML view, shipped under
+**`Object ACL - write audit`** is a Simple XML view, shipped under
 `default/data/ui/views/editacl_runs.xml` and exported to the system so it opens from any
 app context. It answers two questions: which runs took place, and how did the one you
 select go. Select a run by clicking a row of the *Runs* list, by typing a `sid` into the
@@ -870,7 +870,7 @@ others. The arity is written as Splunk writes it: `(1)` takes one argument.
 
 | View | What it audits |
 |---|---|
-| `editacl_runs` - *editacl - run monitor* | Object-level runs: which took place, and how the selected one went |
+| `editacl_runs` - *Object ACL - write audit* | Object-level runs: which took place, and how the selected one went |
 | `appacl_runs` - *App ACL - write audit* | Application-level runs: what was written, by whom, when - and **what will never be undone** |
 
 **The counts above are the counts of the lists above**, and a test compares both to what
