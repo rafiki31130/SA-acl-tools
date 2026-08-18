@@ -11,4 +11,4 @@ development convenience: it is the only way to exhaustively exercise an irrevers
 operation whose rollback macro is the only safety net.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

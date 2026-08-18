@@ -118,7 +118,7 @@ class AppConfTest(unittest.TestCase):
                 "editacl search command: bulk rewrite of knowledge object ACLs "
                 "through the REST API, with a write-ahead journal and rollback."
             ),
-            "version": "1.0.0",
+            "version": "1.1.0",
         },
         "package": {"id": "SA-acl-tools", "check_for_updates": "false"},
     }
