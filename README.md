@@ -3,18 +3,30 @@
 Splunk application shipping three custom search commands for Splunk permissions: **two
 write** them through the REST API from an SPL pipeline describing the target state, and
 **one only reads**. They work at **two levels**, and the level is what tells the two writers
-apart:
+apart. **Each level also has its own reader** - a command at application level, a **macro**
+at object level:
 
-| Command | Writes? | Level | What it touches |
-|---|---|---|---|
-| `editacl` | **yes** | one object | The ACL of each knowledge object the pipeline enumerates |
-| `appaclinventory` | **no** | one application | Nothing at all. It **reports** the generic stanzas, where their permissions are written, and what a write would do |
-| `editappacl` | **yes** | one application | The generic stanzas `[]` and `[<family>]` of an application, which govern every object that has none of its own |
+| Tool | Kind | Writes? | Level | What it touches |
+|---|---|---|---|---|
+| `acl_inventory` | macro | **no** | one object | Nothing at all. It **enumerates** the knowledge objects family by family, on the field names `editacl` reads |
+| `editacl` | command | **yes** | one object | The ACL of each knowledge object the pipeline enumerates |
+| `appaclinventory` | command | **no** | one application | Nothing at all. It **reports** the generic stanzas, where their permissions are written, and what a write would do |
+| `editappacl` | command | **yes** | one application | The generic stanzas `[]` and `[<family>]` of an application, which govern every object that has none of its own |
 
-Read first, write second: `appaclinventory` is the command you run before either of the
-other two.
+A command is invoked with a **leading pipe**, a macro **between backticks**; why the
+application-level reader had to be a command is answered under
+[Why it is a command, and what it answers](#why-it-is-a-command-and-what-it-answers).
 
-It also ships **eleven macros** and **six saved searches**, named one by one under
+**Read first, write second - with the reader of the level you are about to write.**
+Before `editacl`, that reader is `` `acl_inventory` ``, whose output feeds the command
+with no intermediate transformation. Before `editappacl`, it is `| appaclinventory`.
+Neither substitutes for the other: `appaclinventory` says nothing about the ACL of one
+object, and `acl_inventory` says nothing about a generic stanza. And because the generic
+comes first, `appaclinventory` is also what tells you whether an object-level write is
+the right instrument at all.
+
+It also ships **eleven macros** in all - `acl_inventory` among them - and **six saved
+searches**, named one by one under
 [What is shipped, named one by one](#what-is-shipped-named-one-by-one), plus **two
 audit views** - one per level. Driving use case: decommissioning legacy roles, by
 **substitution** with the roles of a new entitlement structure, or by **deprecation**
@@ -41,6 +53,12 @@ to a file that is not installed alongside them.
 ## Contents
 
 - [The rule that orders everything](#the-rule-that-orders-everything)
+- [Before you use it](#before-you-use-it)
+  - [Seeing what happened, and what an empty view proves](#seeing-what-happened-and-what-an-empty-view-proves)
+  - [Writing at object level](#writing-at-object-level)
+  - [What the tool can and cannot see](#what-the-tool-can-and-cannot-see)
+  - [Ceilings, failures, and what a failure does not prove](#ceilings-failures-and-what-a-failure-does-not-prove)
+  - [Journals, indexes and retention](#journals-indexes-and-retention)
 - [Installation](#installation)
   - [Build the archive from a git reference](#build-the-archive-from-a-git-reference)
   - [The seven steps](#the-seven-steps)
@@ -70,12 +88,6 @@ to a file that is not installed alongside them.
 - [What is shipped, named one by one](#what-is-shipped-named-one-by-one)
     - [Reading the application-level audit view](#reading-the-application-level-audit-view)
 - [Examples](#examples)
-- [Before you use it](#before-you-use-it)
-  - [Seeing what happened, and what an empty view proves](#seeing-what-happened-and-what-an-empty-view-proves)
-  - [Writing at object level](#writing-at-object-level)
-  - [What the tool can and cannot see](#what-the-tool-can-and-cannot-see)
-  - [Ceilings, failures, and what a failure does not prove](#ceilings-failures-and-what-a-failure-does-not-prove)
-  - [Journals, indexes and retention](#journals-indexes-and-retention)
 - [Licence](#licence)
 
 ---
@@ -98,11 +110,147 @@ permissions of its application **for good**. So:
    of the generic.
 4. **`appaclinventory` is the instrument of the decision.** Run it **before** either
    write tool: `acl_objects_with_own_perms` and `acl_reach` say, per application and
-   per family, how much generic governance is still possible.
+   per family, how much generic governance is still possible. That decides **which
+   level** to write at; what you read to prepare the object-level write itself is
+   `` `acl_inventory` ``.
 
 Setting **empty** permissions is not a removal: a stanza with empty permissions leaves
 the object **unreachable**; a removed stanza makes it **inherit again**. Two opposite
 states, not two spellings of one.
+
+---
+
+## Before you use it
+
+Limits that change what you have to do. Each one says what to do about it; where the
+reason is short enough to matter here, it is given.
+
+### Seeing what happened, and what an empty view proves
+
+- **Read access to the journal index is a prerequisite** of the view, of both rollback
+  macros and of the change-journal search. Grant it before the first run.
+- **An account without the `editacl_auditor` role gets a `404` on the view, not a `403`**:
+  a missing role, not a broken deployment. An account holding `admin_all_objects` reads
+  the view anyway, whatever the role.
+- **Redirecting the `editacl` journal index takes TWO overrides**, `local/inputs.conf` to
+  ingest **and** `local/macros.conf` to read. With only the first, the view goes stale and
+  the rollback macros return an empty set reported as a success. **Counting the
+  application-level journal, it is four in all** - two per journal set, one file each,
+  and the two sets are independent.
+- **A run launched with `journal=false` appears in no panel built on the journal**; the
+  *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype.
+  **Both views carry that panel**, each on its own journal.
+- **An empty audit view proves nothing.** Read the entitlement check of the view before
+  concluding that no write took place - and read the index list it publishes beside its
+  verdict.
+### Writing at object level
+
+- **Writing an `eventtype` aligns its derived objects by cascade, and that alignment
+  cannot be rolled back.** Run the divergence search before a campaign; it pairs objects
+  **by application** and misses a carrier shared globally from another one.
+- **The `ntags` family refuses every ACL write**: `skipped_immutable`, no POST, no
+  workaround.
+- **A pipeline that only fills a field on some of its rows empties the attribute on the
+  others.** Keep the current value on the `else` branch, or filter upstream instead.
+### What the tool can and cannot see
+
+- **Without `admin_all_objects` the inventory is silently truncated** of other people's
+  private objects, and splunkd refuses writes on objects you do not own.
+- **`| rest .../admin/directory` sees 60.6 % of the objects** on the reference platform,
+  whatever the capabilities. Build every batch on `acl_inventory`.
+- **The mapping table was established on Splunk Enterprise 9.4.6** - 28 entries, each
+  validated by a real GET. Re-validate it on your platform before any real use.
+- **`dryrun` defaults to `true`**: nothing is written until you pass `dryrun=f`, and only
+  `acl_status` tells a simulation from a real run.
+### Ceilings, failures, and what a failure does not prove
+
+- **`max_objects` defaults to 10 and counts writes, not events**: the rest of the batch
+  comes out `skipped_ceiling`, the output stays complete, and what was already written is
+  **not** rolled back.
+- **A fatal error loses the search output** (`resultCount = 0`) and marks the job failed.
+  The journal stays complete and remains the way to resume and to undo.
+- **An `HTTP 5xx` on persistence does not mean nothing changed**: the disk is intact, the
+  runtime view of splunkd is mutated. Recover with
+  `POST /servicesNS/nobody/<app>/admin/<family>/_reload`, **not** with a rollback.
+- **A green second pass does not prove the rollback set is right.** Verify a rollback by
+  replaying it and comparing field by field, never by observing a `noop` rate.
+- **Private and derived objects are never written**, though the inventory keeps listing
+  them: the abstention bears on writing, not on the view.
+- **Do not `stats ... BY` an `acl_*` column that can be empty** - an empty value emitted
+  by a search command is dropped from the grouping with no message. Label first:
+  `| eval acl_type = if(coalesce(acl_type,"")!="", acl_type, "(type not established)")`.
+  Likewise, `acl_journaled` reports the `intent` line only, so it is `false` on every
+  line of a simulation, which nonetheless journals an `outcome` line.
+### Journals, indexes and retention
+
+- **Journal files are never purged automatically**, and `_internal` freezes at 28 days.
+  Purge by age, once the restore window is closed:
+  `find "$SPLUNK_HOME/var/log/splunk" -name 'editacl_journal_*.log' -mtime +90 -delete`.
+  The journal is only searchable from a search head that forwards its internal logs.
+- **Every write triggers a knowledge object replication** on a search head cluster. Keep
+  batches bounded and run outside peak hours. Moving an object between applications and
+  renaming one are out of scope, knowingly.
+- **Of the monitoring view, only the click has been observed in a browser.** The box and
+  the deep link are held by tests only; if one way in does nothing, use another.
+- **The freshness signal of the view has a blind band of 42 to 48 hours** on the default
+  time range, and it does not diagnose: a quiet period and a stopped journal read alike.
+  Read the date of the most recent line, which no threshold can suppress.
+- **The journal format carries no version marker.** After an upgrade of this app, lines
+  written before and after a format change coexist in the retention window and are all
+  read as current. Wait the window out, or narrow the time range.
+- **The saved searches were renamed when the repository moved to English**: an upgrade
+  creates the new objects and leaves the old ones behind. Clean up
+  `local/savedsearches.conf` yourself.
+
+Limits proper to the application level:
+
+- **Run `appaclinventory` before either write tool.** Every object `editacl` has
+  already written is out of reach of the generic, permanently, and the inventory is the
+  only thing that says how many there are.
+- **`| appaclinventory` is a command, `` | `acl_inventory` `` is a macro.** A command
+  invoked between backticks fails at run time. And a command name **never carries an
+  underscore**: the parser of 9.4.6 truncates it at the first one, so the search would look
+  up a command that does not exist.
+- **Creating a generic stanza cannot be undone**, and `allow_create=false` is what stands
+  in the way. What a rollback will not undo is listed by
+  `` | `app_acl_irreversible(<sid>)` ``, and by nothing else.
+- **`acl_impacted_estimate` is an estimate and never a count.** It is a **lower bound**
+  for an account that cannot see every object; private objects are excluded from it,
+  their metadata living outside the read perimeter; and families the shipped table does
+  not cover cannot be enumerated at all.
+- **`acl_impacted_estimate = 0` is not a `noop`.** The target has no inheriting object
+  today - all frozen, or the family empty here - but the write still changes the default
+  applicable to objects **created later**. Such a target carries
+  `acl_warning="no_inheriting_object"`.
+- **The inventory reads the metadata of the member it runs on.** On a search head
+  cluster that is representative of the cluster only while replication is healthy - and
+  turned round, that is an instrument: run it on each member and compare, and a metadata
+  replication gap becomes visible, which no configuration audit sees, Splunk's change
+  tracking recording `.conf` files and not `.meta` ones. Discriminate on `acl_member`,
+  or on `splunk_server` if that column comes out empty.
+- **Private metadata is neither read nor written.** A residual
+  `etc/users/<user>/<app>/metadata/local.meta` can make one user see rights the inventory
+  knows nothing about, so an application may be reported governable while somebody sees
+  something else. Detecting those residues is out of scope.
+- **Writing a generic stanza changes nothing for an already frozen object**, and that is
+  the whole point of consulting `acl_objects_with_own_perms` first.
+- **Run one `editappacl` at a time on a given application.** Nothing enforces it: the
+  duplicate refusal is within a single run, and two concurrent runs can each report a
+  creation while one of them modified an existing value - whose prior state is then
+  restorable by nothing.
+- **`acl_handler` addresses any handler, including families the shipped table ignores.**
+  The door is deliberate; what you take on is a handler no measurement covered, with no
+  guarantee that the write succeeds nor that the stanza name is the one you expect.
+- **`max_stanzas` and `max_impacted_objects` default to 5 and 200, which are choices and
+  not measurements.** The real magnitude of a generic write has not been quantified.
+- **The family table was established on Splunk Enterprise 9.4.6**, 19 families each
+  validated by a real write, out of 31 handlers swept. Nothing establishes the behaviour
+  of the other handlers, nor of families brought in by third-party apps. Re-validate
+  before any real use.
+- **Verifying a campaign compares the `.meta` files themselves** - a fingerprint, or a
+  reading through the API - and never Splunk's configuration change tracking, which does
+  not see metadata files at all. Three successive audits of the previous project declared
+  a lab back to its baseline while 1 224 stanzas were mutated.
 
 ---
 
@@ -970,144 +1118,6 @@ already written come out `noop` through idempotence, so there is no double write
 | editacl dryrun=f                          <-- 10 updated, 30 skipped_ceiling
 | editacl dryrun=f max_objects=100          <-- 10 noop,    30 updated
 ```
-
----
-
----
-
-## Before you use it
-
-Limits that change what you have to do. Each one says what to do about it; where the
-reason is short enough to matter here, it is given.
-
-### Seeing what happened, and what an empty view proves
-
-- **Read access to the journal index is a prerequisite** of the view, of both rollback
-  macros and of the change-journal search. Grant it before the first run.
-- **An account without the `editacl_auditor` role gets a `404` on the view, not a `403`**:
-  a missing role, not a broken deployment. An account holding `admin_all_objects` reads
-  the view anyway, whatever the role.
-- **Redirecting the `editacl` journal index takes TWO overrides**, `local/inputs.conf` to
-  ingest **and** `local/macros.conf` to read. With only the first, the view goes stale and
-  the rollback macros return an empty set reported as a success. **Counting the
-  application-level journal, it is four in all** - two per journal set, one file each,
-  and the two sets are independent.
-- **A run launched with `journal=false` appears in no panel built on the journal**; the
-  *Runs started with no journal line* panel surfaces it from the diagnostic sourcetype.
-  **Both views carry that panel**, each on its own journal.
-- **An empty audit view proves nothing.** Read the entitlement check of the view before
-  concluding that no write took place - and read the index list it publishes beside its
-  verdict.
-### Writing at object level
-
-- **Writing an `eventtype` aligns its derived objects by cascade, and that alignment
-  cannot be rolled back.** Run the divergence search before a campaign; it pairs objects
-  **by application** and misses a carrier shared globally from another one.
-- **The `ntags` family refuses every ACL write**: `skipped_immutable`, no POST, no
-  workaround.
-- **A pipeline that only fills a field on some of its rows empties the attribute on the
-  others.** Keep the current value on the `else` branch, or filter upstream instead.
-### What the tool can and cannot see
-
-- **Without `admin_all_objects` the inventory is silently truncated** of other people's
-  private objects, and splunkd refuses writes on objects you do not own.
-- **`| rest .../admin/directory` sees 60.6 % of the objects** on the reference platform,
-  whatever the capabilities. Build every batch on `acl_inventory`.
-- **The mapping table was established on Splunk Enterprise 9.4.6** - 28 entries, each
-  validated by a real GET. Re-validate it on your platform before any real use.
-- **`dryrun` defaults to `true`**: nothing is written until you pass `dryrun=f`, and only
-  `acl_status` tells a simulation from a real run.
-### Ceilings, failures, and what a failure does not prove
-
-- **`max_objects` defaults to 10 and counts writes, not events**: the rest of the batch
-  comes out `skipped_ceiling`, the output stays complete, and what was already written is
-  **not** rolled back.
-- **A fatal error loses the search output** (`resultCount = 0`) and marks the job failed.
-  The journal stays complete and remains the way to resume and to undo.
-- **An `HTTP 5xx` on persistence does not mean nothing changed**: the disk is intact, the
-  runtime view of splunkd is mutated. Recover with
-  `POST /servicesNS/nobody/<app>/admin/<family>/_reload`, **not** with a rollback.
-- **A green second pass does not prove the rollback set is right.** Verify a rollback by
-  replaying it and comparing field by field, never by observing a `noop` rate.
-- **Private and derived objects are never written**, though the inventory keeps listing
-  them: the abstention bears on writing, not on the view.
-- **Do not `stats ... BY` an `acl_*` column that can be empty** - an empty value emitted
-  by a search command is dropped from the grouping with no message. Label first:
-  `| eval acl_type = if(coalesce(acl_type,"")!="", acl_type, "(type not established)")`.
-  Likewise, `acl_journaled` reports the `intent` line only, so it is `false` on every
-  line of a simulation, which nonetheless journals an `outcome` line.
-### Journals, indexes and retention
-
-- **Journal files are never purged automatically**, and `_internal` freezes at 28 days.
-  Purge by age, once the restore window is closed:
-  `find "$SPLUNK_HOME/var/log/splunk" -name 'editacl_journal_*.log' -mtime +90 -delete`.
-  The journal is only searchable from a search head that forwards its internal logs.
-- **Every write triggers a knowledge object replication** on a search head cluster. Keep
-  batches bounded and run outside peak hours. Moving an object between applications and
-  renaming one are out of scope, knowingly.
-- **Of the monitoring view, only the click has been observed in a browser.** The box and
-  the deep link are held by tests only; if one way in does nothing, use another.
-- **The freshness signal of the view has a blind band of 42 to 48 hours** on the default
-  time range, and it does not diagnose: a quiet period and a stopped journal read alike.
-  Read the date of the most recent line, which no threshold can suppress.
-- **The journal format carries no version marker.** After an upgrade of this app, lines
-  written before and after a format change coexist in the retention window and are all
-  read as current. Wait the window out, or narrow the time range.
-- **The saved searches were renamed when the repository moved to English**: an upgrade
-  creates the new objects and leaves the old ones behind. Clean up
-  `local/savedsearches.conf` yourself.
-
-Limits proper to the application level:
-
-- **Run `appaclinventory` before either write tool.** Every object `editacl` has
-  already written is out of reach of the generic, permanently, and the inventory is the
-  only thing that says how many there are.
-- **`| appaclinventory` is a command, `` | `acl_inventory` `` is a macro.** A command
-  invoked between backticks fails at run time. And a command name **never carries an
-  underscore**: the parser of 9.4.6 truncates it at the first one, so the search would look
-  up a command that does not exist.
-- **Creating a generic stanza cannot be undone**, and `allow_create=false` is what stands
-  in the way. What a rollback will not undo is listed by
-  `` | `app_acl_irreversible(<sid>)` ``, and by nothing else.
-- **`acl_impacted_estimate` is an estimate and never a count.** It is a **lower bound**
-  for an account that cannot see every object; private objects are excluded from it,
-  their metadata living outside the read perimeter; and families the shipped table does
-  not cover cannot be enumerated at all.
-- **`acl_impacted_estimate = 0` is not a `noop`.** The target has no inheriting object
-  today - all frozen, or the family empty here - but the write still changes the default
-  applicable to objects **created later**. Such a target carries
-  `acl_warning="no_inheriting_object"`.
-- **The inventory reads the metadata of the member it runs on.** On a search head
-  cluster that is representative of the cluster only while replication is healthy - and
-  turned round, that is an instrument: run it on each member and compare, and a metadata
-  replication gap becomes visible, which no configuration audit sees, Splunk's change
-  tracking recording `.conf` files and not `.meta` ones. Discriminate on `acl_member`,
-  or on `splunk_server` if that column comes out empty.
-- **Private metadata is neither read nor written.** A residual
-  `etc/users/<user>/<app>/metadata/local.meta` can make one user see rights the inventory
-  knows nothing about, so an application may be reported governable while somebody sees
-  something else. Detecting those residues is out of scope.
-- **Writing a generic stanza changes nothing for an already frozen object**, and that is
-  the whole point of consulting `acl_objects_with_own_perms` first.
-- **Run one `editappacl` at a time on a given application.** Nothing enforces it: the
-  duplicate refusal is within a single run, and two concurrent runs can each report a
-  creation while one of them modified an existing value - whose prior state is then
-  restorable by nothing.
-- **`acl_handler` addresses any handler, including families the shipped table ignores.**
-  The door is deliberate; what you take on is a handler no measurement covered, with no
-  guarantee that the write succeeds nor that the stanza name is the one you expect.
-- **`max_stanzas` and `max_impacted_objects` default to 5 and 200, which are choices and
-  not measurements.** The real magnitude of a generic write has not been quantified.
-- **The family table was established on Splunk Enterprise 9.4.6**, 19 families each
-  validated by a real write, out of 31 handlers swept. Nothing establishes the behaviour
-  of the other handlers, nor of families brought in by third-party apps. Re-validate
-  before any real use.
-- **Verifying a campaign compares the `.meta` files themselves** - a fingerprint, or a
-  reading through the API - and never Splunk's configuration change tracking, which does
-  not see metadata files at all. Three successive audits of the previous project declared
-  a lab back to its baseline while 1 224 stanzas were mutated.
-
----
 
 ---
 
